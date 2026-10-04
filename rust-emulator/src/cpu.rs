@@ -55,7 +55,7 @@ mod lock_tests {
     }
 
     #[test]
-    fn software_interrupt_masks_and_acknowledgements_are_per_core() {
+    fn software_interrupt_latches_are_shared_and_masks_are_per_core() {
         use crate::devices::IRQ_CONFIG;
         let mut c = Cpu::new(Bus::new(vec![0; 32]).unwrap(), crate::XIP);
         c.bus
@@ -67,6 +67,31 @@ mod lock_tests {
         assert_eq!(c.bus.read(0x1eef38c, 4).unwrap(), 0x80000000);
         c.bus.write(0x1eef3a4, 128, 4).unwrap();
         assert_eq!(c.bus.pending_irq_for(0x100, 1), None);
+        c.bus.write(0x1eef1a0, 128, 4).unwrap();
+        assert_eq!(c.bus.pending_irq_for(0x100, 1), Some(127));
+        assert_eq!(c.bus.read(0x1eef18c, 4).unwrap(), 0);
+        c.bus.write(IRQ_CONFIG + 15 * 4, 3 << 28, 4).unwrap();
+        assert_eq!(c.bus.read(0x1eef18c, 4).unwrap(), 0x80000000);
+        c.bus.write(0x1eef3a4, 128, 4).unwrap();
+        assert_eq!(c.bus.pending_irq_for(0x100, 0), None);
+    }
+
+    #[test]
+    fn paused_secondary_retains_context_until_resume() {
+        let mut c = Cpu::new(Bus::new(vec![0; 32]).unwrap(), crate::XIP);
+        let entry = crate::RAM + 512;
+        c.bus.write(0x01c7fff8, entry, 4).unwrap();
+        c.bus.write(0x1eee004, 8, 4).unwrap();
+        c.step().unwrap();
+        let paused_pc = c.secondary.as_ref().unwrap().pc;
+        c.bus.write(0x1eee004, 12, 4).unwrap();
+        assert_eq!(c.bus.read(0x1eee004, 4).unwrap() & 0x1c, 16);
+        c.step().unwrap();
+        c.step().unwrap();
+        assert_eq!(c.secondary.as_ref().unwrap().pc, paused_pc);
+        c.bus.write(0x1eee004, 24, 4).unwrap();
+        c.step().unwrap();
+        assert_eq!(c.secondary.as_ref().unwrap().pc, paused_pc + 2);
     }
 }
 
@@ -209,11 +234,15 @@ impl Cpu {
                 .map_err(|fault| Fault::Access { pc: self.pc, fault })?;
             self.secondary = Some(Core::reset(entry));
         }
-        if self.secondary.as_ref().is_some_and(|core| core.bus_locked) {
+        let secondary_running = control & 0x18 == 8 && self.secondary.is_some();
+        if secondary_running
+            && (self.read(0x1eee000, 4)? & 16 != 0
+                || self.secondary.as_ref().is_some_and(|core| core.bus_locked))
+        {
             return self.step_secondary();
         }
         let op = self.step_core()?;
-        if !self.bus_locked && self.secondary.is_some() {
+        if !self.bus_locked && secondary_running {
             self.step_secondary()?;
         }
         Ok(op)

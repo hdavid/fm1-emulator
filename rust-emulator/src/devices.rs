@@ -130,7 +130,7 @@ pub struct Devices {
     startup_timers: [Timer; 4],
     tick_secondary: TickTimer,
     irq_config: [[u32; 32]; 2],
-    software: [u8; 2],
+    software: u8,
 }
 
 impl Devices {
@@ -175,7 +175,7 @@ impl Devices {
                     (if self.timer5.pending { 1 << 31 } else { 0 })
                         | if self.timer4.pending { 1 << 30 } else { 0 }
                 }
-                3 => (self.software[core] as u32) << 24,
+                3 => (self.software as u32 & self.software_enabled(core)) << 24,
                 _ => 0,
             })
         } else {
@@ -218,9 +218,9 @@ impl Devices {
                 return Some(Err("invalid software interrupt mask"));
             }
             if a & 4 == 0 {
-                self.software[core] |= value as u8;
+                self.software |= value as u8;
             } else {
-                self.software[core] &= !(value as u8);
+                self.software &= !(value as u8);
             }
             Some(Ok(()))
         } else if (IRQ_PENDING..IRQ_PENDING + 16).contains(&a) {
@@ -240,6 +240,10 @@ impl Devices {
         self.timer5.advance(ticks);
         self.tick.advance(ticks);
         self.tick_secondary.advance(ticks);
+    }
+    fn software_enabled(&self, core: usize) -> u32 {
+        let config = self.irq_config[core][15];
+        (0..8).fold(0, |mask, bit| mask | (((config >> (bit * 4)) & 1) << bit))
     }
     pub fn pending_irq(&self, icfg: u32) -> Option<usize> {
         self.pending_irq_for(icfg, 0)
@@ -262,7 +266,7 @@ impl Devices {
                 .enumerate()
                 .map(|(i, timer)| (4 + i, timer.pending)),
         )
-        .chain((0..8).map(|bit| (120 + bit, self.software[core] & (1 << bit) != 0)))
+        .chain((0..8).map(|bit| (120 + bit, self.software & (1 << bit) != 0)))
         .filter(|(source, pending)| {
             *pending && self.irq_priority_for(*source, icfg, core).is_some()
         })

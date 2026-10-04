@@ -51,7 +51,16 @@ impl Cache {
     }
     pub fn write(&mut self, a: u32, n: usize, v: u32) -> Option<()> {
         if n == 4 && matches!(a, 0x1eee000 | 0x1eee004) {
-            self.cores[((a - 0x1eee000) / 4) as usize] = v;
+            let core = &mut self.cores[((a - 0x1eee000) / 4) as usize];
+            // Stock flash exclusion: pause request bit 2, stopped status bit 4,
+            // and resume command bit 3. Commands complete at a bundle boundary.
+            *core = if v & 4 != 0 {
+                (v & !0x1c) | 16
+            } else if v & 8 != 0 {
+                v & !0x14
+            } else {
+                v
+            };
             return Some(());
         }
         if n == 4 && matches!(a, 0x40400 | 0x40500 | 0x40438) && v == 0 {
