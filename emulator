@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 set -eu
 if [ "$#" -ne 1 ]; then
-    echo 'usage: ./emulator <application.elf|application.bin>' >&2
+    echo 'usage: ./emulator <firmware.fwsc|application.elf|application.bin>' >&2
     echo 'example: ./emulator build/display/firmware.elf' >&2
     exit 2
 fi

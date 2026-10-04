@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-use fm1_emu::{bus::Bus, cpu::Cpu, firmware::Firmware, NAMES};
+use fm1_emu::{cpu::Cpu, firmware::Firmware, NAMES};
 use std::{env, fs::File, io::Write, path::Path, process::ExitCode};
 
 fn number(value: &str) -> Result<u32, String> {
@@ -81,7 +81,7 @@ fn main_run() -> Result<(), String> {
         firmware.entry
     };
     let image_bytes = firmware.image.len();
-    let mut cpu = Cpu::new(Bus::new(firmware.image)?, entry);
+    let mut cpu = Cpu::new(firmware.bus()?, entry);
     for (column, row) in keys {
         cpu.bus.devices.gpio.press(column, row, true)?;
     }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Bounded boot diagnostics using the same CPU/bus as the graphical emulator.
-use fm1_emu::{bus::Bus, cpu::Cpu, firmware::Firmware};
+use fm1_emu::{cpu::Cpu, firmware::Firmware};
 use std::{
     collections::{BTreeMap, VecDeque},
     env,
@@ -23,7 +23,7 @@ fn location(symbols: &BTreeMap<String, u32>, pc: u32) -> String {
 fn run() -> Result<(), String> {
     let args: Vec<_> = env::args().skip(1).collect();
     if !(1..=2).contains(&args.len()) {
-        return Err("usage: diagnose APPLICATION.{elf,bin} [INSTRUCTION_LIMIT]".into());
+        return Err("usage: diagnose FIRMWARE.{fwsc,elf,bin} [INSTRUCTION_LIMIT]".into());
     }
     let limit: u64 = args
         .get(1)
@@ -32,7 +32,7 @@ fn run() -> Result<(), String> {
         .map_err(|_| "invalid instruction limit")?
         .unwrap_or(10_000_000);
     let firmware = Firmware::load(Path::new(&args[0]))?;
-    let mut cpu = Cpu::new(Bus::new(firmware.image)?, firmware.entry);
+    let mut cpu = Cpu::new(firmware.bus()?, firmware.entry);
     cpu.r[0] = 0x01c7_fe08;
     let mut recent = VecDeque::new();
     let mut serial_bytes = 0u64;

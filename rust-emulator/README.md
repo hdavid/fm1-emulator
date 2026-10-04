@@ -24,6 +24,7 @@ From the project root:
 
 ```sh
 ./emulator build/display/firmware.elf
+./emulator "$HOME/Downloads/FM-1.fwsc"
 mise run build-display       # optional: rebuild guest with the vendor compiler
 mise run rust-gui-test       # core and GUI input integration tests
 ```
@@ -80,11 +81,17 @@ Full Felucca boots into its UI and renders note samples through ALNK DMA.
 Additional engines, CPU forms and peripheral behavior remain incomplete;
 host audio playback is absent. See [the measured full-firmware checks](FELUCCA.md).
 
-The loader accepts an application `.bin` mapped at `0x02000120`, or an executable
-ELF32-pi32v2. ELF flash load addresses reconstruct the exact application `.bin`,
+The loader accepts an FM-1 `.fwsc` package, an application `.bin` mapped at
+`0x02000120`, or an executable ELF32-pi32v2. Package loading checks the outer
+header/table, complete `flash.bin`, its flash directory, chip key and decrypted
+application CRCs. It retains the original flash bytes and supplies the SDK's
+SPL boot-device parameter block; encrypted SFC reads include the package's
+directory and embedded configuration. Separate outer auxiliary payloads and
+the update process are not emulated. ELF flash load addresses reconstruct the exact application `.bin`,
 including the initializers for RAM code and data. Startup performs the RAM
-copies; the loader does not move them early. Packed `.fwsc` updates are not yet
-accepted.
+copies; the loader does not move them early. Package support does not imply
+that every stock CPU or peripheral path is implemented; see the
+[stock firmware boot trials](STOCK-FIRMWARE.md).
 
 `rust-probe` calls the embedded probe directly from the unchanged full
 `build/fm1-diag.elf`. Its twelve results match the saved physical FM-1 capture.

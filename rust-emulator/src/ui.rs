@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Rect, Sense, Stroke, StrokeKind};
-use fm1_emu::{bus::Bus, cpu::Cpu, firmware::Firmware};
+#[cfg(test)]
+use fm1_emu::bus::Bus;
+use fm1_emu::{cpu::Cpu, firmware::Firmware};
 use std::{
     io::{self, Write},
     path::PathBuf,
@@ -65,7 +67,7 @@ impl Emulator {
         self.paused = false;
         self.texture = None;
         match Firmware::load(&self.path).and_then(|firmware| {
-            let mut cpu = Cpu::new(Bus::new(firmware.image)?, firmware.entry);
+            let mut cpu = Cpu::new(firmware.bus()?, firmware.entry);
             cpu.r[0] = 0x01c7fe08;
             Ok(cpu)
         }) {

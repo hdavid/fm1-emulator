@@ -6,6 +6,7 @@ pub struct Firmware {
     pub image: Vec<u8>,
     pub entry: u32,
     pub symbols: BTreeMap<String, u32>,
+    package: Option<crate::package::Package>,
 }
 
 fn bytes(data: &[u8], offset: usize, length: usize) -> Result<&[u8], String> {
@@ -31,9 +32,11 @@ impl Firmware {
             .extension()
             .is_some_and(|extension| extension == "fwsc")
         {
-            return Err(
-                ".fwsc is a packed update container; load its application .bin or .elf".into(),
-            );
+            let raw = fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+            let (package, image) = crate::package::Package::decode(&raw)?;
+            let mut firmware = Self::from_raw(image)?;
+            firmware.package = Some(package);
+            return Ok(firmware);
         }
         let data = fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
         if data.starts_with(b"\x7fELF") {
@@ -53,6 +56,7 @@ impl Firmware {
             image,
             entry: XIP,
             symbols: BTreeMap::new(),
+            package: None,
         })
     }
 
@@ -171,6 +175,15 @@ impl Firmware {
             image,
             entry,
             symbols,
+            package: None,
         })
+    }
+
+    pub fn bus(&self) -> Result<crate::bus::Bus, String> {
+        let mut bus = crate::bus::Bus::new(self.image.clone())?;
+        if let Some(package) = &self.package {
+            package.initialize(&mut bus)?;
+        }
+        Ok(bus)
     }
 }

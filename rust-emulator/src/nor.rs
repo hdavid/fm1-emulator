@@ -7,6 +7,7 @@ pub struct Nor {
     selected: bool,
     pub bytes: Vec<u8>,
     cursor: usize,
+    decoded: Option<Vec<u8>>,
 }
 
 impl Default for Nor {
@@ -17,11 +18,21 @@ impl Default for Nor {
             selected: false,
             bytes: vec![255; 1024 * 1024],
             cursor: 0,
+            decoded: None,
         }
     }
 }
 
 impl Nor {
+    pub fn load(&mut self, bytes: &[u8], key: u16) {
+        self.bytes[..bytes.len()].copy_from_slice(bytes);
+        let mut decoded = self.bytes[0x4000..].to_vec();
+        crate::package::sfc(&mut decoded, key);
+        self.decoded = Some(decoded);
+    }
+    pub fn packaged(&self) -> bool {
+        self.decoded.is_some()
+    }
     pub fn xip_active(&self) -> bool {
         self.read(0x40200).unwrap() & 1 != 0 && self.read(0x5101c).unwrap() & 32 != 0
     }
@@ -41,9 +52,17 @@ impl Nor {
                 && address >= self.read(0x4030c).unwrap()
                 && address.checked_add(size as u32 - 1)? <= self.read(0x40308).unwrap());
         if !plain {
-            return Some(Err(
-                "encrypted XIP outside the supplied application is not available",
-            ));
+            if let Some(decoded) = &self.decoded {
+                let bytes = &decoded[offset - 0x4000..offset - 0x4000 + size];
+                return Some(Ok(bytes
+                    .iter()
+                    .enumerate()
+                    .fold(0, |value, (i, byte)| value | ((*byte as u32) << (i * 8)))));
+            } else {
+                return Some(Err(
+                    "encrypted XIP outside the supplied application is not available",
+                ));
+            }
         }
         Some(Ok(bytes.iter().enumerate().fold(0, |value, (i, byte)| {
             value | ((*byte as u32) << (i * 8))

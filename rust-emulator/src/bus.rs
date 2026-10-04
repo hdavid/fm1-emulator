@@ -35,6 +35,9 @@ pub struct Bus {
 }
 
 impl Bus {
+    pub(crate) fn load_flash(&mut self, bytes: &[u8], key: u16) {
+        self.nor.load(bytes, key);
+    }
     pub fn new(flash: Vec<u8>) -> Result<Self, String> {
         if flash.is_empty() || flash.len() > (XIP_END - XIP) as usize {
             return Err("application image is empty or exceeds the XIP window".into());
@@ -101,6 +104,13 @@ impl Bus {
                     operation,
                     "application XIP is disabled",
                 ));
+            }
+            if self.nor.packaged() {
+                return self
+                    .nor
+                    .xip(address, size)
+                    .unwrap()
+                    .map_err(|reason| Self::fault(address, size, operation, reason));
             }
             &self.flash[offset..offset + size]
         } else if let Some(offset) = Self::offset(address, size, RAM, self.ram.len()) {
