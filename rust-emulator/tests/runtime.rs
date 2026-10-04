@@ -322,6 +322,45 @@ fn packed_memory_and_preserves_the_high_cache_way_bits() {
 }
 
 #[test]
+fn carry_arithmetic_matches_seven_physical_fm1_measurements() {
+    // FM-1_984 USB capture: result, PSR (V/C/Z/N), then add-with-carry or
+    // subtract-with-not-carry. Each row was executed on the connected device.
+    for (subtract, left, right, result, psr, chained) in [
+        (false, u32::MAX, 1, 0, 6, 1),
+        (false, 0, 0, 0, 4, 0),
+        (false, 0x7fffffff, 1, 0x80000000, 9, 0x80000000),
+        (true, 0, 1, u32::MAX, 8, 0xfffffffe),
+        (true, 1, 0, 1, 2, 1),
+        (true, 0, 0, 0, 6, 0),
+        (true, 0x80000000, 1, 0x7fffffff, 3, 0x7fffffff),
+    ] {
+        let mut c = cpu(&[
+            0xe0b4,
+            0x3210 | if subtract { 2 } else { 0 },
+            0xe0b8,
+            0x5210 | if subtract { 2 } else { 0 },
+        ]);
+        c.r[1] = left;
+        c.r[2] = right;
+        c.sr[5] = 0x1000;
+        c.step().unwrap();
+        assert_eq!(c.r[3], result);
+        assert_eq!(c.sr[5], psr | 0x1000);
+        c.step().unwrap();
+        assert_eq!(c.r[5], chained);
+    }
+    // Stock's two-word subtraction and addition carry across the low word.
+    let mut c = cpu(&[0x1f84, 0xe0b8, 0x5712]); // r4=r0-r6; r5=r1-r7-!c
+    c.r[0] = 0;
+    c.r[1] = 1;
+    c.r[6] = 1;
+    c.r[7] = 0;
+    c.step().unwrap();
+    c.step().unwrap();
+    assert_eq!((c.r[5] as u64) << 32 | c.r[4] as u64, u32::MAX as u64);
+}
+
+#[test]
 fn stock_wide_arithmetic_preserves_high_words_and_overlapping_operands() {
     // Vendor stock clock arithmetic, with aliased inputs/outputs and values
     // requiring both words. The destination's low bit selects signed multiply.

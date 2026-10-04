@@ -189,6 +189,31 @@ impl Core {
 }
 
 impl Cpu {
+    pub(crate) fn arithmetic(&mut self, left: u32, right: u32, subtract: bool, extra: u32) -> u32 {
+        let (wide, signed_result, carry) = if subtract {
+            let amount = right as u64 + extra as u64;
+            (
+                (left as u64).wrapping_sub(amount),
+                left as i32 as i64 - right as i32 as i64 - extra as i64,
+                left as u64 >= amount,
+            )
+        } else {
+            let wide = left as u64 + right as u64 + extra as u64;
+            (
+                wide,
+                left as i32 as i64 + right as i32 as i64 + extra as i64,
+                wide > u32::MAX as u64,
+            )
+        };
+        let result = wide as u32;
+        let overflow = !(i32::MIN as i64..=i32::MAX as i64).contains(&signed_result);
+        self.sr[5] = (self.sr[5] & !15)
+            | overflow as u32
+            | ((carry as u32) << 1)
+            | (((result == 0) as u32) << 2)
+            | ((result >> 31) << 3);
+        result
+    }
     pub fn new(bus: Bus, entry: u32) -> Self {
         Self {
             bus,
@@ -500,22 +525,22 @@ impl Cpu {
         } else if matches!(h & 0xfe00, 0x1c00 | 0x1e00) {
             let c = (((h >> 7) & 3) * 2 + ((h >> 3) & 1)) as usize;
             if h & 0xfe00 == 0x1e00 {
-                self.r[a] = self.r[b].wrapping_sub(self.r[c]);
+                self.r[a] = self.arithmetic(self.r[b], self.r[c], true, 0);
                 op = "sub";
             } else {
-                self.r[a] = self.r[b].wrapping_add(self.r[c]);
+                self.r[a] = self.arithmetic(self.r[b], self.r[c], false, 0);
                 op = "add";
             }
         } else if h & 0xe0c0 == 0x20c0 {
             let imm = signed((((h >> 3) & 7) << 5) | ((h >> 8) & 31), 8);
-            self.r[a] = self.r[a].wrapping_add(imm as u32);
+            self.r[a] = self.arithmetic(self.r[a], imm as u32, false, 0);
             op = "add_imm8";
         } else if h & 0xe01f == 0x8002 {
             let imm = (signed((h >> 5) & 7, 3) << 7) | (((h >> 8) & 31) << 2) as i32;
             self.sr[14] = self.sr[14].wrapping_add(imm as u32);
             op = "add_sp";
         } else if h & 0xe088 == 0x8008 {
-            self.r[a] = self.r[b].wrapping_add((h >> 8) & 31);
+            self.r[a] = self.arithmetic(self.r[b], (h >> 8) & 31, false, 0);
             op = "add_small";
         } else if matches!(h & 0xff88, 0x1900 | 0x1908 | 0x1980 | 0x1988) {
             match h & 0xff88 {

@@ -39,7 +39,7 @@ pub(crate) fn execute(
         op = "clear_pair";
     } else if h & 0xff00 == 0x1800 {
         let n = (h & 15) as usize;
-        cpu.r[n] = cpu.r[n].wrapping_add(cpu.r[((h >> 4) & 15) as usize]);
+        cpu.r[n] = cpu.arithmetic(cpu.r[n], cpu.r[((h >> 4) & 15) as usize], false, 0);
         op = "add_register";
     } else if h & 0xfff8 == 0x14c0 {
         cpu.r[8 + a] = 0;
@@ -245,10 +245,10 @@ pub(crate) fn execute(
             cpu.r[d] = cpu.r[c].swap_bytes();
             op = "reverse_bytes";
         } else if h & 0xfff0 == 0xe0f0 {
-            cpu.r[n] = cpu.r[d].wrapping_sub(packed(x));
+            cpu.r[n] = cpu.arithmetic(cpu.r[d], packed(x), true, 0);
             op = "subtract_packed_immediate";
         } else if h & 0xfff0 == 0xe0a0 {
-            cpu.r[n] = packed(x).wrapping_sub(cpu.r[d]);
+            cpu.r[n] = cpu.arithmetic(packed(x), cpu.r[d], true, 0);
             op = "reverse_subtract";
         } else if h == 0xe1f0 && x & 15 == 0 {
             cpu.r[d] = cpu.r[s].wrapping_mul(cpu.r[c]);
@@ -356,16 +356,26 @@ pub(crate) fn execute(
                 },
             )?;
             op = "memory_bit";
-        } else if h == 0xe0b4 && matches!(x & 15, 0 | 2) {
-            cpu.r[d] = if x & 2 == 0 {
-                cpu.r[s].wrapping_add(cpu.r[c])
+        } else if matches!(h, 0xe0b4 | 0xe0b8) && matches!(x & 15, 0 | 2) {
+            let subtract = x & 2 != 0;
+            let extra = if h == 0xe0b8 {
+                ((cpu.sr[5] >> 1) & 1) ^ subtract as u32
             } else {
-                cpu.r[s].wrapping_sub(cpu.r[c])
+                0
             };
+            cpu.r[d] = cpu.arithmetic(cpu.r[s], cpu.r[c], subtract, extra);
             op = if x & 2 == 0 {
-                "add_extended"
+                if h == 0xe0b8 {
+                    "add_carry"
+                } else {
+                    "add_extended"
+                }
             } else {
-                "subtract_extended"
+                if h == 0xe0b8 {
+                    "subtract_carry"
+                } else {
+                    "subtract_extended"
+                }
             };
         } else if h == 0xe1c8 {
             let shift = cpu.r[c];
@@ -618,7 +628,7 @@ pub(crate) fn execute(
                 3 => (x & 4095) | 0xfffff000,
                 _ => packed(x),
             };
-            cpu.r[n] = cpu.r[d].wrapping_add(value);
+            cpu.r[n] = cpu.arithmetic(cpu.r[d], value, false, 0);
             op = "add_immediate";
         } else if h == 0xe8f8 {
             cpu.r[d] = cpu.sr[14].wrapping_add(x & 4095);
