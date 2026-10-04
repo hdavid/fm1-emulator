@@ -80,6 +80,16 @@ fn register_list_stores_linked_list_fields_without_advancing_the_base() {
 }
 
 #[test]
+fn flash_identification_shifts_the_jedec_word_in_memory() {
+    let mut c = cpu(&[0xe86c, 0x581e]); // [r5+28] >>= 8
+    c.r[5] = RAM;
+    c.bus.write(RAM + 28, 0x85601400, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 28, 4).unwrap(), 0x00856014);
+    assert_eq!(c.r[5], RAM);
+}
+
+#[test]
 fn stock_startup_long_calls_return_after_six_bytes() {
     // Vendor disassembly: call 176, and nested call -10 to an rts.
     let mut c = cpu(&[0xff80, 0x00b0, 0x0000]);
