@@ -323,6 +323,24 @@ fn packed_memory_and_preserves_the_high_cache_way_bits() {
 }
 
 #[test]
+fn wireless_configuration_preserves_writes_and_rejects_missing_operations() {
+    let mut c = cpu(&[0]);
+    for address in [
+        0x14000, 0x1401c, 0x14028, 0x14034, 0x14040, 0x14064, 0x30f00, 0x30f04,
+    ] {
+        c.bus.write(address, 0x87654321, 4).unwrap();
+        assert_eq!(c.bus.read(address, 4).unwrap(), 0x87654321);
+        assert!(c.bus.read(address, 2).is_err());
+    }
+    for address in [0x14038, 0x1403c, 0x14068, 0x30f08] {
+        assert!(c.bus.read(address, 4).is_err());
+    }
+    assert!(c.bus.write(0x14024, 1, 4).is_err());
+    c.bus.write(0x14020, 0, 4).unwrap();
+    assert!(c.bus.write(0x14020, 1, 4).is_err());
+}
+
+#[test]
 fn random_generator_exposes_changing_paired_read_only_words() {
     let mut c = cpu(&[0]);
     let mut replay = cpu(&[0]);

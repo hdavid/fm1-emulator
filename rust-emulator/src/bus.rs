@@ -35,6 +35,7 @@ pub struct Bus {
     cache: crate::cache::Cache,
     crc: crate::crc::Crc,
     clock: crate::clock::Clock,
+    wireless: crate::wireless::Wireless,
 }
 
 impl Bus {
@@ -64,6 +65,7 @@ impl Bus {
             cache: Default::default(),
             crc: Default::default(),
             clock: Default::default(),
+            wireless: Default::default(),
         })
     }
 
@@ -128,6 +130,9 @@ impl Bus {
         } else if let Some(offset) = Self::offset(address, size, RAM, self.ram.len()) {
             &self.ram[offset..offset + size]
         } else {
+            if let Some(result) = self.wireless.read(address, size) {
+                return result.map_err(|reason| Self::fault(address, size, operation, reason));
+            }
             if let Some(value) = self.clock.read(address) {
                 return Ok(value);
             }
@@ -203,6 +208,9 @@ impl Bus {
 
     pub fn write(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
         Self::check(address, size, "write")?;
+        if let Some(result) = self.wireless.write(address, value, size) {
+            return result.map_err(|reason| Self::fault(address, size, "write", reason));
+        }
         if self.clock.write(address, value).is_some() {
             return Ok(());
         }
