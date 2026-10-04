@@ -287,6 +287,17 @@ pub(crate) fn execute(
             cpu.r[d] = result as u32;
             cpu.r[d + 1] = (result >> 32) as u32;
             op = "shift_wide_register";
+        } else if h == 0xe1d0 && d & 1 == 0 && s == 0 && (x >> 10) & 3 != 1 {
+            let value = cpu.r[d] as u64 | ((cpu.r[d + 1] as u64) << 32);
+            let shift = ((x >> 8) & 3) * 16 + (x & 15);
+            let result = match (x >> 10) & 3 {
+                0 => value << shift,
+                2 => value >> shift,
+                _ => ((value as i64) >> shift) as u64,
+            };
+            cpu.r[d] = result as u32;
+            cpu.r[d + 1] = (result >> 32) as u32;
+            op = "shift_wide_immediate";
         } else if h == 0xe1f4 && x & 15 <= 1 {
             cpu.r[d] = if x & 1 == 0 {
                 cpu.r[s].checked_div(cpu.r[c])

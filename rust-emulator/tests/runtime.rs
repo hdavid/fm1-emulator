@@ -323,6 +323,26 @@ fn packed_memory_and_preserves_the_high_cache_way_bits() {
 }
 
 #[test]
+fn wide_immediate_shifts_extract_stock_date_and_signed_format_values() {
+    for shift in [0, 8, 16, 24, 32, 48, 56, 63] {
+        for mode in [0, 2, 3] {
+            let encoding = 0x2000 | mode << 10 | (shift / 16) << 8 | (shift % 16);
+            let mut c = cpu(&[0xe1d0, encoding]);
+            let value = 0x81234567fedcba98u64;
+            c.r[2] = value as u32;
+            c.r[3] = (value >> 32) as u32;
+            c.step().unwrap();
+            let expected = match mode {
+                0 => value << shift,
+                2 => value >> shift,
+                _ => ((value as i64) >> shift) as u64,
+            };
+            assert_eq!(c.r[2] as u64 | ((c.r[3] as u64) << 32), expected);
+        }
+    }
+}
+
+#[test]
 fn stock_can_disable_the_unused_hardware_sample_rate_converter() {
     let mut c = cpu(&[0]);
     c.bus.write(0x14300, 0, 4).unwrap();
