@@ -168,6 +168,17 @@ fn register_preincrement_store_advances_the_mixer_buffer_pointer() {
     assert_eq!(c.bus.read(RAM + 4, 4).unwrap(), 0x11223344);
     assert_eq!(c.bus.read(RAM, 4).unwrap(), 0);
 }
+
+#[test]
+fn byte_postincrement_store_updates_the_event_cursor() {
+    let mut c = cpu(&[0xeed2, 0x2011]); // b[r1++=1] = r2
+    c.r[1] = RAM;
+    c.r[2] = 0x12345678;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM, 1).unwrap(), 0x78);
+    assert_eq!(c.bus.read(RAM + 1, 1).unwrap(), 0);
+    assert_eq!(c.r[1], RAM + 1);
+}
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {

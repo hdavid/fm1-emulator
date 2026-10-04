@@ -176,6 +176,19 @@ pub(crate) fn execute(
                 Some(address.wrapping_add(increment)),
             ));
             op = "halfword_postincrement";
+        } else if h == 0xeed2 {
+            let increment = ((x >> 8) & 15) * 16 + (x & 15);
+            let address = cpu.r[s];
+            mem = Some((
+                d,
+                s,
+                address,
+                1,
+                true,
+                false,
+                Some(address.wrapping_add(increment)),
+            ));
+            op = "byte_postincrement_store";
         } else if h == 0xeed4 {
             let off = ((x >> 8) & 15) * 16 + (x & 15);
             let addr = cpu.r[s];
