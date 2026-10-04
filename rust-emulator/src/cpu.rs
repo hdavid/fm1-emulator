@@ -164,7 +164,7 @@ impl Cpu {
         let else_count = (counts >> 12) & 3;
         for i in 0..then_count + else_count {
             let h = self.read(cursor, 2)?;
-            cursor += if matches!(h & 0xffe0, 0xffc0 | 0xffe0) {
+            cursor += if matches!(h & 0xffe0, 0xffc0 | 0xffe0) || h == 0xff80 {
                 6
             } else if h >> 13 == 7 {
                 4
@@ -382,6 +382,12 @@ impl Cpu {
             self.sr[3] = self.pop()?;
             self.sr[5] = self.pop()?;
             op = "pop_irq_frame";
+        } else if h == 0xff80 {
+            // Vendor startup uses a signed byte displacement after a 6-byte call.
+            let displacement = self.read(pc + 2, 2)? | (self.read(pc + 4, 2)? << 16);
+            self.sr[3] = pc + 6;
+            next = (pc + 6).wrapping_add(displacement);
+            op = "call_rel32";
         } else if matches!(h & 0xffc0, 0xea80 | 0xeac0) {
             let displacement = signed(((h & 63) << 16) | self.read(pc + 2, 2)?, 22) * 2;
             if h & 0xffc0 == 0xea80 {

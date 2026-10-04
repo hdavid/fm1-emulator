@@ -8,6 +8,33 @@ fn cpu(words: &[u16]) -> Cpu {
     )
 }
 #[test]
+fn stock_startup_long_calls_return_after_six_bytes() {
+    // Vendor disassembly: call 176, and nested call -10 to an rts.
+    let mut c = cpu(&[0xff80, 0x00b0, 0x0000]);
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 6 + 176);
+    assert_eq!(c.sr[3], XIP + 6);
+    let mut c = cpu(&[0x0080, 0xff80, 0xfff8, 0xffff]);
+    c.pc = XIP + 2;
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP);
+    assert_eq!(c.sr[3], XIP + 8);
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 8);
+}
+
+#[test]
+fn conditional_skip_counts_the_whole_long_call() {
+    // if (r5 < 5) { call ... } else { r0=22 }.
+    let mut c = cpu(&[0xe9b5, 0x1005, 0xff80, 0x00b0, 0x0000, 0x3640]);
+    c.r[5] = 5;
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 10);
+    c.step().unwrap();
+    assert_eq!(c.r[0], 22);
+    assert_eq!(c.sr[3], 0);
+}
+#[test]
 fn compiler_parallel_store_uses_the_previous_register_value() {
     // Vendor compiler startup: r0 = 0x4009 # [r1+4] = r0.
     let mut c = cpu(&[0xf040, 0x4009, 0x6190]);
