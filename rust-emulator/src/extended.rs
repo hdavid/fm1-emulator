@@ -179,7 +179,7 @@ pub(crate) fn execute(
                 if h & 8 != 0 { Some(addr) } else { None },
             ));
             op = "halfword_extended";
-        } else if h == 0xedd0 {
+        } else if matches!(h, 0xedd0 | 0xedd4) {
             let increment = ((x >> 8) & 15) * 16 + (x & 15);
             let address = cpu.r[s];
             mem = Some((
@@ -188,7 +188,7 @@ pub(crate) fn execute(
                 address,
                 2,
                 false,
-                false,
+                h & 4 != 0,
                 Some(address.wrapping_add(increment)),
             ));
             op = "halfword_postincrement";

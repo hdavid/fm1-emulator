@@ -492,6 +492,27 @@ fn halfword_postincrement_reads_before_advancing_parameter_pointer() {
 }
 
 #[test]
+fn fx_signed_halfword_load_reads_before_advancing_the_parameter_pointer() {
+    for (value, expected) in [
+        (0, 0),
+        (0x7fff, 0x7fff),
+        (0x8000, 0xffff8000),
+        (0xffff, u32::MAX),
+    ] {
+        let mut c = cpu(&[0xedd4, 0x4062]); // r4 = h[r6++=2] (s), Felucca graph_fx
+        c.r[6] = RAM;
+        c.bus.write(RAM, value, 2).unwrap();
+        c.bus.write(RAM + 2, 0x1234, 2).unwrap();
+        c.step().unwrap();
+        assert_eq!(c.r[4], expected);
+        assert_eq!(c.r[6], RAM + 2);
+        assert_eq!(c.pc, XIP + 4);
+        assert_eq!(c.bus.read(RAM, 2).unwrap(), value);
+        assert_eq!(c.bus.read(RAM + 2, 2).unwrap(), 0x1234);
+    }
+}
+
+#[test]
 fn single_return_address_push_and_pop_restore_the_call_target() {
     let mut c = cpu(&[0x0410, 0x0400]);
     c.sr[14] = RAM + 16;

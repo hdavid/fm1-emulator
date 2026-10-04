@@ -37,6 +37,7 @@ fn published_felucca_package_boots_and_renders_a_note() {
     );
     cpu.bus.devices.gpio.press(3, 4, false).unwrap();
     advance(&mut cpu, 5_000_000);
+    exercise_fx(&mut cpu);
     eprintln!(
         "Published Felucca: {} instructions, {} LCD pixels, {} audio halves, {} watchdog feeds",
         cpu.steps, cpu.bus.lcd.pixels_written, cpu.bus.audio.halves, cpu.bus.system.watchdog_feeds
@@ -81,10 +82,22 @@ fn unchanged_felucca_boots_and_responds_to_a_matrix_note() {
     cpu.bus.devices.gpio.press(3, 4, false).unwrap();
     advance(&mut cpu, 5_000_000);
     assert_eq!(cpu.bus.read(inputs, 4).unwrap() & 1, 0);
+    exercise_fx(&mut cpu);
+    assert_eq!(
+        cpu.bus.read(dbg + 48, 4).unwrap(),
+        4,
+        "FX page must be selected"
+    );
+    assert_eq!(cpu.bus.read(dbg + 52, 4).unwrap(), 0);
+    cpu.bus.devices.gpio.press(7, 1, true).unwrap(); // HOME, panel ID 8.
+    advance(&mut cpu, 3_000_000);
+    cpu.bus.devices.gpio.press(7, 1, false).unwrap();
+    advance(&mut cpu, 3_000_000);
+    assert_eq!(cpu.bus.read(dbg + 52, 4).unwrap(), 1);
     cpu.bus.devices.gpio.press(2, 1, true).unwrap(); // ENV, panel ID 4.
-    advance(&mut cpu, 1_000_000);
+    advance(&mut cpu, 3_000_000);
     cpu.bus.devices.gpio.press(2, 1, false).unwrap();
-    advance(&mut cpu, 1_000_000);
+    advance(&mut cpu, 3_000_000);
     assert_eq!(
         cpu.bus.read(dbg + 52, 4).unwrap(),
         0,
@@ -98,4 +111,20 @@ fn unchanged_felucca_boots_and_responds_to_a_matrix_note() {
         cpu.bus.read(dbg + 4, 4).unwrap(),
         cpu.bus.system.watchdog_feeds
     );
+}
+
+fn exercise_fx(cpu: &mut Cpu) {
+    let screen = cpu.bus.lcd.pixels.clone();
+    let pixels = cpu.bus.lcd.pixels_written;
+    let audio = cpu.bus.audio.halves;
+    let watchdog = cpu.bus.system.watchdog_feeds;
+    cpu.bus.devices.gpio.press(6, 1, true).unwrap(); // FX, panel ID 2.
+    advance(cpu, 3_000_000); // More than the GUI's 100 ms minimum press duration.
+    cpu.bus.devices.gpio.press(6, 1, false).unwrap();
+    advance(cpu, 20_000_000);
+    assert!(cpu.bus.screen_visible());
+    assert_ne!(cpu.bus.lcd.pixels, screen, "FX must draw its own page");
+    assert!(cpu.bus.lcd.pixels_written > pixels + 240 * 240);
+    assert!(cpu.bus.audio.halves > audio + 50);
+    assert!(cpu.bus.system.watchdog_feeds > watchdog + 10);
 }
