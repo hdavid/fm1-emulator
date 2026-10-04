@@ -96,7 +96,7 @@ fn bus_checks_alignment_boundaries_and_flash_writes() {
     assert!(bus.write(XIP, 0, 4).is_err());
     assert!(bus.read(RAM + RAM_SIZE as u32, 4).is_err());
     assert!(bus.read(0xffff_fffc, 4).is_err());
-    assert!(bus.read(0x11d00, 4).is_err());
+    assert!(bus.read(0x11d20, 4).is_err());
     assert!(bus.read(RAM, 3).is_err());
     bus.write(RAM, 0x80, 2).unwrap();
     assert_eq!(bus.fetch(RAM).unwrap(), 0x80);

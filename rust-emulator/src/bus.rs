@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use crate::devices::Devices;
+use crate::lcd::{Lcd, SPI};
 use crate::{RAM, RAM_SIZE, XIP, XIP_END};
 use std::fmt;
 
@@ -24,6 +25,7 @@ impl fmt::Display for AccessFault {
 pub struct Bus {
     pub flash: Vec<u8>,
     pub devices: Devices,
+    pub lcd: Lcd,
     ram: Vec<u8>,
 }
 
@@ -35,6 +37,7 @@ impl Bus {
         Ok(Self {
             flash,
             devices: Devices::default(),
+            lcd: Lcd::default(),
             ram: vec![0; RAM_SIZE],
         })
     }
@@ -85,6 +88,18 @@ impl Bus {
         } else if let Some(offset) = Self::offset(address, size, RAM, self.ram.len()) {
             &self.ram[offset..offset + size]
         } else {
+            if let Some(value) = self.lcd.read(address & !3) {
+                return if size == 4 {
+                    Ok(value)
+                } else {
+                    Err(Self::fault(
+                        address,
+                        size,
+                        operation,
+                        "SPI registers require word accesses",
+                    ))
+                };
+            }
             if let Some(value) = self.devices.read(address, size) {
                 return value.map_err(|reason| Self::fault(address, size, operation, reason));
             }
@@ -113,6 +128,38 @@ impl Bus {
 
     pub fn write(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
         Self::check(address, size, "write")?;
+        if self.lcd.read(address & !3).is_some() {
+            if size != 4 {
+                return Err(Self::fault(
+                    address,
+                    size,
+                    "write",
+                    "SPI registers require word accesses",
+                ));
+            }
+            let bytes = if address == SPI + 16 {
+                let source = self.lcd.dma_address();
+                let offset =
+                    Self::offset(source, value as usize, RAM, self.ram.len()).ok_or_else(|| {
+                        Self::fault(
+                            source,
+                            value as usize,
+                            "DMA read",
+                            "LCD DMA source must be in SRAM",
+                        )
+                    })?;
+                &self.ram[offset..offset + value as usize]
+            } else {
+                &[]
+            };
+            let pc_out = self.devices.gpio.read(0x50080).unwrap();
+            let pc_dir = self.devices.gpio.read(0x50088).unwrap();
+            let selected = pc_dir & 0x180 == 0 && pc_out & 0x80 == 0;
+            return self
+                .lcd
+                .write(address, value, selected, pc_out & 0x100 != 0, bytes)
+                .map_err(|reason| Self::fault(address, size, "write", reason));
+        }
         if let Some(result) = self.devices.write(address, value, size) {
             return result.map_err(|reason| Self::fault(address, size, "write", reason));
         }
@@ -126,5 +173,12 @@ impl Bus {
         })?;
         self.ram[offset..offset + size].copy_from_slice(&value.to_le_bytes()[..size]);
         Ok(())
+    }
+
+    pub fn screen_visible(&self) -> bool {
+        self.lcd.display_on
+            && !self.lcd.sleeping
+            && self.devices.gpio.read(0x50000).unwrap() & 4 == 0
+            && self.devices.gpio.read(0x50008).unwrap() & 4 == 0
     }
 }
