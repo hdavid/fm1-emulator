@@ -138,4 +138,9 @@ impl Devices {
         let enabled = self.irq_config[TIMER5_IRQ >> 3] & (1 << shift) != 0;
         (icfg & 0x100 != 0 && enabled && self.timer5.pending).then_some(TIMER5_IRQ)
     }
+
+    pub fn irq_priority(&self, source: usize, icfg: u32) -> Option<u32> {
+        let bits = self.irq_config[source >> 3] >> ((source & 7) * 4);
+        (icfg & 0x100 != 0 && bits & 1 != 0).then_some((bits >> 1) & 7)
+    }
 }

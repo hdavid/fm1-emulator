@@ -150,6 +150,9 @@ impl Cpu {
         self.bus
             .advance_usb(OSC_TICKS_PER_INSTRUCTION)
             .map_err(|fault| Fault::Access { pc, fault })?;
+        self.bus
+            .advance_audio(OSC_TICKS_PER_INSTRUCTION)
+            .map_err(|fault| Fault::Access { pc, fault })?;
         self.dispatch_interrupt()?;
         Ok(op)
     }
@@ -446,7 +449,7 @@ impl Cpu {
         if !self.interrupts_enabled || self.in_interrupt {
             return Ok(());
         }
-        if let Some(source) = self.bus.devices.pending_irq(self.sr[11]) {
+        if let Some(source) = self.bus.pending_irq(self.sr[11]) {
             let handler = self.read(0x01c7_fe00 + source as u32 * 4, 4)?;
             self.bus
                 .fetch(handler)

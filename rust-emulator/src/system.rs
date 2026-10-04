@@ -27,17 +27,12 @@ impl System {
         match address {
             0x13e08 => Some(self.control),
             0x13e0c => Some(self.data as u32),
-            0x100c0 | 0x12e00 => Some(0),
+            0x100c0 => Some(0),
             _ => None,
         }
     }
     pub fn write(&mut self, address: u32, value: u32) -> Option<Result<(), &'static str>> {
         match address {
-            0x12e00 => {
-                if value & 0x800 != 0 {
-                    return Some(Err("audio is not implemented"));
-                }
-            }
             0x13e0c => self.data = value as u8,
             0x13e08 => {
                 if value & 0x100 != 0 {

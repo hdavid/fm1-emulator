@@ -31,6 +31,7 @@ pub struct Bus {
     guards: crate::guards::Guards,
     nor: crate::nor::Nor,
     pub usb: crate::usb::Usb,
+    pub audio: crate::audio::Audio,
 }
 
 impl Bus {
@@ -47,6 +48,7 @@ impl Bus {
             guards: Default::default(),
             nor: Default::default(),
             usb: Default::default(),
+            audio: Default::default(),
         })
     }
 
@@ -104,6 +106,9 @@ impl Bus {
         } else if let Some(offset) = Self::offset(address, size, RAM, self.ram.len()) {
             &self.ram[offset..offset + size]
         } else {
+            if let Some(value) = self.audio.read(address) {
+                return Ok(value);
+            }
             if let Some(value) = self.nor.xip(address, size) {
                 return value.map_err(|reason| Self::fault(address, size, operation, reason));
             }
@@ -132,7 +137,15 @@ impl Bus {
                 };
             }
             if let Some(value) = self.devices.read(address, size) {
-                return value.map_err(|reason| Self::fault(address, size, operation, reason));
+                return value
+                    .map(|value| {
+                        if address == crate::devices::IRQ_PENDING && self.audio.pending_irq() {
+                            value | (1 << crate::audio::IRQ)
+                        } else {
+                            value
+                        }
+                    })
+                    .map_err(|reason| Self::fault(address, size, operation, reason));
             }
             // No generic zero-filled MMIO: missing peripherals must be visible.
             return Err(Self::fault(
@@ -159,6 +172,9 @@ impl Bus {
 
     pub fn write(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
         Self::check(address, size, "write")?;
+        if let Some(result) = self.audio.write(address, value) {
+            return result.map_err(|reason| Self::fault(address, size, "write", reason));
+        }
         if let Some(result) = self.usb.write(address, value, &mut self.ram) {
             return result.map_err(|reason| Self::fault(address, size, "write", reason));
         }
@@ -235,5 +251,26 @@ impl Bus {
             && !self.lcd.sleeping
             && self.devices.gpio.read(0x50000).unwrap() & 4 == 0
             && self.devices.gpio.read(0x50008).unwrap() & 4 == 0
+    }
+
+    pub fn advance_audio(&mut self, ticks: u32) -> Result<(), AccessFault> {
+        self.audio
+            .advance(ticks, &self.ram)
+            .map_err(|reason| Self::fault(0x12e1c, 4, "audio DMA", reason))
+    }
+
+    pub fn pending_irq(&self, icfg: u32) -> Option<usize> {
+        let timer = self.devices.pending_irq(icfg);
+        let audio_priority = self.devices.irq_priority(crate::audio::IRQ, icfg);
+        if self.audio.pending_irq() {
+            if let Some(priority) = audio_priority {
+                if timer.is_none_or(|source| {
+                    priority > self.devices.irq_priority(source, icfg).unwrap()
+                }) {
+                    return Some(crate::audio::IRQ);
+                }
+            }
+        }
+        timer
     }
 }
