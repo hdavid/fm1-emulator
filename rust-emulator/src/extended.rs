@@ -446,7 +446,7 @@ pub(crate) fn execute(
             op = "logic_three";
         } else if h & 0xfff0 == 0xeb20 && x != 0 {
             let mut address = cpu.r[n];
-            for register in (0..16).rev() {
+            for register in 0..16 {
                 if x & (1 << register) != 0 {
                     cpu.write(address, cpu.r[register])?;
                     address = address.wrapping_add(4);
@@ -455,7 +455,7 @@ pub(crate) fn execute(
             op = "store_register_list";
         } else if h & 0xfff0 == 0xeb00 && x != 0 {
             let mut address = cpu.r[n];
-            for register in (0..16).rev() {
+            for register in 0..16 {
                 if x & (1 << register) != 0 {
                     cpu.r[register] = cpu.read(address, 4)?;
                     address = address.wrapping_add(4);

@@ -64,18 +64,19 @@ fn stock_can_disable_the_unused_high_speed_usb_controller() {
 
 #[test]
 fn register_list_stores_linked_list_fields_without_advancing_the_base() {
+    // FM-1_984 capture confirms ascending register order and no writeback.
     let mut c = cpu(&[0xeb20, 6, 0xeb21, 0x101]);
     c.r[0] = RAM;
     c.r[1] = RAM + 64;
     c.r[2] = RAM + 128;
     c.r[8] = 0x12345678;
     c.step().unwrap();
-    assert_eq!(c.bus.read(RAM, 4).unwrap(), RAM + 128);
-    assert_eq!(c.bus.read(RAM + 4, 4).unwrap(), RAM + 64);
+    assert_eq!(c.bus.read(RAM, 4).unwrap(), RAM + 64);
+    assert_eq!(c.bus.read(RAM + 4, 4).unwrap(), RAM + 128);
     assert_eq!(c.r[0], RAM);
     c.step().unwrap();
-    assert_eq!(c.bus.read(RAM + 64, 4).unwrap(), 0x12345678);
-    assert_eq!(c.bus.read(RAM + 68, 4).unwrap(), RAM);
+    assert_eq!(c.bus.read(RAM + 64, 4).unwrap(), RAM);
+    assert_eq!(c.bus.read(RAM + 68, 4).unwrap(), 0x12345678);
     assert_eq!(c.r[1], RAM + 64);
 }
 
@@ -722,7 +723,7 @@ fn unsigned_immediate_conditional_selects_storage_header_region() {
 }
 
 #[test]
-fn register_list_loads_descend_without_changing_the_base() {
+fn register_list_loads_ascend_without_changing_the_base() {
     // Vendor form: 04 eb 04 01 => {r8, r2} = [r4+].
     for upper in [4, 8, 15] {
         let mut c = cpu(&[0xeb04, (1 << upper) | (1 << 2)]);
@@ -730,12 +731,33 @@ fn register_list_loads_descend_without_changing_the_base() {
         c.bus.write(RAM, 0x11223344, 4).unwrap();
         c.bus.write(RAM + 4, 0xaabbccdd, 4).unwrap();
         c.step().unwrap();
-        assert_eq!(c.r[upper], 0x11223344);
-        assert_eq!(c.r[2], 0xaabbccdd);
+        assert_eq!(c.r[2], 0x11223344);
+        assert_eq!(c.r[upper], 0xaabbccdd);
         if upper != 4 {
             assert_eq!(c.r[4], RAM);
         }
     }
+}
+
+#[test]
+fn stock_list_insertions_keep_a_circular_queue_linked_to_its_head() {
+    // Stock 0x02003338 stores {r2,r1}, then updates the old tail's next link.
+    let mut c = cpu(&[0xeb20, 6, 0x60a0]);
+    let head = RAM + 64;
+    let nodes = [RAM + 128, RAM + 156];
+    c.bus.write(head, head, 4).unwrap();
+    for (node, tail) in [(nodes[0], head), (nodes[1], nodes[0])] {
+        c.pc = XIP;
+        c.r[0] = node;
+        c.r[1] = head;
+        c.r[2] = tail;
+        c.step().unwrap();
+        c.step().unwrap();
+    }
+    assert_eq!(c.bus.read(head, 4).unwrap(), nodes[0]);
+    assert_eq!(c.bus.read(nodes[0], 4).unwrap(), nodes[1]);
+    assert_eq!(c.bus.read(nodes[1], 4).unwrap(), head);
+    assert_eq!(c.bus.read(nodes[1] + 4, 4).unwrap(), nodes[0]);
 }
 
 #[test]

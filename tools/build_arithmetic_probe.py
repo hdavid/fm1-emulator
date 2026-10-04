@@ -26,7 +26,11 @@ for i, shift in enumerate([0, 1, 32, 63, 64, 65, 80]):
     assembly += ['r2 = 0xfedcba98', 'r3 = 0x81234567', f'r4 = {shift}',
                  'r3_r2 <<= r4', f'[r0 + {84 + i * 8}] = r2',
                  f'[r0 + {88 + i * 8}] = r3']
-assembly += ['psr = r7', '{r7-r1} = [sp++]', 'rts']
+assembly += ['r1 = r0 + 156', 'r2 = 0x11112222', 'r3 = 0x33334444',
+             '[r1+] = {r3, r2}', 'r2 = 0', 'r3 = 0',
+             '{r3, r2} = [r1+]', '[r0+164] = r2', '[r0+168] = r3',
+             'r1 = r1 - r0', '[r0+172] = r1',
+             'psr = r7', '{r7-r1} = [sp++]', 'rts']
 with (src / 'probe.S').open('a') as f:
     f.write('\n'.join(assembly) + '\n')
 p = src / 'src/diag.c'
@@ -34,7 +38,7 @@ code = p.read_text().replace('extern void fm1_probe(uint32_t *out);',
                            'extern void fm1_probe(uint32_t *out);\n'
                            'extern void arithmetic_probe(uint32_t *out);')
 report = '''static void arithmetic_report(void) {
-    uint32_t out[39]={0},i,f=irq_save();
+    uint32_t out[44]={0},i,f=irq_save();
     volatile uint32_t *lrct=(volatile uint32_t *)0x13600;
     arithmetic_probe(out);
     for(i=0;i<2;i++) {
