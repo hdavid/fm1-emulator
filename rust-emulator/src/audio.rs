@@ -34,6 +34,7 @@ impl Audio {
             0x12e20 => self.half_words,
             0x10014 => self.clock,
             0x51030 => self.iomap,
+            0x14300 => 0, // SRC CON0: sample-rate converter remains disabled.
             _ => return None,
         })
     }
@@ -64,6 +65,11 @@ impl Audio {
                 self.clock = value;
             }
             0x51030 => self.iomap = value,
+            0x14300 => {
+                if value != 0 {
+                    return Some(Err("hardware sample-rate conversion is not implemented"));
+                }
+            }
             _ => unreachable!(),
         }
         Some(Ok(()))

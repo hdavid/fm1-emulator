@@ -322,6 +322,15 @@ fn packed_memory_and_preserves_the_high_cache_way_bits() {
 }
 
 #[test]
+fn stock_can_disable_the_unused_hardware_sample_rate_converter() {
+    let mut c = cpu(&[0]);
+    c.bus.write(0x14300, 0, 4).unwrap();
+    assert_eq!(c.bus.read(0x14300, 4).unwrap(), 0);
+    assert!(c.bus.write(0x14300, 1, 4).is_err());
+    assert!(c.bus.read(0x14304, 4).is_err());
+}
+
+#[test]
 fn stock_signed_greater_block_updates_the_formatting_width() {
     // ifs (r5 > r2) { r0 = 1; r1 = 2; }
     for (left, right, taken) in [(1, u32::MAX, true), (u32::MAX, 1, false), (2, 2, false)] {
