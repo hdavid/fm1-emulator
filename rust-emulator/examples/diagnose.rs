@@ -72,6 +72,20 @@ fn run() -> Result<(), String> {
         cpu.irq_entries, cpu.bus.usb.setups, cpu.bus.usb.packets, serial_bytes
     );
     eprintln!("watchdog: {} feeds", cpu.bus.system.watchdog_feeds);
+    eprintln!(
+        "audio: {} stereo frames, {} DMA halves; ADC: {} conversions",
+        cpu.bus.audio.frames, cpu.bus.audio.halves, cpu.bus.devices.adc.conversions
+    );
+    if let Some(&address) = firmware.symbols.get("felucca_dbg") {
+        // Existing guest diagnostics from Felucca's audio.c; no guest hooks.
+        if cpu.bus.read(address, 4).ok() == Some(0x44424731) {
+            let read = |offset| cpu.bus.read(address + offset, 4).unwrap_or(0);
+            eprintln!(
+                "Felucca: {} UI frames, {} rendered audio halves, {} timer IRQs; stage={}, page={}, home={}",
+                read(28), read(4), read(24), read(44), read(48), read(52)
+            );
+        }
+    }
     eprintln!("recent completed instructions:");
     for (pc, op) in recent {
         eprintln!("  {}: {op}", location(&firmware.symbols, pc));
