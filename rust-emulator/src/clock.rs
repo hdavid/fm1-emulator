@@ -18,6 +18,7 @@ impl Default for Clock {
 impl Clock {
     fn register(&self, a: u32) -> Option<&u32> {
         match a {
+            0x10200 => Some(&0x6f01), // Physical FM-1 chip revision, read-only.
             0x10000 => Some(&self.system[0]),
             0x10008 => Some(&self.system[1]),
             0x1000c => Some(&self.system[2]),

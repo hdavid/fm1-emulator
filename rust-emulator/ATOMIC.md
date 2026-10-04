@@ -57,3 +57,4 @@ and encrypted-window changes fault explicitly. SFC base remapping selects
 the corresponding physical flash bytes rather than moving the application.
 CON bit 31 is the busy status seen during the hardware capture. Functional
 emulator reads report idle after completed accesses and retain 009803b5.
+The expanded diagnostic also returned JL_INTEST CHIP_ID (10200) = 00006f01.

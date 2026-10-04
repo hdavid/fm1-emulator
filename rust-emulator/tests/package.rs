@@ -9,6 +9,8 @@ fn full_package_preserves_application_and_supplies_the_spl_handoff() {
     let elf = Firmware::load(&root.join("firmware.elf")).unwrap();
     assert!(package.image.starts_with(&elf.image));
     let mut bus = package.bus().unwrap();
+    assert_eq!(bus.read(0x10200, 4).unwrap(), 0x6f01);
+    assert!(bus.write(0x10200, 0, 4).is_err());
     for (address, value) in [
         (0x40200, 0x009803b5),
         (0x40204, 1),
