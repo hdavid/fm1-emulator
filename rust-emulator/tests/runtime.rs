@@ -577,6 +577,21 @@ fn extended_halfword_load_separates_sign_extension_from_the_offset() {
 }
 
 #[test]
+fn stock_name_comparison_loads_a_byte_from_a_negative_offset() {
+    // Vendor stock instruction at 0x020035c4: r3 = b[r3+-18] (u).
+    let mut c = cpu(&[0xee51, 0x3e3e]);
+    c.r[3] = RAM + 32;
+    c.bus.write(RAM + 14, 0xff, 1).unwrap();
+    c.bus.write(RAM + 32, 0x12, 1).unwrap();
+    c.bus.write(RAM + 270, 0x34, 1).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.r[3], 255);
+    assert_eq!(c.pc, XIP + 4);
+    assert_eq!(c.bus.read(RAM + 14, 1).unwrap(), 0xff);
+    assert_eq!(c.bus.read(RAM + 32, 1).unwrap(), 0x12);
+}
+
+#[test]
 fn signed_minimum_clips_audio_with_signed_comparison() {
     for (left, right, expected) in [(-10, 32767, -10), (40000, 32767, 32767), (-10, -20, -20)] {
         let mut c = cpu(&[0xe435, 0x0031]); // r0 = smin(r3, r0)

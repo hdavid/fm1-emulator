@@ -635,8 +635,8 @@ pub(crate) fn execute(
                 next = next.wrapping_add((signed(x & 511, 9) * 2) as u32);
             }
             op = "branch_compare_register";
-        } else if matches!(h, 0xee50 | 0xee52 | 0xee54 | 0xee58 | 0xee5a) {
-            let off = ((x >> 8) & 15) * 16 + (x & 15);
+        } else if matches!(h, 0xee50 | 0xee51 | 0xee52 | 0xee54 | 0xee58 | 0xee5a) {
+            let off = signed(((h & 1) << 8) | (((x >> 8) & 15) << 4) | (x & 15), 9) as u32;
             mem = Some((
                 d,
                 s,
