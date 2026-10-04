@@ -75,6 +75,7 @@ impl Timer {
 
 #[derive(Default)]
 pub struct Devices {
+    pub adc: crate::adc::Adc,
     pub gpio: Gpio,
     pub timer4: Timer,
     pub timer5: Timer,
@@ -96,7 +97,7 @@ impl Devices {
                 0
             })
         } else {
-            self.gpio.read(address)
+            self.adc.read(address).or_else(|| self.gpio.read(address))
         }?;
         Some(if size == 4 {
             Ok(value)
@@ -124,11 +125,14 @@ impl Devices {
         } else if (IRQ_PENDING..IRQ_PENDING + 16).contains(&address) {
             Some(Err("interrupt pending registers are read-only"))
         } else {
-            self.gpio.write(address, value)
+            self.adc
+                .write(address, value)
+                .or_else(|| self.gpio.write(address, value))
         }
     }
 
     pub fn advance(&mut self, ticks: u32) {
+        self.adc.advance(ticks);
         self.timer4.advance(ticks);
         self.timer5.advance(ticks);
     }
