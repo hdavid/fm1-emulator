@@ -11,7 +11,7 @@ impl Default for Clock {
         Self {
             system: [0, 0x10200, 0x1c1, 2],
             pll: [0x45400203, 0x3f503026, 0x0940022b, 0x0750310c],
-            usb_phy: [0; 3],
+            usb_phy: [0, 0x8881c3, 0],
         }
     }
 }

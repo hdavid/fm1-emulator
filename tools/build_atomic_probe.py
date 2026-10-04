@@ -40,12 +40,15 @@ report='''static void testset_report(void) {
 }
 '''
 registers = [0x10000, 0x10008, 0x1000c, 0x10010, 0x10014, 0x10018,
-             0x119a0, 0x119a4, 0x119a8, 0x119ac, 0x13e00, 0x13e04]
-report += 'static uint32_t boot_registers[12];\n'
+             0x119a0, 0x119a4, 0x119a8, 0x119ac, 0x13e00, 0x13e04,
+             0x40200, 0x40204, 0x40208, 0x4020c, 0x40300, 0x40304,
+             0x40308, 0x4030c, 0x40310, 0x40314, 0x16a00, 0x16a04, 0x16a08,
+             0x10200]
+report += f'static uint32_t boot_registers[{len(registers)}];\n'
 report += '''static void clocks_report(void) {
     uint32_t i;
     con_puts("CLOCKS BEGIN\\r\\n");
-    for(i=0;i<12;i++) { con_puts("W ");con_dec(i);con_putc(' ');con_hex(boot_registers[i],8);con_puts("\\r\\n"); }
+    for(i=0;i<sizeof(boot_registers)/sizeof(boot_registers[0]);i++) { con_puts("W ");con_dec(i);con_putc(' ');con_hex(boot_registers[i],8);con_puts("\\r\\n"); }
     con_puts("CLOCKS END\\r\\n");
 }
 '''

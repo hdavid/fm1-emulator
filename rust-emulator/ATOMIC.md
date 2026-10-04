@@ -48,3 +48,12 @@ uses Felucca startup before capture; this is evidence for its SPL handoff,
 not a direct capture of the stock application. The model retains documented
 clock/PLL and USB common PHY configuration registers. Analog lock timing,
 dynamic CPU frequency and high-speed USB traffic are not modeled.
+
+Expanded capture: SFC CON=809803b5, BAUD=1, CODE=8e17, BASEADR=4000;
+SFCENC CON=1, KEY=0 and all four window-bound registers zero. HUSB common
+PHY configuration is 0, 008881c3, 0. KEY=0 is the physical register value;
+the package's chip key still supplies application decoding. Dynamic key
+and encrypted-window changes fault explicitly. SFC base remapping selects
+the corresponding physical flash bytes rather than moving the application.
+CON bit 31 is the busy status seen during the hardware capture. Functional
+emulator reads report idle after completed accesses and retain 009803b5.

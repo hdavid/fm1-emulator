@@ -13,7 +13,7 @@ pub struct Nor {
 impl Default for Nor {
     fn default() -> Self {
         Self {
-            regs: BTreeMap::from([(0x40200, 1), (0x5101c, 32), (0x40300, 1)]),
+            regs: BTreeMap::from([(0x40200, 1), (0x4020c, 0x4000), (0x5101c, 32), (0x40300, 1)]),
             command: vec![],
             selected: false,
             bytes: vec![255; 1024 * 1024],
@@ -29,6 +29,8 @@ impl Nor {
         let mut decoded = self.bytes[0x4000..].to_vec();
         crate::package::sfc(&mut decoded, key);
         self.decoded = Some(decoded);
+        self.regs
+            .extend([(0x40200, 0x809803b5), (0x40204, 1), (0x40208, 0x8e17)]);
     }
     pub fn packaged(&self) -> bool {
         self.decoded.is_some()
@@ -39,7 +41,7 @@ impl Nor {
 
     pub fn xip(&self, address: u32, size: usize) -> Option<Result<u32, &'static str>> {
         // The SFC maps flash offset 0x4000 at CPU address 0x02000000.
-        let offset = address.checked_sub(0x0200_0000)? as usize + 0x4000;
+        let offset = address.checked_sub(0x0200_0000)? as usize + self.read(0x4020c)? as usize;
         let bytes = self.bytes.get(offset..offset.checked_add(size)?)?;
         if !self.xip_active() {
             return Some(Err(
@@ -53,6 +55,11 @@ impl Nor {
                 && address.checked_add(size as u32 - 1)? <= self.read(0x40308).unwrap());
         if !plain {
             if let Some(decoded) = &self.decoded {
+                if offset < 0x4000 {
+                    return Some(Err(
+                        "encrypted XIP below application area is not implemented",
+                    ));
+                }
                 let bytes = &decoded[offset - 0x4000..offset - 0x4000 + size];
                 return Some(Ok(bytes
                     .iter()
@@ -72,9 +79,31 @@ impl Nor {
     pub fn read(&self, a: u32) -> Option<u32> {
         matches!(
             a,
-            0x40200 | 0x40300 | 0x40308 | 0x4030c | 0x5101c | 0x11c00 | 0x11c04 | 0x11c08
+            0x40200
+                | 0x40204
+                | 0x40208
+                | 0x4020c
+                | 0x40300
+                | 0x40304
+                | 0x40308
+                | 0x4030c
+                | 0x40310
+                | 0x40314
+                | 0x5101c
+                | 0x11c00
+                | 0x11c04
+                | 0x11c08
         )
-        .then(|| *self.regs.get(&a).unwrap_or(&0))
+        .then(|| {
+            let value = *self.regs.get(&a).unwrap_or(&0);
+            // Bit 31 is transaction busy, not retained configuration. The
+            // functional bus completes each access before a following read.
+            if a == 0x40200 {
+                value & !0x80000000
+            } else {
+                value
+            }
+        })
     }
     pub fn chip_select(&mut self, selected: bool) {
         if self.selected != selected {
@@ -85,6 +114,11 @@ impl Nor {
     }
     pub fn write(&mut self, a: u32, v: u32) -> Option<Result<(), &'static str>> {
         self.read(a)?;
+        if (a == 0x40304 && v != 0) || ((a == 0x40310 || a == 0x40314) && v != 0) {
+            return Some(Err(
+                "SFC dynamic key and encrypted-window changes are not implemented",
+            ));
+        }
         let mut value = v;
         if a == 0x11c00 {
             value = v & !0xc000;
