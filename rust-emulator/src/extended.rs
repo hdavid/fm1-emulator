@@ -621,6 +621,16 @@ pub(crate) fn execute(
             cpu.r[s] = address;
             cpu.r[d] = value;
             op = "word_register_preincrement";
+        } else if h == 0xeddc && matches!(x & 15, 0 | 2) {
+            let address = cpu.r[s].wrapping_add(cpu.r[c]);
+            let value = cpu.read(address, 2)?;
+            cpu.r[s] = address;
+            cpu.r[d] = if x & 2 != 0 {
+                signed(value, 16) as u32
+            } else {
+                value
+            };
+            op = "halfword_register_preincrement";
         } else if matches!(h, 0xecd8 | 0xedd8 | 0xeed8) {
             let size = match h {
                 0xecd8 => 4,

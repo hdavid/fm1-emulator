@@ -235,6 +235,17 @@ fn absolute_and_maximum_compute_the_audio_peak() {
     }
 }
 
+#[test]
+fn halfword_register_preincrement_reads_signed_lookup_values() {
+    let mut c = cpu(&[0xeddc, 0x3312]); // r3 = h[++r1=r3] (s)
+    c.r[1] = 4;
+    c.r[3] = RAM;
+    c.bus.write(RAM + 4, 0xfedc, 2).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.r[1], RAM + 4);
+    assert_eq!(c.r[3], 0xfffffedc);
+}
+
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {
