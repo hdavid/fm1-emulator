@@ -323,6 +323,36 @@ fn packed_memory_and_preserves_the_high_cache_way_bits() {
 }
 
 #[test]
+fn wireless_pll_samples_follow_measured_comparator_boundaries() {
+    let mut c = cpu(&[0]);
+    c.bus.write(0x11968, 0x10000000, 4).unwrap();
+    for (cap, feedback, expected) in [
+        (64, 109, 0x20081),
+        (64, 110, 0x81),
+        (64, 122, 0x81),
+        (64, 123, 0x40081),
+        (0, 255, 0x20081),
+        (127, 0, 0x40081),
+        (63, 100, 0x40081), // Measured discontinuity at the next bank.
+        (64, 100, 0x20081),
+    ] {
+        c.bus.write(0x11938, cap << 19, 4).unwrap();
+        c.bus.write(0x1193c, feedback << 5, 4).unwrap();
+        c.bus.write(0x11978, 0, 4).unwrap();
+        let previous = c.bus.read(0x11978, 4).unwrap();
+        for _ in 0..7 {
+            c.bus.write(0x11978, 1, 4).unwrap();
+        }
+        assert_eq!(c.bus.read(0x11978, 4).unwrap(), previous);
+        c.bus.write(0x11978, 1, 4).unwrap();
+        c.bus.write(0x11978, 0, 4).unwrap();
+        assert_eq!(c.bus.read(0x11978, 4).unwrap(), expected);
+    }
+    c.bus.write(0x11968, 0x20000000, 4).unwrap();
+    assert!(c.bus.write(0x11978, 1, 4).is_err());
+}
+
+#[test]
 fn wireless_bbp_transactions_store_and_read_selected_bytes() {
     let mut c = cpu(&[0]);
     let command = 0x3101c;
@@ -337,7 +367,7 @@ fn wireless_bbp_transactions_store_and_read_selected_bytes() {
         c.bus.write(command, 0xb0000 | register << 8, 4).unwrap();
         assert_eq!(c.bus.read(command, 4).unwrap() & 255, value);
     }
-    for address in [0x31100, 0x11900, 0x11978] {
+    for address in [0x31100, 0x11900, 0x11974] {
         c.bus.write(address, 0x13579bdf, 4).unwrap();
         assert_eq!(c.bus.read(address, 4).unwrap(), 0x13579bdf);
     }

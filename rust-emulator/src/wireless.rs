@@ -2,7 +2,8 @@
 // WL82.h: WL/WF analog configuration latches. Stock wfhw_init also configures
 // two words at 0x30f00; their bit meanings are not published in that header.
 // RF transmission, reception,
-// frequency calibration and serial-data DMA are not modeled.
+// LO frequency counting and serial-data DMA are not modeled. The PLL
+// comparator uses measured nominal thresholds for this FM-1.
 pub(crate) struct Wireless {
     registers: [u32; 26],
     radio_configuration: [u32; 2],
@@ -10,6 +11,8 @@ pub(crate) struct Wireless {
     bbp_command: u32,
     bbp: [u8; 256],
     analog: [u32; 31],
+    sample_strobes: u8,
+    sample_result: u32,
 }
 impl Default for Wireless {
     fn default() -> Self {
@@ -20,6 +23,8 @@ impl Default for Wireless {
             bbp_command: 0,
             bbp: [0; 256],
             analog: [0; 31],
+            sample_strobes: 0,
+            sample_result: 0,
         }
     }
 }
@@ -46,7 +51,11 @@ impl Wireless {
     pub(crate) fn read(&self, address: u32, size: usize) -> Option<Result<u32, &'static str>> {
         if (0x11900..=0x1197b).contains(&address) {
             return Some(if size == 4 {
-                Ok(self.analog[((address - 0x11900) / 4) as usize])
+                Ok(if address == 0x11978 {
+                    self.sample_result
+                } else {
+                    self.analog[((address - 0x11900) / 4) as usize]
+                })
             } else {
                 Err("wireless registers require word accesses")
             });
@@ -84,7 +93,34 @@ impl Wireless {
     ) -> Option<Result<(), &'static str>> {
         if (0x11900..=0x1197b).contains(&address) {
             return Some(if size == 4 {
-                self.analog[((address - 0x11900) / 4) as usize] = value;
+                if address == 0x11978 {
+                    match value {
+                        0 => self.sample_strobes = 0,
+                        1 => {
+                            if self.analog[26] >> 28 != 1 {
+                                return Some(Err(
+                                    "wireless analog measurement mux is not implemented",
+                                ));
+                            }
+                            self.sample_strobes = self.sample_strobes.saturating_add(1);
+                            if self.sample_strobes >= 8 {
+                                let cap = ((self.analog[14] >> 19) & 127) as usize;
+                                let feedback = (self.analog[15] >> 5) & 255;
+                                let (low, high) = PLL_THRESHOLDS[cap];
+                                self.sample_result = 0x81;
+                                if feedback < low as u32 {
+                                    self.sample_result |= 1 << 17;
+                                }
+                                if feedback >= high as u32 {
+                                    self.sample_result |= 1 << 18;
+                                }
+                            }
+                        }
+                        _ => return Some(Err("unsupported wireless analog sample strobe")),
+                    }
+                } else {
+                    self.analog[((address - 0x11900) / 4) as usize] = value;
+                }
                 Ok(())
             } else {
                 Err("wireless registers require word accesses")
@@ -133,3 +169,139 @@ impl Wireless {
         Some(Ok(()))
     }
 }
+
+// Nominal comparator bounds measured on the connected FM-1 with FM-1_985.
+// Index: seven-bit capacitor bank; values: eight-bit feedback divider at
+// which LOW drops and HIGH rises. 256 means outside the divider range.
+// The 16-bank discontinuities are measured hardware behavior. These are
+// fixed device measurements, not an RF voltage/noise or temperature model.
+const PLL_THRESHOLDS: [(u16, u16); 128] = [
+    (256, 256),
+    (256, 256),
+    (256, 256),
+    (256, 256),
+    (256, 256),
+    (256, 256),
+    (256, 256),
+    (256, 256),
+    (251, 256),
+    (243, 256),
+    (235, 251),
+    (228, 243),
+    (220, 235),
+    (212, 227),
+    (205, 220),
+    (197, 212),
+    (256, 256),
+    (253, 256),
+    (245, 256),
+    (237, 253),
+    (230, 245),
+    (222, 237),
+    (214, 230),
+    (207, 222),
+    (199, 214),
+    (192, 206),
+    (184, 199),
+    (177, 192),
+    (170, 184),
+    (162, 177),
+    (155, 169),
+    (148, 162),
+    (208, 223),
+    (201, 216),
+    (193, 208),
+    (186, 200),
+    (178, 193),
+    (171, 186),
+    (164, 178),
+    (157, 171),
+    (150, 164),
+    (143, 157),
+    (136, 150),
+    (129, 142),
+    (122, 135),
+    (115, 129),
+    (108, 122),
+    (102, 115),
+    (159, 173),
+    (151, 166),
+    (144, 158),
+    (137, 151),
+    (131, 144),
+    (124, 137),
+    (117, 130),
+    (110, 123),
+    (103, 117),
+    (97, 110),
+    (90, 103),
+    (84, 97),
+    (77, 90),
+    (71, 83),
+    (64, 77),
+    (58, 70),
+    (110, 123),
+    (103, 116),
+    (96, 109),
+    (90, 103),
+    (83, 96),
+    (77, 90),
+    (70, 83),
+    (64, 77),
+    (58, 70),
+    (51, 64),
+    (45, 57),
+    (39, 51),
+    (33, 45),
+    (27, 39),
+    (21, 33),
+    (15, 26),
+    (65, 78),
+    (59, 72),
+    (53, 65),
+    (47, 59),
+    (40, 53),
+    (34, 47),
+    (28, 40),
+    (22, 34),
+    (16, 28),
+    (10, 22),
+    (4, 16),
+    (0, 10),
+    (0, 4),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (23, 35),
+    (17, 29),
+    (11, 23),
+    (5, 17),
+    (0, 11),
+    (0, 5),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+];
