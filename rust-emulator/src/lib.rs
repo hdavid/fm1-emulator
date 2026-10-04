@@ -2,6 +2,7 @@
 pub mod adc;
 pub mod audio;
 pub mod bus;
+mod cache;
 pub mod cpu;
 pub mod devices;
 pub mod firmware;

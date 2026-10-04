@@ -70,9 +70,6 @@ impl Nor {
     }
 
     pub fn read(&self, a: u32) -> Option<u32> {
-        if a == 0x1eee008 {
-            return Some(0x4000);
-        }
         matches!(
             a,
             0x40200 | 0x40300 | 0x40308 | 0x4030c | 0x5101c | 0x11c00 | 0x11c04 | 0x11c08
@@ -88,9 +85,6 @@ impl Nor {
     }
     pub fn write(&mut self, a: u32, v: u32) -> Option<Result<(), &'static str>> {
         self.read(a)?;
-        if a == 0x1eee008 {
-            return Some(Err("cache status is read-only"));
-        }
         let mut value = v;
         if a == 0x11c00 {
             value = v & !0xc000;
