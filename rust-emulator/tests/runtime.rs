@@ -322,6 +322,19 @@ fn packed_memory_and_preserves_the_high_cache_way_bits() {
 }
 
 #[test]
+fn stock_p33_field_update_ands_the_value_with_the_inverted_mask() {
+    // Vendor RAM routine: r2 = r3 & ~r0. Omitting r3 selects all PMU inputs.
+    for (value, expected) in [(5, 5), (0, 0), (0xffffffff, 7), (0x12345678, 0)] {
+        let mut c = cpu(&[0xe190, 0x2033]);
+        c.r[0] = 0xfffffff8;
+        c.r[3] = value;
+        c.step().unwrap();
+        assert_eq!(c.r[2], expected);
+        assert_eq!(c.r[3], value);
+    }
+}
+
+#[test]
 fn carry_arithmetic_matches_seven_physical_fm1_measurements() {
     // FM-1_984 USB capture: result, PSR (V/C/Z/N), then add-with-carry or
     // subtract-with-not-carry. Each row was executed on the connected device.

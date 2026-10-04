@@ -441,7 +441,7 @@ pub(crate) fn execute(
                 0 => cpu.r[s] | cpu.r[c],
                 1 => cpu.r[s] ^ cpu.r[c],
                 2 => cpu.r[s] & cpu.r[c],
-                _ => !cpu.r[c],
+                _ => cpu.r[s] & !cpu.r[c],
             };
             op = "logic_three";
         } else if h & 0xfff0 == 0xeb20 && x != 0 {
