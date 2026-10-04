@@ -322,6 +322,27 @@ fn packed_memory_and_preserves_the_high_cache_way_bits() {
 }
 
 #[test]
+fn stock_cache_bound_keeps_unsigned_long_branch_immediates_positive() {
+    // Vendor display startup at 0x0200205a: if (r2 < 2111) goto -22.
+    for (condition, value, taken) in [
+        (3, 2110, true),
+        (3, 2111, false),
+        (3, u32::MAX, false),
+        (2, 2110, false),
+        (2, 2111, true),
+        (8, 2111, false),
+        (8, 2112, true),
+        (9, 2111, true),
+        (9, 2112, false),
+    ] {
+        let mut c = cpu(&[0xff00 | condition, 0x283f, 0x0010]);
+        c.r[2] = value;
+        c.step().unwrap();
+        assert_eq!(c.pc, XIP + 6 + if taken { 32 } else { 0 });
+    }
+}
+
+#[test]
 fn stock_empty_flash_comparison_sign_extends_the_long_branch_immediate() {
     // Vendor 0x02034bb4: if (r0 == -768) goto +44; six-byte signed-12 immediate.
     for (value, taken) in [(0xfffffd00, true), (0x00000d00, false), (0, false)] {

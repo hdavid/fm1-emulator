@@ -358,7 +358,10 @@ pub(crate) fn execute(
             && matches!(h & 15, 0 | 1 | 2 | 3 | 8 | 9 | 10 | 11 | 12 | 13)
         {
             let value = match h & 0x60 {
-                0 => signed(x & 4095, 12) as u32,
+                // Equality/signed forms extend the literal; unsigned ordering
+                // keeps all 12 bits (stock's cache bound is 2111).
+                0 if matches!(h & 15, 0 | 1 | 10..=13) => signed(x & 4095, 12) as u32,
+                0 => x & 4095,
                 0x20 => packed(x),
                 0x40 => cpu.r[c],
                 _ => packed(x),
