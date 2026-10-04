@@ -142,6 +142,20 @@ fn halfword_postincrement_reads_before_advancing_parameter_pointer() {
     assert_eq!(c.r[2], 0xfedc);
     assert_eq!(c.r[0], RAM + 20);
 }
+
+#[test]
+fn single_return_address_push_and_pop_restore_the_call_target() {
+    let mut c = cpu(&[0x0410, 0x0400]);
+    c.sr[14] = RAM + 16;
+    c.sr[3] = XIP + 0x200;
+    c.step().unwrap();
+    assert_eq!(c.sr[14], RAM + 12);
+    assert_eq!(c.bus.read(RAM + 12, 4).unwrap(), XIP + 0x200);
+    assert_eq!(c.sr[3], XIP + 0x200);
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 0x200);
+    assert_eq!(c.sr[14], RAM + 16);
+}
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {
