@@ -65,6 +65,24 @@ struct RcMeasurement {
     number: u32,
     pending: bool,
 }
+
+// WL82 RAND R64L/R64H. Deterministic emulator noise advances with device
+// time; paired reads share a single 64-bit value until the next advance.
+struct Random(u64);
+impl Default for Random {
+    fn default() -> Self {
+        Self(0x9e3779b97f4a7c15)
+    }
+}
+impl Random {
+    fn advance(&mut self, ticks: u32) {
+        if ticks != 0 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+        }
+    }
+}
 impl RcMeasurement {
     fn read(&self, offset: u32) -> Option<u32> {
         match offset {
@@ -179,6 +197,7 @@ pub struct Devices {
     startup_timers: [Timer; 4],
     tick_secondary: TickTimer,
     rc_measurement: RcMeasurement,
+    random: Random,
     irq_config: [[u32; 32]; 2],
     priority_mask: [u32; 2],
     software: u8,
@@ -209,6 +228,8 @@ impl Devices {
             tick.read(a - TICK_TIMER)
         } else if (0x13600..0x13608).contains(&a) {
             self.rc_measurement.read(a - 0x13600)
+        } else if matches!(a, 0x13b00 | 0x13b04) {
+            Some((self.random.0 >> if a & 4 == 0 { 0 } else { 32 }) as u32)
         } else if (IRQ_CONFIG..IRQ_CONFIG + 128).contains(&a) {
             Some(self.irq_config[core][((a - IRQ_CONFIG) / 4) as usize])
         } else if matches!(a, 0x1eef1a0 | 0x1eef1a4) {
@@ -275,6 +296,8 @@ impl Devices {
             tick.write(a - TICK_TIMER, value)
         } else if (0x13600..0x13608).contains(&a) {
             self.rc_measurement.write(a - 0x13600, value)
+        } else if matches!(a, 0x13b00 | 0x13b04) {
+            Some(Err("random generator registers are read-only"))
         } else if (IRQ_CONFIG..IRQ_CONFIG + 128).contains(&a) {
             self.irq_config[core][((a - IRQ_CONFIG) / 4) as usize] = value;
             Some(Ok(()))
@@ -312,6 +335,7 @@ impl Devices {
         self.tick.advance(ticks);
         self.tick_secondary.advance(ticks);
         self.rc_measurement.advance(ticks);
+        self.random.advance(ticks);
     }
     fn software_enabled(&self, core: usize) -> u32 {
         let config = self.irq_config[core][15];

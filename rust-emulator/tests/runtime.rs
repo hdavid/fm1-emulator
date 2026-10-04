@@ -323,6 +323,25 @@ fn packed_memory_and_preserves_the_high_cache_way_bits() {
 }
 
 #[test]
+fn random_generator_exposes_changing_paired_read_only_words() {
+    let mut c = cpu(&[0]);
+    let mut replay = cpu(&[0]);
+    let value = |c: &Cpu| {
+        c.bus.read(0x13b00, 4).unwrap() as u64 | ((c.bus.read(0x13b04, 4).unwrap() as u64) << 32)
+    };
+    let first = value(&c);
+    assert_ne!(first, 0);
+    for _ in 0..8 {
+        c.bus.devices.advance(1);
+        replay.bus.devices.advance(1);
+        assert_eq!(value(&c), value(&replay));
+        assert_ne!(value(&c), first);
+    }
+    assert!(c.bus.write(0x13b00, 0, 4).is_err());
+    assert!(c.bus.read(0x13b00, 2).is_err());
+}
+
+#[test]
 fn wide_immediate_shifts_extract_stock_date_and_signed_format_values() {
     for shift in [0, 8, 16, 24, 32, 48, 56, 63] {
         for mode in [0, 2, 3] {
