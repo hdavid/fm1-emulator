@@ -288,6 +288,19 @@ fn register_pair_clear_uses_the_encoded_even_register() {
     }
 }
 
+#[test]
+fn extended_byte_postincrement_reads_before_advancing_the_string() {
+    for (h, expected) in [(0xeed0, 0xdc), (0xeed4, 0xffffffdc)] {
+        let mut c = cpu(&[h, 0x9001]); // r9 = b[r0++=1] (u/s)
+        c.r[0] = RAM;
+        c.bus.write(RAM, 0xdc, 1).unwrap();
+        c.bus.write(RAM + 1, 0x12, 1).unwrap();
+        c.step().unwrap();
+        assert_eq!(c.r[9], expected);
+        assert_eq!(c.r[0], RAM + 1);
+    }
+}
+
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {

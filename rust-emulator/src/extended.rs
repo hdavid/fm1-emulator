@@ -200,11 +200,19 @@ pub(crate) fn execute(
                 Some(address.wrapping_add(increment)),
             ));
             op = "byte_postincrement_store";
-        } else if h == 0xeed4 {
+        } else if matches!(h, 0xeed0 | 0xeed4) {
             let off = ((x >> 8) & 15) * 16 + (x & 15);
             let addr = cpu.r[s];
-            mem = Some((d, s, addr, 1, false, true, Some(addr + off)));
-            op = "signed_byte_postincrement";
+            mem = Some((
+                d,
+                s,
+                addr,
+                1,
+                false,
+                h & 4 != 0,
+                Some(addr.wrapping_add(off)),
+            ));
+            op = "byte_postincrement_load";
         } else if h & 0xfff0 == 0xe1e0 {
             cpu.r[n] = cpu.r[d].wrapping_mul(packed(x));
             op = "multiply_immediate";
