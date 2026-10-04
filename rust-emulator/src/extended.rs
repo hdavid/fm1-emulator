@@ -392,6 +392,15 @@ pub(crate) fn execute(
                 _ => !cpu.r[c],
             };
             op = "logic_three";
+        } else if h & 0xfff0 == 0xeb20 && x != 0 {
+            let mut address = cpu.r[n];
+            for register in (0..16).rev() {
+                if x & (1 << register) != 0 {
+                    cpu.write(address, cpu.r[register])?;
+                    address = address.wrapping_add(4);
+                }
+            }
+            op = "store_register_list";
         } else if h & 0xfff0 == 0xeb00 && x != 0 {
             let mut address = cpu.r[n];
             for register in (0..16).rev() {

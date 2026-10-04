@@ -63,6 +63,23 @@ fn stock_can_disable_the_unused_high_speed_usb_controller() {
 }
 
 #[test]
+fn register_list_stores_linked_list_fields_without_advancing_the_base() {
+    let mut c = cpu(&[0xeb20, 6, 0xeb21, 0x101]);
+    c.r[0] = RAM;
+    c.r[1] = RAM + 64;
+    c.r[2] = RAM + 128;
+    c.r[8] = 0x12345678;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM, 4).unwrap(), RAM + 128);
+    assert_eq!(c.bus.read(RAM + 4, 4).unwrap(), RAM + 64);
+    assert_eq!(c.r[0], RAM);
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 64, 4).unwrap(), 0x12345678);
+    assert_eq!(c.bus.read(RAM + 68, 4).unwrap(), RAM);
+    assert_eq!(c.r[1], RAM + 64);
+}
+
+#[test]
 fn stock_startup_long_calls_return_after_six_bytes() {
     // Vendor disassembly: call 176, and nested call -10 to an rts.
     let mut c = cpu(&[0xff80, 0x00b0, 0x0000]);
