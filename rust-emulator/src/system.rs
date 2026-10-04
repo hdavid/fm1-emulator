@@ -6,13 +6,13 @@ pub struct System {
     control: u32,
     data: u8,
     transaction: Vec<u8>,
-    registers: [u8; 1024],
+    registers: [u8; 2048],
     pub watchdog_feeds: u64,
     pub watchdog_ticks: u64,
 }
 impl Default for System {
     fn default() -> Self {
-        let mut registers = [0; 1024];
+        let mut registers = [0; 2048];
         registers[0x12] = 1; // Power-on reset.
         Self {
             pmu_control: 0x100,
@@ -43,10 +43,7 @@ impl System {
             0x13e04 => self.rtc_control = value,
             0x13e0c => self.data = value as u8,
             0x13e08 => {
-                if value & 0x100 != 0 {
-                    return Some(Err("P33 RTC domain is not implemented"));
-                }
-                if value & 1 == 0 || self.control & 1 == 0 {
+                if value & 1 == 0 || self.control & 1 == 0 || (value ^ self.control) & 0x100 != 0 {
                     self.transaction.clear();
                 }
                 self.control = value & !0x12;
@@ -54,7 +51,9 @@ impl System {
                     self.transaction.push(self.data);
                     if self.transaction.len() == 3 {
                         let command = self.transaction[0];
-                        let index = ((command as usize & 3) << 8) | self.transaction[1] as usize;
+                        let index = ((command as usize & 3) << 8)
+                            | self.transaction[1] as usize
+                            | if value & 0x100 != 0 { 1024 } else { 0 };
                         if command & 0x80 != 0 {
                             self.data = self.registers[index];
                         } else {

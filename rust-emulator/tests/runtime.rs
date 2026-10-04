@@ -526,6 +526,24 @@ fn watchdog_is_fed_via_serial_p33_and_really_expires() {
     b.system.advance(23_999_999).unwrap();
     assert!(b.system.advance(1).is_err());
 }
+
+#[test]
+fn p33_rtc_registers_are_separate_from_the_watchdog_domain() {
+    let mut b = Bus::new(vec![0, 0]).unwrap();
+    p33(&mut b, 0, 0x80, 0x1a);
+    for (command, value) in [(0, 0x40), (0x80, 0)] {
+        b.write(0x13e08, 0x101, 4).unwrap();
+        for byte in [command, 0x80, value] {
+            b.write(0x13e0c, byte as u32, 4).unwrap();
+            b.write(0x13e08, 0x111, 4).unwrap();
+        }
+        b.write(0x13e08, 0, 4).unwrap();
+    }
+    assert_eq!(b.read(0x13e0c, 4).unwrap(), 0x40);
+    assert_eq!(b.system.watchdog_feeds, 0);
+    p33(&mut b, 0x80, 0x80, 0);
+    assert_eq!(b.read(0x13e0c, 4).unwrap(), 0x1a);
+}
 #[test]
 fn guarded_ram_rejects_writes_and_usb_dma_checks_its_address() {
     let mut b = Bus::new(vec![0, 0]).unwrap();
