@@ -179,14 +179,14 @@ fn startup_timer_banks_count_and_signal_their_sdk_interrupts() {
 #[test]
 fn startup_repeat_clears_exactly_the_requested_words() {
     // Stock startup: rep 2 r2 { [r3++=4] = r1 }; if (r2 != 0) goto rep.
-    for count in [0, 1, 3] {
+    for count in [0, 1, 3, 32, 33, 65] {
         let mut c = cpu(&[0x0302, 0x05b1, 0x5df2, 0x0000]);
         c.r[1] = 0x11223344;
         c.r[2] = count;
         c.r[3] = RAM;
         while c.pc != XIP + 6 {
             c.step().unwrap();
-            assert!(c.steps <= 10);
+            assert!(c.steps <= count as u64 * 2 + 2);
         }
         assert_eq!(c.r[2], 0);
         assert_eq!(c.r[3], RAM + count * 4);
@@ -194,6 +194,85 @@ fn startup_repeat_clears_exactly_the_requested_words() {
             assert_eq!(c.bus.read(RAM + i * 4, 4).unwrap(), 0x11223344);
         }
         assert_eq!(c.bus.read(RAM + count * 4, 4).unwrap(), 0);
+    }
+}
+
+#[test]
+fn stock_memcpy_captures_the_repeat_count_before_overwriting_it() {
+    // Stock memcpy at 0x02044596: rep 4 r2 { r2=b[r1++]; b[r3++]=r2 }.
+    for count in [0, 1, 4] {
+        let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);
+        c.r[1] = RAM;
+        c.r[2] = count;
+        c.r[3] = RAM + 32;
+        for (i, byte) in b"btif".iter().enumerate() {
+            c.bus.write(RAM + i as u32, *byte as u32, 1).unwrap();
+        }
+        while c.pc != XIP + 6 {
+            c.step().unwrap();
+            assert!(c.steps <= 9);
+        }
+        assert_eq!(c.r[1], RAM + count);
+        assert_eq!(c.r[3], RAM + 32 + count);
+        for i in 0..count {
+            assert_eq!(
+                c.bus.read(RAM + 32 + i, 1).unwrap(),
+                b"btif"[i as usize] as u32
+            );
+        }
+        assert_eq!(c.bus.read(RAM + 32 + count, 1).unwrap(), 0);
+        assert_eq!(c.r[2], 0);
+    }
+}
+
+#[test]
+fn register_repeat_matches_physical_fm1_batches_and_counter_writeback() {
+    // tools/build_repeat_probe.py, FM-1_983 USB capture on 2026-10-05.
+    for (count, iterations, remaining) in [
+        (0, 0, 0),
+        (1, 1, 0),
+        (2, 2, 0),
+        (4, 4, 0),
+        (15, 15, 0),
+        (16, 16, 0),
+        (17, 17, 0),
+        (31, 31, 0),
+        (32, 1, 31),
+        (33, 2, 31),
+        (63, 32, 31),
+        (64, 1, 63),
+        (65, 2, 63),
+        (127, 32, 95),
+        (129, 2, 127),
+        (256, 1, 255),
+        (1024, 1, 1023),
+    ] {
+        let mut c = cpu(&[0x0302, 0x8119, 0x0000]); // rep 2 r2 { r1 += 1 }
+        c.r[2] = count;
+        while c.pc != XIP + 4 {
+            c.step().unwrap();
+            assert!(c.steps <= 33);
+        }
+        assert_eq!((c.r[1], c.r[2]), (iterations, remaining));
+    }
+    for overwrite in [false, true] {
+        let words = if overwrite {
+            vec![0x0312, 0x05b2, 0x3962, 0x0000]
+        } else {
+            vec![0x0302, 0x05b2, 0x0000]
+        };
+        let end = XIP + if overwrite { 6 } else { 4 };
+        let mut c = cpu(&words);
+        c.r[2] = 4;
+        c.r[3] = RAM;
+        while c.pc != end {
+            c.step().unwrap();
+            assert!(c.steps <= 9);
+        }
+        for i in 0..4 {
+            assert_eq!(c.bus.read(RAM + i * 4, 4).unwrap(), 4 - i);
+        }
+        assert_eq!(c.r[2], 0);
     }
 }
 
@@ -268,27 +347,31 @@ fn immediate_repeat_clears_twenty_words_and_copies_multiword_blocks() {
 #[test]
 fn an_interrupt_preserves_the_unfinished_repeat() {
     use fm1_emu::devices::{IRQ_CONFIG, TIMER5};
-    let mut c = cpu(&[0x8200, 0x0592, 0x0000, 0x0081]);
-    c.r[1] = RAM;
-    c.r[2] = 42;
-    c.sr[14] = RAM + 256;
-    c.sr[13] = RAM + 512;
-    c.sr[11] = 0x100;
-    c.bus.write(0x01c7fe00 + 63 * 4, XIP + 6, 4).unwrap();
-    c.bus.write(IRQ_CONFIG + 7 * 4, 1 << 28, 4).unwrap();
-    c.bus.write(TIMER5 + 8, 1, 4).unwrap();
-    c.bus.write(TIMER5, 9, 4).unwrap();
-    c.interrupts_enabled = true;
-    c.step().unwrap();
-    assert_eq!(c.pc, XIP + 6);
-    c.bus.write(TIMER5, 0x4000, 4).unwrap();
-    c.step().unwrap(); // rti
-    while c.pc != XIP + 4 {
+    for repeat in [0x8200, 0x0303] {
+        let mut c = cpu(&[repeat, 0x0592, 0x0000, 0x0081]);
+        c.r[1] = RAM;
+        c.r[2] = 42;
+        c.r[3] = 3;
+        c.sr[14] = RAM + 256;
+        c.sr[13] = RAM + 512;
+        c.sr[11] = 0x100;
+        c.bus.write(0x01c7fe00 + 63 * 4, XIP + 6, 4).unwrap();
+        c.bus.write(IRQ_CONFIG + 7 * 4, 1 << 28, 4).unwrap();
+        c.bus.write(TIMER5 + 8, 1, 4).unwrap();
+        c.bus.write(TIMER5, 9, 4).unwrap();
+        c.interrupts_enabled = true;
         c.step().unwrap();
-        assert!(c.steps <= 5);
+        assert_eq!(c.pc, XIP + 6);
+        c.bus.write(TIMER5, 0x4000, 4).unwrap();
+        c.step().unwrap(); // rti
+        while c.pc != XIP + 4 {
+            c.step().unwrap();
+            assert!(c.steps <= 5);
+        }
+        assert_eq!(c.r[1], RAM + 12);
+        assert_eq!(c.bus.read(RAM + 8, 4).unwrap(), 42);
+        assert_eq!(c.r[3], if repeat == 0x0303 { 0 } else { 3 });
     }
-    assert_eq!(c.r[1], RAM + 12);
-    assert_eq!(c.bus.read(RAM + 8, 4).unwrap(), 42);
 }
 
 #[test]

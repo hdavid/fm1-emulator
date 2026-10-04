@@ -113,6 +113,14 @@ pub fn signed(value: u32, bits: u32) -> i32 {
     ((value << (32 - bits)) as i32) >> (32 - bits)
 }
 
+#[derive(Clone, Copy)]
+struct Repeat {
+    start: u32,
+    end: u32,
+    iterations: u32,
+    register: Option<(usize, u32)>,
+}
+
 pub struct Cpu {
     pub bus: Bus,
     pub r: [u32; 16],
@@ -124,8 +132,8 @@ pub struct Cpu {
     in_interrupt: bool,
     predicate_skip: Option<(u32, u32)>,
     irq_predicate: Option<(u32, u32)>,
-    repeat: Option<(u32, u32, u32)>,
-    irq_repeat: Option<(u32, u32, u32)>,
+    repeat: Option<Repeat>,
+    irq_repeat: Option<Repeat>,
     bus_locked: bool,
     secondary: Option<Core>,
     irq_priority_mask: u32,
@@ -141,8 +149,8 @@ struct Core {
     in_interrupt: bool,
     predicate_skip: Option<(u32, u32)>,
     irq_predicate: Option<(u32, u32)>,
-    repeat: Option<(u32, u32, u32)>,
-    irq_repeat: Option<(u32, u32, u32)>,
+    repeat: Option<Repeat>,
+    irq_repeat: Option<Repeat>,
     bus_locked: bool,
 }
 impl Core {
@@ -306,11 +314,18 @@ impl Cpu {
         } else {
             self.execute(h)?
         };
-        if let Some((start, end, count)) = self.repeat {
-            if self.pc == end {
-                if count > 1 {
-                    self.pc = start;
-                    self.repeat = Some((start, end, count - 1));
+        if let Some(mut repeat) = self.repeat {
+            if self.pc == repeat.end {
+                if let Some((register, count)) = repeat.register {
+                    // Hardware writes back its captured counter after each
+                    // iteration, even when the body overwrote that register.
+                    self.r[register] = count - 1;
+                    repeat.register = Some((register, count - 1));
+                }
+                if repeat.iterations > 1 {
+                    self.pc = repeat.start;
+                    repeat.iterations -= 1;
+                    self.repeat = Some(repeat);
                 } else {
                     self.repeat = None;
                 }
@@ -398,14 +413,25 @@ impl Cpu {
             }
             next = pc + 6;
         } else if h & 0xff00 == 0x0300 {
-            // Register-count repeat: one block per dispatch, with the remaining
-            // count tested by the compiler's following backward branch.
+            if self.repeat.is_some() {
+                return Err(Fault::Unsupported { pc, word: h as u16 });
+            }
             let register = (h & 15) as usize;
             let length = (((h >> 4) & 15) + 1) * 2;
-            if self.r[register] == 0 {
+            let count = self.r[register];
+            if count == 0 {
                 next = pc + 2 + length;
             } else {
-                self.r[register] -= 1;
+                // Measured on FM-1: 31 executes 31 times; 32 executes once
+                // leaving 31; 63 executes 32 times leaving 31. Compiler loops
+                // reissue REP until the remaining register count reaches zero.
+                let iterations = if count < 32 { count } else { (count & 31) + 1 };
+                self.repeat = Some(Repeat {
+                    start: pc + 2,
+                    end: pc + 2 + length,
+                    iterations,
+                    register: Some((register, count)),
+                });
             }
             op = "repeat_register";
         } else if h & 0xe00f == 0x8000 {
@@ -414,7 +440,12 @@ impl Cpu {
             }
             let length = (((h >> 4) & 15) + 1) * 2;
             let count = ((h >> 8) & 31) + 1;
-            self.repeat = Some((pc + 2, pc + 2 + length, count));
+            self.repeat = Some(Repeat {
+                start: pc + 2,
+                end: pc + 2 + length,
+                iterations: count,
+                register: None,
+            });
             op = "repeat_immediate";
         } else if h == 0xe064 {
             let extra = self.read(pc + 2, 2)?;
