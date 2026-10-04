@@ -323,6 +323,29 @@ fn packed_memory_and_preserves_the_high_cache_way_bits() {
 }
 
 #[test]
+fn wireless_bbp_transactions_store_and_read_selected_bytes() {
+    let mut c = cpu(&[0]);
+    let command = 0x3101c;
+    for (register, value) in [(21, 49), (22, 0), (25, 193)] {
+        c.bus
+            .write(command, 0x80000 | register << 8 | value, 4)
+            .unwrap();
+        c.bus
+            .write(command, 0xa0000 | register << 8 | value, 4)
+            .unwrap();
+        assert_eq!(c.bus.read(command, 4).unwrap() & 0x20000, 0);
+        c.bus.write(command, 0xb0000 | register << 8, 4).unwrap();
+        assert_eq!(c.bus.read(command, 4).unwrap() & 255, value);
+    }
+    for address in [0x31100, 0x11900, 0x11978] {
+        c.bus.write(address, 0x13579bdf, 4).unwrap();
+        assert_eq!(c.bus.read(address, 4).unwrap(), 0x13579bdf);
+    }
+    assert!(c.bus.read(0x31008, 4).is_err());
+    assert!(c.bus.read(0x1197c, 4).is_err());
+}
+
+#[test]
 fn wireless_configuration_preserves_writes_and_rejects_missing_operations() {
     let mut c = cpu(&[0]);
     for address in [
