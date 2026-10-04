@@ -32,9 +32,10 @@ pub(crate) fn execute(
         let n = (h & 15) as usize;
         cpu.r[n] = cpu.r[n].wrapping_mul(cpu.r[((h >> 4) & 15) as usize]);
         op = "multiply";
-    } else if h & 0xfff8 == 0x1480 {
-        cpu.r[a * 2] = 0;
-        cpu.r[a * 2 + 1] = 0;
+    } else if h & 0xfff1 == 0x1480 {
+        let destination = (h & 14) as usize;
+        cpu.r[destination] = 0;
+        cpu.r[destination + 1] = 0;
         op = "clear_pair";
     } else if h & 0xff00 == 0x1800 {
         let n = (h & 15) as usize;

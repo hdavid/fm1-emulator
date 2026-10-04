@@ -276,6 +276,18 @@ fn byte_and_halfword_stack_accesses_preserve_adjacent_fields() {
     assert_eq!(c.sr[14], RAM);
 }
 
+#[test]
+fn register_pair_clear_uses_the_encoded_even_register() {
+    for destination in (0..16).step_by(2) {
+        let mut c = cpu(&[0x1480 | destination as u16]);
+        c.r = std::array::from_fn(|i| 100 + i as u32);
+        let mut expected = c.r;
+        expected[destination..destination + 2].fill(0);
+        c.step().unwrap();
+        assert_eq!(c.r, expected);
+    }
+}
+
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {
