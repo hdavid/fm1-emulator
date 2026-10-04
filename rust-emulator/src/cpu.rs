@@ -202,6 +202,17 @@ impl Cpu {
                 return Err(Fault::Unsupported { pc, word: h as u16 });
             }
             next = pc + 6;
+        } else if h & 0xff00 == 0x0300 {
+            // Register-count repeat: one block per dispatch, with the remaining
+            // count tested by the compiler's following backward branch.
+            let register = (h & 15) as usize;
+            let length = (((h >> 4) & 15) + 1) * 2;
+            if self.r[register] == 0 {
+                next = pc + 2 + length;
+            } else {
+                self.r[register] -= 1;
+            }
+            op = "repeat_register";
         } else if h == 0xe064 {
             let extra = self.read(pc + 2, 2)?;
             let reg = ((extra >> 12) & 15) as usize;

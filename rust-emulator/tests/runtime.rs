@@ -24,6 +24,27 @@ fn stock_startup_long_calls_return_after_six_bytes() {
 }
 
 #[test]
+fn startup_repeat_clears_exactly_the_requested_words() {
+    // Stock startup: rep 2 r2 { [r3++=4] = r1 }; if (r2 != 0) goto rep.
+    for count in [0, 1, 3] {
+        let mut c = cpu(&[0x0302, 0x05b1, 0x5df2, 0x0000]);
+        c.r[1] = 0x11223344;
+        c.r[2] = count;
+        c.r[3] = RAM;
+        while c.pc != XIP + 6 {
+            c.step().unwrap();
+            assert!(c.steps <= 10);
+        }
+        assert_eq!(c.r[2], 0);
+        assert_eq!(c.r[3], RAM + count * 4);
+        for i in 0..count {
+            assert_eq!(c.bus.read(RAM + i * 4, 4).unwrap(), 0x11223344);
+        }
+        assert_eq!(c.bus.read(RAM + count * 4, 4).unwrap(), 0);
+    }
+}
+
+#[test]
 fn conditional_skip_counts_the_whole_long_call() {
     // if (r5 < 5) { call ... } else { r0=22 }.
     let mut c = cpu(&[0xe9b5, 0x1005, 0xff80, 0x00b0, 0x0000, 0x3640]);
