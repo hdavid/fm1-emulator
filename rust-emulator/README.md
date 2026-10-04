@@ -1,14 +1,65 @@
 # Rust FM-1 emulator
 
-Rust 1.91.1 is managed by the root `mise.toml`. The interpreter has no external
-Rust dependencies and executes vendor-built pi32v2 machine code.
+Rust 1.91.1 is managed by the root `mise.toml`. The interpreter executes vendor-built pi32v2 machine code without external
+Rust dependencies. The optional `gui` feature uses eframe/egui 0.31.1 for a
+native OpenGL window; the version and transitive dependencies are locked.
+
+On a fresh checkout, fetch the locked dependency metadata before offline tests:
 
 ```sh
+mise exec -- cargo fetch --manifest-path rust-emulator/Cargo.toml --locked
 mise run rust-test
 mise run rust-probe
 mise run build-foundation
 mise run rust-foundation
 ```
+
+## Native device window
+
+From the project root:
+
+```sh
+./emulator build/display/firmware.elf
+mise run build-display       # optional: rebuild guest with the vendor compiler
+mise run rust-gui-test       # core and GUI input integration tests
+```
+
+The launcher compiles a release `fm1-ui` executable using mise. On macOS it
+creates a local application bundle under `target/release`; on Linux it runs the
+binary directly (the host needs the normal eframe OpenGL/windowing development
+libraries). macOS is visually verified; Linux is not tested here. The existing
+`fm1-emu probe|boot` CLI is unchanged and does not require a display server.
+
+The panel is an original vector illustration drawn in Rust, using the device's
+[front-panel photograph](https://m.media-amazon.com/images/I/71fgwUHLJKL._AC_SL1500_.jpg)
+as a layout reference. No vendor product photo is bundled. Button identities
+follow the [pinned Felucca panel defaults](https://github.com/hugelton/Felucca/blob/1e838e17e170b20ff09b9660c9a7171aadfc5dca/firmware/src/panel.c)
+and the local `fm1_input.h` wiring. All fourteen buttons and twenty-seven note
+keys feed matrix contacts; rotary controls are currently decorative. Short
+clicks/keystrokes are held for at least 100 ms so a guest scan can observe them.
+Losing window focus releases contacts. Pause stops guest execution; Restart
+reloads the selected image and resets CPU, RAM, peripherals, and input state.
+
+The UI reads only the panel's 240×240 framebuffer, gated by display enable,
+sleep, and active-low PA2 backlight. There are no symbol-specific drawing hooks
+or substituted application functions. SPI1 commands and SRAM DMA implement
+software reset, sleep/display enable, RGB565 format, unrotated RGB/BGR, column/
+row windows, and pixel writes. Unsupported commands, rotations, and invalid DMA
+addresses fault visibly. Completion is synchronous, not cycle-accurate; INVON
+is treated as the FM-1 panel's normal electrical drive mode, not an RGB invert.
+The CPU runs bounded slices on the UI thread, not at a calibrated real-time rate.
+
+`firmware/display.S` is an opt-in extension of the foundation guest. After the
+same five foundation checks, it configures SPI/LCD, draws its own labels and
+buffered hexadecimal TIMER4 readout, rescans the matrix, and sends key tiles.
+The first frame takes 84,921 instructions and services one guest IRQ. Firmware
+is 2,700 bytes. This exercises LCD as a sixth foundation, with no claim of full
+panel compatibility or physical validation of this new path.
+
+The full FM-1_980 diagnostic still stops on opcode `0xE160` at `0x02001DB6` before
+initializing its LCD. That produces a stopped indicator and an error below a
+black device screen. It does not display a simulated diagnostic menu. Full
+Felucca, USB, audio, and flash emulation remain incomplete.
 
 The loader accepts an application `.bin` mapped at `0x02000120`, or an executable
 ELF32-pi32v2. ELF flash load addresses reconstruct the exact application `.bin`,
@@ -94,11 +145,14 @@ not a percentage of complete instruction-set or musical-feature coverage.
 | Interrupts | IRQ63 vector, masking, SSP handler frame, acknowledgment, `rti` | Nested priorities, other IRQs, physical entry-state validation |
 | Controls | Guest scans eleven columns; released/pressed and multiple-key cases agree | Scheduled events and full firmware debounce/encoder routines |
 | Flash | Not implemented | NOR, SPI, erase/program, XIP busy behavior |
-| LCD | Not implemented | SPI/DMA, controller commands, pixels |
+| LCD | Display guest initializes SPI/DMA, draws RGB565 pixels and live timer/key data | Other controller modes, SPI timing, hardware comparison |
 | USB serial | Not implemented | Controller, endpoints, enumeration, CDC |
 | USB MIDI | Not implemented | USB transport and MIDI packet handling |
 | Audio/DMA | Not implemented | Audio clocks, DMA, buffers and sample output |
 
-Current evidence: seventeen Rust integration tests pass; a native boot executes
+Original foundation evidence: seventeen Rust integration tests passed; a native boot executes
 2,371 instructions, services one guest interrupt, and reaches `foundation_done`.
 The guest's last result is `0x0050F00D`. See `build/foundation/verification.txt`.
+
+Current suite: 24 core integration tests and 3 GUI integration tests pass.
+See `build/display/verification.txt` for the display milestone and limitations.

@@ -16,6 +16,37 @@ forms and inputs; recovery paths and other hardware behavior remain unverified.
 The Python reference executes the shared CPU probe. It does not boot the complete diagnostic firmware
 or emulate USB, LCD, flash hardware, interrupts, audio, or cycle timing.
 
+## Graphical emulator
+
+```sh
+./emulator build/display/firmware.elf
+# Or load the identical raw application:
+./emulator build/display/firmware.bin
+```
+
+This opens a native window with an illustrated FM-1 panel. Its screen displays
+actual guest LCD writes through the emulated SPI/DMA controller. The included
+2,700-byte display firmware shows a live hexadecimal TIMER4 value and an
+11-column × 4-row key/button matrix. Hold a panel key or button to light its
+matrix cell. Arrow keys press OCT−/OCT+; `A W S E D R F G T H Y J K` play the
+first thirteen matrix note keys. There is no audio output yet.
+
+The launcher uses mise's Rust and builds the native interface on first use;
+that first build needs network access for Cargo dependencies and a host C/linker
+toolchain (Xcode Command Line Tools on macOS). Subsequent launches use the cached
+build. Docker is needed only to **rebuild guest firmware**, not to run the window.
+Use `mise run build-display` to rebuild the included display demo.
+
+Any supported application `.elf` or `.bin` can be passed as the path. Loading an
+image does not imply its instructions/peripherals are all implemented: the full
+FM-1_980 diagnostic and Felucca do **not** boot yet. Unsupported instructions and
+peripherals stop execution and report the reason below the device. `.fwsc` update
+packages are not yet accepted. Pause freezes the CPU; Restart reloads the file.
+Rotary controls are visual only. No physical device is accessed by this launcher.
+
+The display demo is emulator-only firmware without an updater or recovery;
+**do not flash it**. The original installable diagnostic package is unchanged.
+
 ## Setup with mise
 
 Install [mise](https://mise.jdx.dev/installing-mise.html), unzip this project, and
@@ -161,10 +192,10 @@ mise run rust-test
 The foundation firmware initializes RAM, executes RAM code and the CPU probe,
 uses TIMER4/TIMER5, services a guest interrupt, and scans all eleven key-matrix
 columns. These exercise five of the ten agreed emulator foundations: CPU,
-memory/startup, timers, interrupts, and controls. Seventeen Rust integration
-tests pass. This is a foundation checklist, not a claim that half of Felucca's
+memory/startup, timers, interrupts, and controls. The original milestone had seventeen Rust integration
+tests. The display extension adds LCD support as a sixth exercised foundation. This is a foundation checklist, not a claim that half of Felucca's
 musical features or instruction set is implemented. Full Felucca boot, flash,
-LCD, USB serial, USB MIDI, and audio/DMA remain future work.
+USB serial, USB MIDI, and audio/DMA remain future work.
 
 The foundation image is for emulator tests and has no updater/recovery; do not
 flash it. The installed physical firmware remains `FM-1_980`.
