@@ -18,6 +18,20 @@ fn compiler_parallel_store_uses_the_previous_register_value() {
     assert_eq!(c.r[0], 0x4009);
     assert_eq!(c.pc, XIP + 6);
 }
+
+#[test]
+fn parallel_add_reads_the_old_value_of_the_register_loaded_by_the_other_slot() {
+    // cv_text: r1 += r0 # r0 = [sp].
+    let mut c = cpu(&[0xd801, 0x2000]);
+    c.r[0] = 0x3900;
+    c.r[1] = 0x0205c9f0;
+    c.sr[14] = RAM;
+    c.bus.write(RAM, 0x0205c930, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.r[1], 0x020602f0);
+    assert_eq!(c.r[0], 0x0205c930);
+    assert_eq!(c.pc, XIP + 4);
+}
 #[test]
 fn compiler_signed_immediates_terminate_decimal_printing() {
     let mut c = cpu(&[0xe040, 0xa240, 0xf8f5, 0xfffe]);

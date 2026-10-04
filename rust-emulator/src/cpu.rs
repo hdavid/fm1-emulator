@@ -107,10 +107,27 @@ impl Cpu {
             let normalized = if length == 2 { h & 0x1fff } else { h & !0x1000 };
             self.pc = pc + length;
             let following = self.read(self.pc, 2)?;
+            let before = self.r;
+            let specials_before = self.sr;
             self.execute(following)?;
+            let following_registers = self.r;
+            let following_specials = self.sr;
             let continuation = self.pc;
+            self.r = before;
+            self.sr = specials_before;
             self.pc = pc;
             let op = self.execute(normalized)?;
+            // Both slots read the incoming registers. Compiler bundles have
+            // distinct destinations; retain writes from the following slot
+            // where the primary slot did not change that register.
+            for i in 0..16 {
+                if self.r[i] == before[i] {
+                    self.r[i] = following_registers[i];
+                }
+                if self.sr[i] == specials_before[i] {
+                    self.sr[i] = following_specials[i];
+                }
+            }
             self.pc = continuation;
             op
         } else {
