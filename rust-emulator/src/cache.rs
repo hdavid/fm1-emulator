@@ -21,6 +21,10 @@ impl Cache {
         (offset.checked_add(n)? <= len).then_some(offset)
     }
     pub fn read(&self, a: u32, n: usize) -> Option<u32> {
+        if n == 4 && matches!(a, 0x40400 | 0x40500) {
+            // SRAM/SFC machine: SDR and PSRAM controllers are disabled.
+            return Some(0);
+        }
         if n == 4 && (0x1eee008..=0x1eee010).contains(&a) {
             let mut value = self.regs[((a - 0x1eee008) / 4) as usize];
             if a == 0x1eee008 {
@@ -41,6 +45,9 @@ impl Cache {
         )
     }
     pub fn write(&mut self, a: u32, n: usize, v: u32) -> Option<()> {
+        if n == 4 && matches!(a, 0x40400 | 0x40500) && v == 0 {
+            return Some(());
+        }
         if n == 4 && (0x1eee008..=0x1eee010).contains(&a) {
             self.regs[((a - 0x1eee008) / 4) as usize] =
                 if a == 0x1eee008 { v & !0x4000 } else { v };

@@ -15,4 +15,8 @@ fn cache_configuration_preserves_idle_and_tag_ram_is_bounded() {
     }
     assert!(bus.read(0x1f0c000, 4).is_err());
     assert!(bus.write(0x1f30000, 0, 4).is_err());
+    for address in [0x40400, 0x40500] {
+        assert_eq!(bus.read(address, 4).unwrap(), 0);
+        assert!(bus.write(address, 1, 4).is_err());
+    }
 }
