@@ -246,6 +246,18 @@ fn halfword_register_preincrement_reads_signed_lookup_values() {
     assert_eq!(c.r[3], 0xfffffedc);
 }
 
+#[test]
+fn memory_shift_scales_the_stereo_output_word() {
+    let mut c = cpu(&[0xe86c, 0x3704]); // [r3+4] <<= 7
+    c.r[3] = RAM;
+    c.bus.write(RAM, 123, 4).unwrap();
+    c.bus.write(RAM + 4, (-100i32) as u32, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 4, 4).unwrap(), (-12800i32) as u32);
+    assert_eq!(c.bus.read(RAM, 4).unwrap(), 123);
+    assert_eq!(c.r[3], RAM);
+}
+
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {
