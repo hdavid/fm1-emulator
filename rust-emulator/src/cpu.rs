@@ -552,13 +552,25 @@ impl Cpu {
             }
             next = self.pop()?;
             op = "pop_pc_regs";
-        } else if h == 0x04e9 {
+        } else if matches!(h, 0x1440..=0x1443) {
+            match h {
+                0x1440 => self.sr[14] = self.sr[12],
+                0x1441 => self.sr[14] = self.sr[13],
+                0x1442 => self.sr[12] = self.sr[14],
+                _ => self.sr[13] = self.sr[14],
+            }
+            op = "move_stack_pointer";
+        } else if matches!(h, 0x04e8 | 0x04e9) {
             self.push(self.sr[5])?;
             self.push(self.sr[3])?;
-            self.push(self.sr[0])?;
+            if h == 0x04e9 {
+                self.push(self.sr[0])?;
+            }
             op = "push_irq_frame";
-        } else if h == 0x04a9 {
-            self.sr[0] = self.pop()?;
+        } else if matches!(h, 0x04a8 | 0x04a9) {
+            if h == 0x04a9 {
+                self.sr[0] = self.pop()?;
+            }
             self.sr[3] = self.pop()?;
             self.sr[5] = self.pop()?;
             op = "pop_irq_frame";

@@ -8,6 +8,34 @@ fn cpu(words: &[u16]) -> Cpu {
     )
 }
 #[test]
+fn scheduler_restores_the_task_frame_and_stack_pointer_banks() {
+    let mut c = cpu(&[0x04e8, 0x04a8, 0x1442, 0x1443, 0x1440, 0x1441]);
+    c.sr[14] = RAM + 64;
+    c.sr[5] = 0x12345678;
+    c.sr[3] = XIP + 20;
+    c.sr[0] = XIP + 24;
+    c.step().unwrap();
+    assert_eq!(c.sr[14], RAM + 56);
+    assert_eq!(c.bus.read(RAM + 56, 4).unwrap(), XIP + 20);
+    assert_eq!(c.bus.read(RAM + 60, 4).unwrap(), 0x12345678);
+    c.sr[3] = 0;
+    c.sr[5] = 0;
+    c.step().unwrap();
+    assert_eq!(c.sr[14], RAM + 64);
+    assert_eq!(c.sr[3], XIP + 20);
+    assert_eq!(c.sr[5], 0x12345678);
+    assert_eq!(c.sr[0], XIP + 24);
+    c.step().unwrap();
+    c.sr[14] = RAM + 128;
+    c.step().unwrap();
+    c.sr[14] = 0;
+    c.step().unwrap();
+    assert_eq!(c.sr[14], RAM + 64);
+    c.step().unwrap();
+    assert_eq!(c.sr[14], RAM + 128);
+}
+
+#[test]
 fn stock_startup_long_calls_return_after_six_bytes() {
     // Vendor disassembly: call 176, and nested call -10 to an rts.
     let mut c = cpu(&[0xff80, 0x00b0, 0x0000]);
