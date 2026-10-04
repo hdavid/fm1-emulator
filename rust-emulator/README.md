@@ -5,7 +5,7 @@ Rust dependencies. The optional `gui` feature uses eframe/egui 0.31.1 for a
 native OpenGL window; the version and transitive dependencies are locked.
 
 The [full Felucca boot investigation](FELUCCA.md) records the verified firmware
-inputs, startup failures, decoder fixes, and current user-flash blocker. It also
+inputs, resolved startup failures, decoder fixes, full boot and note checks. It also
 documents the bounded `diagnose` runner for symbol and peripheral reports.
 
 On a fresh checkout, fetch the locked dependency metadata before offline tests:
@@ -40,7 +40,8 @@ as a layout reference. No vendor product photo is bundled. Button identities
 follow the [pinned Felucca panel defaults](https://github.com/hugelton/Felucca/blob/1e838e17e170b20ff09b9660c9a7171aadfc5dca/firmware/src/panel.c)
 and the local `fm1_input.h` wiring. All fourteen buttons and twenty-seven note
 keys feed matrix contacts; rotary controls are currently decorative. Short
-clicks/keystrokes are held for at least 100 ms so a guest scan can observe them.
+clicks/keystrokes are held for at least 100 ms of both host and guest time so a
+slow guest scan can observe and debounce them.
 Losing window focus releases contacts. Pause stops guest execution; Restart
 reloads the selected image and resets CPU, RAM, peripherals, and input state.
 
@@ -75,7 +76,9 @@ feeding ceases. NOR supports JEDEC/status/read transactions used at startup;
 erase/program and persistent flash images are not implemented. CPU write guards
 reject protected RAM writes; full guard exception dispatch and stack/PC limit
 hardware remain incomplete. Reset requests stop rather than emulate ROM boot.
-Full Felucca, audio and additional CPU/peripheral behavior remain incomplete.
+Full Felucca boots into its UI and renders note samples through ALNK DMA.
+Additional engines, CPU forms and peripheral behavior remain incomplete;
+host audio playback is absent. See [the measured full-firmware checks](FELUCCA.md).
 
 The loader accepts an application `.bin` mapped at `0x02000120`, or an executable
 ELF32-pi32v2. ELF flash load addresses reconstruct the exact application `.bin`,
@@ -162,17 +165,17 @@ not a percentage of complete instruction-set or musical-feature coverage.
 | CPU | Guest executes real vendor machine code; twelve probe words match hardware | Further ISA forms, flags and independent instruction probes |
 | Memory/startup | ELF equals raw flash image; guest copies data and RAM code, clears dirty BSS, executes RAM code | ROM/SPL, reset retention, boot parameters |
 | Timers | Guest sees TIMER4 progress; TIMER5 produces a periodic event | Other sources/dividers and measured cycle timing |
-| Interrupts | IRQ63 vector, masking, SSP handler frame, acknowledgment, `rti` | Nested priorities, other IRQs, physical entry-state validation |
+| Interrupts | IRQ63/ALNK11 vectors, masking, SSP handler frame, acknowledgment, `rti`, priority selection | Nested priorities, other IRQs, physical entry-state validation |
 | Controls | Guest scans eleven columns; released/pressed and multiple-key cases agree | Scheduled events and UI encoder input |
-| Flash | Startup JEDEC/status/NOR reads | Erase/program, persistence, XIP busy behavior |
+| Flash | Startup JEDEC/status/NOR reads; plain XIP shares physical NOR storage | Erase/program, persistence, XIP busy behavior |
 | LCD | Display guest initializes SPI/DMA, draws RGB565 pixels and live timer/key data | Other controller modes, SPI timing, pixel-exact physical comparison |
 | USB serial | Hardware guest enumerates and sends CDC debug bytes through DMA | Host OUT packets, broader controller/USB behavior |
 | USB MIDI | Not implemented | USB transport and MIDI packet handling |
-| Audio/DMA | Not implemented | Audio clocks, DMA, buffers and sample output |
+| Audio/DMA | Unchanged Felucca renders stereo SRAM, alternates ALNK halves, services audio IRQs; note samples are nonzero | Host playback, other clocks/formats, codec analog behavior, cycle timing |
 
 Original foundation evidence: seventeen Rust integration tests passed; a native boot executes
 2,371 instructions, services one guest interrupt, and reaches `foundation_done`.
 The guest's last result is `0x0050F00D`. See `build/foundation/verification.txt`.
 
-Current suite: 31 core integration tests and 3 GUI tests pass.
+Current suite: 65 ordinary Rust tests and an opt-in full Felucca test pass.
 See `build/display/verification.txt` for the display milestone and limitations.

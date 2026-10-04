@@ -209,8 +209,11 @@ uses TIMER4/TIMER5, services a guest interrupt, and scans all eleven key-matrix
 columns. These exercise five of the ten agreed emulator foundations: CPU,
 memory/startup, timers, interrupts, and controls. The original milestone had seventeen Rust integration
 tests. The hardware display application additionally exercises LCD and USB
-serial, bringing the checklist to seven foundations. NOR reads are partial;
-erase/program, USB MIDI host transport, audio/DMA, and full Felucca boot remain.
+serial. Full, unchanged Felucca now boots and exercises audio/DMA as an eighth
+foundation, plus battery/master ADC reads. The main screen, CDC console banner,
+note rendering and ENV selection are verified. NOR reads are partial;
+erase/program, persistence, USB MIDI host transport, rotary input and host audio
+playback remain. See [the full Felucca investigation](rust-emulator/FELUCCA.md).
 This checklist does not measure musical features or full instruction coverage.
 
 The foundation image is for emulator tests and has no updater/recovery; do not
