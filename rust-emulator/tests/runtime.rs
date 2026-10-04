@@ -112,6 +112,35 @@ fn an_interrupt_preserves_the_unfinished_repeat() {
 }
 
 #[test]
+fn atomic_lock_flags_match_twelve_physical_fm1_measurements() {
+    for (byte, flags, taken) in [
+        (0, 0, false),
+        (1, 1, false),
+        (0x80, 0, false),
+        (0xff, 15, true),
+        (2, 2, false),
+        (4, 4, true),
+        (8, 8, false),
+        (15, 15, true),
+        (0x7f, 15, true),
+        (0xfe, 14, true),
+        (0xf0, 0, false),
+        (0x10, 0, false),
+    ] {
+        let mut c = cpu(&[0x00b1, 0xe840, 0x0002, 0x0000, 0x0000, 0x0000]);
+        c.r[1] = RAM + 1;
+        c.bus.write(RAM, 0x44332211, 4).unwrap();
+        c.bus.write(RAM + 1, byte, 1).unwrap();
+        c.step().unwrap();
+        assert_eq!(c.sr[5], flags);
+        assert_eq!(c.bus.read(RAM, 4).unwrap(), 0x4433ff11);
+        assert_eq!(c.r[1], RAM + 1);
+        c.step().unwrap();
+        assert_eq!(c.pc, if taken { XIP + 10 } else { XIP + 6 });
+    }
+}
+
+#[test]
 fn conditional_skip_counts_the_whole_long_call() {
     // if (r5 < 5) { call ... } else { r0=22 }.
     let mut c = cpu(&[0xe9b5, 0x1005, 0xff80, 0x00b0, 0x0000, 0x3640]);

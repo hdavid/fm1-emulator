@@ -440,6 +440,11 @@ pub(crate) fn execute(
                 (cpu.r[d] >> pos) & mask
             };
             op = "bit_field";
+        } else if h == 0xe840 {
+            if cpu.sr[5] & 4 != 0 {
+                next = next.wrapping_add((signed(x, 16) * 2) as u32);
+            }
+            op = "branch_equal_flag";
         } else if h & 0xfff0 == 0xe850 {
             let test = (cpu.r[n] & (1 << ((x >> 11) & 31)) != 0) == (x & 512 != 0);
             if test {

@@ -454,6 +454,16 @@ impl Cpu {
             } else {
                 "branch_zero"
             };
+        } else if h & 0xfff0 == 0x00b0 {
+            let address = self.r[(h & 15) as usize];
+            let old = self.read(address, 1)?;
+            self.bus
+                .write(address, 0xff, 1)
+                .map_err(|fault| Fault::Access { pc, fault })?;
+            // FM-1_982 physical probe: the old byte's low nibble is copied
+            // into the four PSR condition bits, not a comparison result.
+            self.sr[5] = (self.sr[5] & !15) | (old & 15);
+            op = "testset_byte";
         } else if h == 0x0080 {
             next = self.sr[3];
             op = "return";
