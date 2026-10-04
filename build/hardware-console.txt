@@ -1,0 +1,4 @@
+
+> help
+status  dbg  crash  params  memr ADDR [LEN]  flr OFF [LEN]  uboot yes
+> 

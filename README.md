@@ -7,8 +7,13 @@ It contains **no synth engines, effects, sequencer, sample data, editor, or pres
 storage**. The compiled application is 14,804 bytes. Its experimental package
 identity is `FM-1_980`; this is not an official M-VAVE or Felucca release.
 
-**Built and tested on the host; not yet tested on a physical FM-1.** The emulator
-executes the shared CPU probe. It does not boot the complete diagnostic firmware
+**Initial physical FM-1 comparison passed on 2026-10-04.** The device was updated
+from Felucca `FM-1_909` to diagnostic `FM-1_980`, restarted successfully, and all
+twelve CPU-probe result words matched the emulator with the same probe hash.
+The initial capture is preserved in `build/hardware-initial.txt`; the session record is
+`build/hardware-verification.txt`. This validates the probe's tested instruction
+forms and inputs; recovery paths and other hardware behavior remain unverified.
+The emulator executes the shared CPU probe. It does not boot the complete diagnostic firmware
 or emulate USB, LCD, flash hardware, interrupts, audio, or cycle timing.
 
 ## Setup with mise
@@ -109,7 +114,9 @@ mismatch. It does not authenticate the origin of a text file.
 
 Send back `build/hardware.txt` and `build/emulator.json`. For a mismatch, also
 include `build/trace.jsonl`. If USB never appears, report the screen contents and
-the updater output. No real-device results are included in this archive.
+the updater output. The original archive's `build/validation.json` describes
+host validation before the physical test; see `build/hardware-verification.txt`
+for the subsequent device comparison.
 
 ## What is compared
 
