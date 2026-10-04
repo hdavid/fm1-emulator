@@ -57,12 +57,6 @@ display_main:
     r0 = 0x29
     call lcd_command
 .Lframe:
-    r0 = 24
-    r1 = 80
-    r2 = 144
-    r3 = 30
-    r4 = 0x82108210
-    call lcd_rect
     r0 = 0x10800
     r0 = [r0 + 4]
     r1 = display_ticks
@@ -272,26 +266,78 @@ lcd_text:
     r4 += -1
     if (r4 != 0) goto .Ltext
     restore
-/* 32-bit value, x, y */
+/* 32-bit timer readout. Compose the 144x30 band in guest SRAM before
+ * one DMA transfer, avoiding partially erased digits between host frames. */
 lcd_hex:
     save
     r5 = r0
-    r6 = r1
-    r7 = r2
-    r4 = 8
+    r0 = counter_buffer
+    r1 = 2160
+    r2 = 0x82108210
+.Lclear_counter:
+    [r0 + 0] = r2
+    r0 += 4
+    r1 += -1
+    if (r1 != 0) goto .Lclear_counter
+    r6 = counter_buffer
+    r7 = 8
 .Lhex:
     r0 = r5 >> 28
     r0 = r0 << 2
     r1 = hex_font
     r0 += r1
-    r0 = [r0 + 0]
-    r1 = r6
-    r2 = r7
-    call lcd_glyph
+    r4 = [r0 + 0]
+    .rept 5
+    r2 = r6
+    .rept 3
+    r0 = r4 >> 14
+    r1 = 1
+    r0 &= r1
+    r1 = 0x82108210
+    if (r0 == 0) goto 3f
+    r1 = 0xFFFFFFFF
+3:
+    r3 = r2
+    r0 = 288
+    .rept 4
+    [r3 + 0] = r1
+    [r3 + 4] = r1
+    r3 += r0
+    .endr
+    r2 += 12
+    r4 = r4 << 1
+    .endr
+    r0 = 1728
+    r6 += r0
+    .endr
+    r0 = 8640
+    r6 -= r0
+    r6 += 36
     r5 = r5 << 4
-    r6 += 18
-    r4 += -1
-    if (r4 != 0) goto .Lhex
+    r7 += -1
+    if (r7 == 0) goto .Lcounter_dma
+    goto .Lhex
+.Lcounter_dma:
+    r5 = lcd_window
+    r0 = 0xA7001800
+    [r5 + 0] = r0
+    r0 = 0x6D005000
+    [r5 + 4] = r0
+    r0 = 0x2A
+    call lcd_command
+    r0 = r5
+    r1 = 4
+    call lcd_dma
+    r0 = 0x2B
+    call lcd_command
+    r0 = r5
+    r0 += 4
+    call lcd_dma
+    r0 = 0x2C
+    call lcd_command
+    r0 = counter_buffer
+    r1 = 8640
+    call lcd_dma
     restore
     .align 4
 hex_font:
@@ -319,3 +365,6 @@ lcd_line: .space 480
 display_frames: .space 4
     .globl display_ticks
 display_ticks: .space 4
+
+    .align 4
+counter_buffer: .space 8640
