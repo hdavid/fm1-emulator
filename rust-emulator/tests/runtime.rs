@@ -258,6 +258,24 @@ fn memory_shift_scales_the_stereo_output_word() {
     assert_eq!(c.r[3], RAM);
 }
 
+#[test]
+fn byte_and_halfword_stack_accesses_preserve_adjacent_fields() {
+    let mut c = cpu(&[
+        0xe9de, 0x814a, 0xe9d8, 0x8149, 0xe9dd, 0x114a, 0xe9d9, 0x2148,
+    ]);
+    c.sr[14] = RAM;
+    c.r[8] = 0xabcdfedc;
+    c.bus.write(RAM + 328, 0x11223344, 4).unwrap();
+    c.step().unwrap(); // b[sp+330] = r8
+    c.step().unwrap(); // h[sp+328] = r8
+    assert_eq!(c.bus.read(RAM + 328, 4).unwrap(), 0x11dcfedc);
+    c.step().unwrap(); // r1 = b[sp+330] (s)
+    c.step().unwrap(); // r2 = h[sp+328] (s)
+    assert_eq!(c.r[1], 0xffffffdc);
+    assert_eq!(c.r[2], 0xfffffedc);
+    assert_eq!(c.sr[14], RAM);
+}
+
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {

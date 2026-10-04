@@ -386,6 +386,23 @@ pub(crate) fn execute(
                 }
             }
             op = "load_register_list";
+        } else if matches!(h, 0xe9d8 | 0xe9d9 | 0xe9dc | 0xe9dd | 0xe9de) {
+            let halfword = h & 4 == 0;
+            let offset = if halfword { x & 4094 } else { x & 4095 };
+            mem = Some((
+                d,
+                0,
+                cpu.sr[14].wrapping_add(offset),
+                if halfword { 2 } else { 1 },
+                if halfword {
+                    h == 0xe9d8 && x & 1 != 0
+                } else {
+                    h == 0xe9de
+                },
+                h & 1 != 0,
+                None,
+            ));
+            op = "stack_subword";
         } else if h == 0xe9d4 {
             mem = Some((d, 0, cpu.sr[14] + (x & 4092), 4, x & 1 != 0, false, None));
             op = "stack_extended";
