@@ -5,17 +5,22 @@ import struct
 from build import tool, ROOT
 
 
-def main():
-    out = ROOT / "build/foundation"
+def main(display=False):
+    directory = "build/display" if display else "build/foundation"
+    out = ROOT / directory
     out.mkdir(parents=True, exist_ok=True)
-    for source, name in [("foundation", "start"), ("probe", "probe")]:
+    sources = [("foundation", "start"), ("probe", "probe")]
+    if display:
+        sources.append(("display", "display"))
+    for source, name in sources:
         tool("pi32v2/bin/clang", "-target", "pi32v2", "-c",
-             f"firmware/{source}.S", "-o", f"build/foundation/{name}.o")
+             *(["-DFM1_DISPLAY"] if display else []),
+             f"firmware/{source}.S", "-o", f"{directory}/{name}.o")
     tool("pi32v2/bin/ld", "-e", "_start", "-T", "firmware/app.ld",
-         "build/foundation/start.o", "build/foundation/probe.o",
-         "-o", "build/foundation/firmware.elf")
+         *[f"{directory}/{name}.o" for _, name in sources],
+         "-o", f"{directory}/firmware.elf")
     for option, name in [("-d", "firmware.dis"), ("-t", "firmware.symbols")]:
-        text = tool("common/bin/objdump", option, "build/foundation/firmware.elf")
+        text = tool("common/bin/objdump", option, f"{directory}/firmware.elf")
         (out / name).write_text("\n".join(line.rstrip() for line in text.splitlines()) + "\n")
     elf = (out / "firmware.elf").read_bytes()
     phoff = struct.unpack_from("<I", elf, 28)[0]

@@ -63,3 +63,7 @@ run = "cargo run --manifest-path rust-emulator/Cargo.toml --offline -- probe bui
 [tasks.rust-boot]
 description = "Start the diagnostic firmware and report the first emulation blocker"
 run = "cargo run --manifest-path rust-emulator/Cargo.toml --offline -- boot build/fm1-diag.elf"
+
+[tasks.build-display]
+description = "Build emulator-only firmware with live LCD timer and key-matrix output"
+run = "uv run --frozen python tools/build_display.py"

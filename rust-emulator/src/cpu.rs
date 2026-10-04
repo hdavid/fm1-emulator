@@ -282,6 +282,12 @@ impl Cpu {
                 op = "goto_rel22";
             }
             next = (pc + 4).wrapping_add(displacement as u32);
+        } else if h & 0xe08f == 0x8001 {
+            // Vendor assembler's short relative call (signed 9-bit byte offset).
+            let displacement = signed((((h >> 4) & 7) << 6) | (((h >> 8) & 31) << 1), 9);
+            self.sr[3] = pc + 2;
+            next = (pc + 2).wrapping_add(displacement as u32);
+            op = "call_rel9";
         } else if h & 0xe00c == 0x8004 {
             let displacement = signed(
                 ((h & 3) << 10) | (((h >> 4) & 15) << 6) | (((h >> 8) & 31) << 1),

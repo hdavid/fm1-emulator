@@ -156,6 +156,9 @@ _start:
     [r2 + 32] = r1
     r1 = 0x0050F00D
     [r2 + 36] = r1
+#ifdef FM1_DISPLAY
+    call display_main
+#endif
     .globl foundation_done
 foundation_done:
     goto foundation_done
