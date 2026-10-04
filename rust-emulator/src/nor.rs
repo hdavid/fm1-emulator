@@ -9,28 +9,6 @@ pub struct Nor {
     cursor: usize,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::Nor;
-
-    #[test]
-    fn spi_and_plain_xip_read_the_same_physical_bytes() {
-        let mut nor = Nor::default();
-        nor.bytes[0xa0000..0xa0004].copy_from_slice(&[0x46, 0x53, 0x4d, 0x50]);
-        nor.write(0x4030c, 0x0208f000).unwrap().unwrap();
-        nor.write(0x40308, 0x07ffffff).unwrap().unwrap();
-        nor.write(0x40300, 3).unwrap().unwrap();
-        assert_eq!(nor.xip(0x0209c000, 4).unwrap().unwrap(), 0x504d5346);
-        nor.chip_select(true);
-        for byte in [0x03, 0x0a, 0x00, 0x00] {
-            nor.write(0x11c08, byte).unwrap().unwrap();
-        }
-        for expected in [0x46, 0x53, 0x4d, 0x50] {
-            nor.write(0x11c08, 0xff).unwrap().unwrap();
-            assert_eq!(nor.read(0x11c08), Some(expected));
-        }
-    }
-}
 impl Default for Nor {
     fn default() -> Self {
         Self {
@@ -42,6 +20,7 @@ impl Default for Nor {
         }
     }
 }
+
 impl Nor {
     pub fn xip_active(&self) -> bool {
         self.read(0x40200).unwrap() & 1 != 0 && self.read(0x5101c).unwrap() & 32 != 0
@@ -133,5 +112,28 @@ impl Nor {
         }
         self.regs.insert(a, value);
         Some(Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Nor;
+
+    #[test]
+    fn spi_and_plain_xip_read_the_same_physical_bytes() {
+        let mut nor = Nor::default();
+        nor.bytes[0xa0000..0xa0004].copy_from_slice(&[0x46, 0x53, 0x4d, 0x50]);
+        nor.write(0x4030c, 0x0208f000).unwrap().unwrap();
+        nor.write(0x40308, 0x07ffffff).unwrap().unwrap();
+        nor.write(0x40300, 3).unwrap().unwrap();
+        assert_eq!(nor.xip(0x0209c000, 4).unwrap().unwrap(), 0x504d5346);
+        nor.chip_select(true);
+        for byte in [0x03, 0x0a, 0x00, 0x00] {
+            nor.write(0x11c08, byte).unwrap().unwrap();
+        }
+        for expected in [0x46, 0x53, 0x4d, 0x50] {
+            nor.write(0x11c08, 0xff).unwrap().unwrap();
+            assert_eq!(nor.read(0x11c08), Some(expected));
+        }
     }
 }
