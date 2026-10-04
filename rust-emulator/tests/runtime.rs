@@ -159,6 +159,40 @@ fn core_tick_timer_wraps_acknowledges_and_obeys_irq_priority() {
 }
 
 #[test]
+fn stock_rc_calibration_measures_and_rearms_the_low_speed_clock() {
+    use fm1_emu::devices::{IRQ_CONFIG, IRQ_PENDING};
+    let mut c = cpu(&[0]);
+    let lrct = 0x13600;
+    // SDK IRQ 44, priority 2; the stock driver clears, disables, configures,
+    // then enables each measurement, and acknowledges again in its handler.
+    c.bus.write(IRQ_CONFIG + 20, 5 << 16, 4).unwrap();
+    for exponent in [1, 0, 1] {
+        c.bus.write(lrct, 64, 4).unwrap();
+        c.bus.write(lrct, 0, 4).unwrap();
+        c.bus.write(lrct, (exponent << 1) | 1, 4).unwrap();
+        assert_eq!(c.bus.pending_irq(0x100), None);
+        let cycles = 32u32 << exponent;
+        c.bus.devices.advance(cycles * 750 - 1);
+        assert_eq!(c.bus.pending_irq(0x100), None);
+        c.bus.devices.advance(1);
+        assert_eq!(c.bus.pending_irq(0), None);
+        assert_eq!(c.bus.pending_irq(0x100), Some(44));
+        assert_eq!(c.bus.read(IRQ_PENDING + 4, 4).unwrap(), 1 << 12);
+        let number = c.bus.read(lrct + 4, 4).unwrap();
+        assert_eq!(cycles as u64 * 480_000_000 / number as u64, 32_000);
+        c.bus
+            .write(lrct, c.bus.read(lrct, 4).unwrap() | 64, 4)
+            .unwrap();
+        assert_eq!(c.bus.pending_irq(0x100), None);
+    }
+    c.bus.write(lrct, 0, 4).unwrap();
+    c.bus.devices.advance(100_000);
+    assert_eq!(c.bus.pending_irq(0x100), None);
+    assert!(c.bus.read(lrct, 1).is_err());
+    assert!(c.bus.write(lrct, 1, 1).is_err());
+}
+
+#[test]
 fn startup_timer_banks_count_and_signal_their_sdk_interrupts() {
     use fm1_emu::devices::{IRQ_CONFIG, IRQ_PENDING};
     for index in 0..4 {

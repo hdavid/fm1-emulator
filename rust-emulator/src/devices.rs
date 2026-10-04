@@ -55,6 +55,55 @@ impl TickTimer {
     }
 }
 
+// WL82.h/hwi.h: low-speed RC measurement, IRQ 44. Stock measures 32 or 64
+// RC cycles against the 480 MHz PLL and converts NUM back to hertz. Model
+// a nominal 32 kHz RC clock, with elapsed time in 24 MHz oscillator ticks.
+#[derive(Default)]
+struct RcMeasurement {
+    control: u8,
+    elapsed: u32,
+    number: u32,
+    pending: bool,
+}
+impl RcMeasurement {
+    fn read(&self, offset: u32) -> Option<u32> {
+        match offset {
+            0 => Some(self.control as u32 | if self.pending { 128 } else { 0 }),
+            4 => Some(self.number),
+            _ => None,
+        }
+    }
+    fn write(&mut self, offset: u32, value: u32) -> Option<Result<(), &'static str>> {
+        if offset != 0 {
+            return (offset == 4).then_some(Err("RC measurement result is read-only"));
+        }
+        if value & !0xc3 != 0 {
+            return Some(Err("unsupported RC measurement configuration"));
+        }
+        if value & 64 != 0 {
+            self.pending = false;
+        }
+        if value & 1 == 0 || self.control & 1 == 0 {
+            self.elapsed = 0;
+        }
+        self.control = (value & 3) as u8;
+        Some(Ok(()))
+    }
+    fn advance(&mut self, ticks: u32) {
+        if self.control & 1 == 0 || self.pending {
+            return;
+        }
+        let cycles = 32 << ((self.control >> 1) & 1);
+        let period = cycles * (24_000_000 / 32_000);
+        self.elapsed = self.elapsed.saturating_add(ticks);
+        if self.elapsed >= period {
+            self.number = cycles * (480_000_000 / 32_000);
+            self.elapsed = 0;
+            self.pending = true;
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Timer {
     control: u32,
@@ -129,6 +178,7 @@ pub struct Devices {
     pub tick: TickTimer,
     startup_timers: [Timer; 4],
     tick_secondary: TickTimer,
+    rc_measurement: RcMeasurement,
     irq_config: [[u32; 32]; 2],
     priority_mask: [u32; 2],
     software: u8,
@@ -157,6 +207,8 @@ impl Devices {
             self.timer5.read(a - TIMER5)
         } else if (TICK_TIMER..TICK_TIMER + 12).contains(&a) {
             tick.read(a - TICK_TIMER)
+        } else if (0x13600..0x13608).contains(&a) {
+            self.rc_measurement.read(a - 0x13600)
         } else if (IRQ_CONFIG..IRQ_CONFIG + 128).contains(&a) {
             Some(self.irq_config[core][((a - IRQ_CONFIG) / 4) as usize])
         } else if matches!(a, 0x1eef1a0 | 0x1eef1a4) {
@@ -177,6 +229,11 @@ impl Devices {
                 1 => {
                     (if self.timer5.pending { 1 << 31 } else { 0 })
                         | if self.timer4.pending { 1 << 30 } else { 0 }
+                        | if self.rc_measurement.pending {
+                            1 << 12
+                        } else {
+                            0
+                        }
                 }
                 3 => (self.software as u32 & self.software_enabled(core)) << 24,
                 _ => 0,
@@ -213,6 +270,8 @@ impl Devices {
                 &mut self.tick_secondary
             };
             tick.write(a - TICK_TIMER, value)
+        } else if (0x13600..0x13608).contains(&a) {
+            self.rc_measurement.write(a - 0x13600, value)
         } else if (IRQ_CONFIG..IRQ_CONFIG + 128).contains(&a) {
             self.irq_config[core][((a - IRQ_CONFIG) / 4) as usize] = value;
             Some(Ok(()))
@@ -249,6 +308,7 @@ impl Devices {
         self.timer5.advance(ticks);
         self.tick.advance(ticks);
         self.tick_secondary.advance(ticks);
+        self.rc_measurement.advance(ticks);
     }
     fn software_enabled(&self, core: usize) -> u32 {
         let config = self.irq_config[core][15];
@@ -265,6 +325,7 @@ impl Devices {
         };
         [
             (TICK_IRQ, tick.pending),
+            (44, self.rc_measurement.pending),
             (62, self.timer4.pending),
             (TIMER5_IRQ, self.timer5.pending),
         ]
