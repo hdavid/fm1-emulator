@@ -250,6 +250,30 @@ fn conditional_block_executes_only_the_selected_arm() {
 }
 
 #[test]
+fn conditional_memset_alignment_counts_a_parallel_pair_once() {
+    for offset in [0, 1, 2, 3] {
+        // Stock memset alignment loop; subtract and store form one bundle.
+        let mut c = cpu(&[
+            0x5202, 0xea33, 0x4003, 0xf0f2, 0x2001, 0x07b1, 0x99f7, 0x2144,
+        ]);
+        c.r[2] = 16;
+        c.r[3] = RAM + offset;
+        c.r[1] = 0xa5;
+        while c.pc < XIP + 14 {
+            c.step().unwrap();
+            assert!(c.steps < 20);
+        }
+        let filled = (4 - offset) % 4;
+        assert_eq!(c.r[2], 16 - filled);
+        assert_eq!(c.r[3], RAM + offset + filled);
+        for i in 0..filled {
+            assert_eq!(c.bus.read(RAM + offset + i, 1).unwrap(), 0xa5);
+        }
+        assert_eq!(c.bus.read(RAM + offset + filled, 1).unwrap(), 0);
+    }
+}
+
+#[test]
 fn unsigned_immediate_conditional_selects_storage_header_region() {
     // Vendor form from st_head: if (r5 < 5) { r0=11 } else { r0=22 }.
     for (value, expected) in [(0, 11), (4, 11), (5, 22), (u32::MAX, 22)] {
