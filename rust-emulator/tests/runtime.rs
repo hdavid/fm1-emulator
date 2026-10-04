@@ -207,6 +207,17 @@ fn extended_halfword_load_separates_sign_extension_from_the_offset() {
     assert_eq!(c.bus.read(RAM + 484, 2).unwrap(), 0xef12);
 }
 
+#[test]
+fn signed_minimum_clips_audio_with_signed_comparison() {
+    for (left, right, expected) in [(-10, 32767, -10), (40000, 32767, 32767), (-10, -20, -20)] {
+        let mut c = cpu(&[0xe435, 0x0031]); // r0 = smin(r3, r0)
+        c.r[3] = left as u32;
+        c.r[0] = right as u32;
+        c.step().unwrap();
+        assert_eq!(c.r[0], expected as u32);
+    }
+}
+
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {

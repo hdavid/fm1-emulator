@@ -152,7 +152,11 @@ pub(crate) fn execute(
             op = "memory_add_register";
         } else if h & 0xfff8 == 0xed50 || h & 0xfff8 == 0xed58 {
             let store = x & 1 != 0;
-            let high = if store { signed(h & 7, 3) } else { (h & 1) as i32 };
+            let high = if store {
+                signed(h & 7, 3)
+            } else {
+                (h & 1) as i32
+            };
             let offset = (high << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 14) as i32;
             let addr = cpu.r[s].wrapping_add(offset as u32);
             mem = Some((
@@ -242,9 +246,17 @@ pub(crate) fn execute(
             } else {
                 "divide_signed"
             };
-        } else if h == 0xe435 && x & 15 == 0 {
-            cpu.r[d] = cpu.r[s].min(cpu.r[c]);
-            op = "minimum_unsigned";
+        } else if h == 0xe435 && x & 15 <= 1 {
+            cpu.r[d] = if x & 1 == 0 {
+                cpu.r[s].min(cpu.r[c])
+            } else {
+                (cpu.r[s] as i32).min(cpu.r[c] as i32) as u32
+            };
+            op = if x & 1 == 0 {
+                "minimum_unsigned"
+            } else {
+                "minimum_signed"
+            };
         } else if h & 0xffe0 == 0xebc0 {
             let addr = cpu.r[d] + (h & 31) * 4;
             cpu.write(
