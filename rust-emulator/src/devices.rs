@@ -127,6 +127,7 @@ pub struct Devices {
     pub timer4: Timer,
     pub timer5: Timer,
     pub tick: TickTimer,
+    startup_timers: [Timer; 4],
     tick_secondary: TickTimer,
     irq_config: [[u32; 32]; 2],
     software: [u8; 2],
@@ -147,7 +148,9 @@ impl Devices {
         } else {
             &self.tick_secondary
         };
-        let value = if (TIMER4..TIMER4 + 12).contains(&a) {
+        let value = if (0x10400..0x10800).contains(&a) {
+            self.startup_timers[((a - 0x10400) / 256) as usize].read(a & 255)
+        } else if (TIMER4..TIMER4 + 12).contains(&a) {
             self.timer4.read(a - TIMER4)
         } else if (TIMER5..TIMER5 + 12).contains(&a) {
             self.timer5.read(a - TIMER5)
@@ -160,18 +163,17 @@ impl Devices {
         } else if (IRQ_PENDING..IRQ_PENDING + 16).contains(&a) {
             Some(match (a - IRQ_PENDING) / 4 {
                 0 => {
-                    if tick.pending {
-                        1 << TICK_IRQ
-                    } else {
-                        0
+                    let mut bits = if tick.pending { 1 << TICK_IRQ } else { 0 };
+                    for (index, timer) in self.startup_timers.iter().enumerate() {
+                        if timer.pending {
+                            bits |= 1 << (4 + index);
+                        }
                     }
+                    bits
                 }
                 1 => {
-                    if self.timer5.pending {
-                        1 << 31
-                    } else {
-                        0
-                    }
+                    (if self.timer5.pending { 1 << 31 } else { 0 })
+                        | if self.timer4.pending { 1 << 30 } else { 0 }
                 }
                 3 => (self.software[core] as u32) << 24,
                 _ => 0,
@@ -195,7 +197,9 @@ impl Devices {
         if size != 4 && !(a == TICK_TIMER && size == 1) && self.read(address & !3, 4).is_some() {
             return Some(Err("device registers require word accesses"));
         }
-        if (TIMER4..TIMER4 + 12).contains(&a) {
+        if (0x10400..0x10800).contains(&a) {
+            self.startup_timers[((a - 0x10400) / 256) as usize].write(a & 255, value)
+        } else if (TIMER4..TIMER4 + 12).contains(&a) {
             self.timer4.write(a - TIMER4, value)
         } else if (TIMER5..TIMER5 + 12).contains(&a) {
             self.timer5.write(a - TIMER5, value)
@@ -229,6 +233,9 @@ impl Devices {
     }
     pub fn advance(&mut self, ticks: u32) {
         self.adc.advance(ticks);
+        for timer in &mut self.startup_timers {
+            timer.advance(ticks);
+        }
         self.timer4.advance(ticks);
         self.timer5.advance(ticks);
         self.tick.advance(ticks);
@@ -243,14 +250,24 @@ impl Devices {
         } else {
             &self.tick_secondary
         };
-        [(TICK_IRQ, tick.pending), (TIMER5_IRQ, self.timer5.pending)]
-            .into_iter()
-            .chain((0..8).map(|bit| (120 + bit, self.software[core] & (1 << bit) != 0)))
-            .filter(|(source, pending)| {
-                *pending && self.irq_priority_for(*source, icfg, core).is_some()
-            })
-            .max_by_key(|(source, _)| self.irq_priority_for(*source, icfg, core).unwrap())
-            .map(|(source, _)| source)
+        [
+            (TICK_IRQ, tick.pending),
+            (62, self.timer4.pending),
+            (TIMER5_IRQ, self.timer5.pending),
+        ]
+        .into_iter()
+        .chain(
+            self.startup_timers
+                .iter()
+                .enumerate()
+                .map(|(i, timer)| (4 + i, timer.pending)),
+        )
+        .chain((0..8).map(|bit| (120 + bit, self.software[core] & (1 << bit) != 0)))
+        .filter(|(source, pending)| {
+            *pending && self.irq_priority_for(*source, icfg, core).is_some()
+        })
+        .max_by_key(|(source, _)| self.irq_priority_for(*source, icfg, core).unwrap())
+        .map(|(source, _)| source)
     }
     pub fn irq_priority(&self, source: usize, icfg: u32) -> Option<u32> {
         self.irq_priority_for(source, icfg, 0)

@@ -75,6 +75,24 @@ fn core_tick_timer_wraps_acknowledges_and_obeys_irq_priority() {
 }
 
 #[test]
+fn startup_timer_banks_count_and_signal_their_sdk_interrupts() {
+    use fm1_emu::devices::{IRQ_CONFIG, IRQ_PENDING};
+    for index in 0..4 {
+        let mut c = cpu(&[0]);
+        let base = 0x10400 + index * 256;
+        c.bus.write(base, 0x4000, 4).unwrap();
+        c.bus.write(base + 8, 3, 4).unwrap();
+        c.bus.write(base, 9, 4).unwrap();
+        c.bus.write(IRQ_CONFIG, 3 << ((4 + index) * 4), 4).unwrap();
+        c.bus.devices.advance(3);
+        assert_eq!(c.bus.pending_irq(0x100), Some((4 + index) as usize));
+        assert_eq!(c.bus.read(IRQ_PENDING, 4).unwrap(), 1 << (4 + index));
+        c.bus.write(base, 0x4009, 4).unwrap();
+        assert_eq!(c.bus.pending_irq(0x100), None);
+    }
+}
+
+#[test]
 fn startup_repeat_clears_exactly_the_requested_words() {
     // Stock startup: rep 2 r2 { [r3++=4] = r1 }; if (r2 != 0) goto rep.
     for count in [0, 1, 3] {
