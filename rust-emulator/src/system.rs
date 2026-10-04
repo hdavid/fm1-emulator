@@ -3,6 +3,7 @@
 pub struct System {
     pmu_control: u32,
     rtc_control: u32,
+    osa_control: u32,
     control: u32,
     data: u8,
     transaction: Vec<u8>,
@@ -17,6 +18,7 @@ impl Default for System {
         Self {
             pmu_control: 0x100,
             rtc_control: 0xe0,
+            osa_control: 0,
             control: 0,
             data: 0,
             transaction: Vec::new(),
@@ -29,6 +31,7 @@ impl Default for System {
 impl System {
     pub fn read(&self, address: u32) -> Option<u32> {
         match address {
+            0x13400 => Some(self.osa_control),
             0x13e00 => Some(self.pmu_control),
             0x13e04 => Some(self.rtc_control),
             0x13e08 => Some(self.control),
@@ -39,6 +42,9 @@ impl System {
     }
     pub fn write(&mut self, address: u32, value: u32) -> Option<Result<(), &'static str>> {
         match address {
+            // OSA IRQ wrapper acknowledges bit 6; no protection event is
+            // pending while the emulator executes ordinary valid accesses.
+            0x13400 => self.osa_control = value & !0x40,
             0x13e00 => self.pmu_control = value,
             0x13e04 => self.rtc_control = value,
             0x13e0c => self.data = value as u8,

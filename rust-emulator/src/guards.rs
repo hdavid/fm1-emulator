@@ -29,6 +29,9 @@ impl Guards {
         ) || (0x1eee280..0x1eee28c).contains(&a)
             || (0x1eee2c0..0x1eee2cc).contains(&a)
             || (0x1eee380..0x1eee390).contains(&a)
+            || (0x1eee340..=0x1eee358).contains(&a)
+            || (0x1eef2d0..=0x1eef2e4).contains(&a)
+            || (0x41c00..=0x41c18).contains(&a)
     }
     fn value(&self, a: u32) -> u32 {
         *self.registers.get(&a).unwrap_or(&0)
@@ -49,7 +52,7 @@ impl Guards {
             0x1eee248 => {
                 self.registers.insert(0x1eee244, self.value(0x1eee244) & !v);
             }
-            0x1eef0d4 => {
+            0x1eef0d4 | 0x1eef2d4 => {
                 self.registers.insert(a, self.value(a) & !v);
             }
             0x1eef1a0 if v != 0 => return Some(Err("software interrupts are not implemented")),

@@ -557,3 +557,14 @@ fn guarded_ram_rejects_writes_and_usb_dma_checks_its_address() {
     b.advance_usb(1).unwrap();
     assert!(b.advance_usb(120000).is_err());
 }
+
+#[test]
+fn stock_protection_setup_acknowledges_events_without_enabling_sdram() {
+    let mut b = Bus::new(vec![0, 0]).unwrap();
+    b.write(0x13400, 0x6d, 4).unwrap();
+    assert_eq!(b.read(0x13400, 4).unwrap(), 0x2d);
+    b.write(0x40438, 0, 4).unwrap();
+    assert!(b.write(0x40438, 1, 4).is_err());
+    b.write(0x1eef2d4, u32::MAX, 4).unwrap();
+    assert_eq!(b.read(0x1eef2d4, 4).unwrap(), 0);
+}
