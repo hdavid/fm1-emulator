@@ -56,6 +56,48 @@ _start:
     r1 = ram_magic
     call r1
 
+    /* Input matrix: 16 serial bits through PA4/PA3, latch on PA1. Scan all
+     * 11 columns and read PA0/PA5..PA8, exactly as fm1_input.h does. */
+    r0 = 0x50000
+    r1 = 0x1E1
+    [r0 + 8] = r1
+    [r0 + 16] = r1
+    r1 = 0x1FB
+    [r0 + 12] = r1
+    r5 = matrix_results
+    r6 = 1
+    r7 = 11
+.Lcolumn:
+    r4 = 0xFFFF
+    r4 ^= r6
+    r1 = 16
+    r2 = 8
+.Lshift:
+    r3 = r4 >> 15
+    r3 = r3 << 4
+    [r0 + 0] = r3
+    r3 |= r2
+    [r0 + 0] = r3
+    r3 ^= r2
+    [r0 + 0] = r3
+    r4 = r4 << 1
+    r1 += -1
+    if (r1 != 0) goto .Lshift
+    r1 = 2
+    [r0 + 0] = r1
+    r1 = 0
+    [r0 + 0] = r1
+    r1 = [r0 + 4]
+    [r5 + 0] = r1
+    r5 += 4
+    r6 = r6 << 1
+    r7 += -1
+    if (r7 != 0) goto .Lcolumn
+    r0 = matrix_results
+    r1 = [r0 + 0]
+    r2 = foundation_results
+    [r2 + 20] = r1
+
     /* TIMER4: OSC /1, free-running, as in fm1_time.h. */
     r0 = 0x10800
     r1 = 0
@@ -169,3 +211,6 @@ foundation_results:
     .globl cpu_probe_results
 cpu_probe_results:
     .space 48
+    .globl matrix_results
+matrix_results:
+    .space 44

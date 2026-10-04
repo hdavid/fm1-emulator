@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Functional (not cycle-accurate) register models from fm1_time.h/fm1_timer.h.
+use crate::gpio::Gpio;
 pub const TIMER4: u32 = 0x10800;
 pub const TIMER5: u32 = 0x10900;
 pub const IRQ_CONFIG: u32 = 0x01ee_f100;
@@ -74,6 +75,7 @@ impl Timer {
 
 #[derive(Default)]
 pub struct Devices {
+    pub gpio: Gpio,
     pub timer4: Timer,
     pub timer5: Timer,
     irq_config: [u32; 32],
@@ -94,7 +96,7 @@ impl Devices {
                 0
             })
         } else {
-            None
+            self.gpio.read(address)
         }?;
         Some(if size == 4 {
             Ok(value)
@@ -122,7 +124,7 @@ impl Devices {
         } else if (IRQ_PENDING..IRQ_PENDING + 16).contains(&address) {
             Some(Err("interrupt pending registers are read-only"))
         } else {
-            None
+            self.gpio.write(address, value)
         }
     }
 

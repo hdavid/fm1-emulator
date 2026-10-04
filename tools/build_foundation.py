@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
 """Build a separate application-entry firmware for emulator foundations."""
-from pathlib import Path
 import struct
 from build import tool, ROOT
 
@@ -15,8 +14,9 @@ def main():
     tool("pi32v2/bin/ld", "-e", "_start", "-T", "firmware/app.ld",
          "build/foundation/start.o", "build/foundation/probe.o",
          "-o", "build/foundation/firmware.elf")
-    (out / "firmware.dis").write_text(tool("common/bin/objdump", "-d", "build/foundation/firmware.elf"))
-    (out / "firmware.symbols").write_text(tool("common/bin/objdump", "-t", "build/foundation/firmware.elf"))
+    for option, name in [("-d", "firmware.dis"), ("-t", "firmware.symbols")]:
+        text = tool("common/bin/objdump", option, "build/foundation/firmware.elf")
+        (out / name).write_text("\n".join(line.rstrip() for line in text.splitlines()) + "\n")
     elf = (out / "firmware.elf").read_bytes()
     phoff = struct.unpack_from("<I", elf, 28)[0]
     phsize, phcount = struct.unpack_from("<HH", elf, 42)

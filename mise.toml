@@ -52,6 +52,10 @@ run = "cargo test --manifest-path rust-emulator/Cargo.toml --offline"
 description = "Build separate firmware exercising emulator hardware foundations"
 run = "uv run --frozen python tools/build_foundation.py"
 
+[tasks.rust-foundation]
+description = "Boot the five-foundation firmware with the OCT-minus matrix key pressed"
+run = "cargo run --manifest-path rust-emulator/Cargo.toml --offline -- boot build/foundation/firmware.elf --until foundation_done --inspect foundation_results:10 --press 0:4"
+
 [tasks.rust-probe]
 description = "Execute the probe directly from the unchanged diagnostic ELF"
 run = "cargo run --manifest-path rust-emulator/Cargo.toml --offline -- probe build/fm1-diag.elf"

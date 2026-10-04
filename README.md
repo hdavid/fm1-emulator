@@ -13,7 +13,7 @@ twelve CPU-probe result words matched the emulator with the same probe hash.
 The initial capture is preserved in `build/hardware-initial.txt`; the session record is
 `build/hardware-verification.txt`. This validates the probe's tested instruction
 forms and inputs; recovery paths and other hardware behavior remain unverified.
-The emulator executes the shared CPU probe. It does not boot the complete diagnostic firmware
+The Python reference executes the shared CPU probe. It does not boot the complete diagnostic firmware
 or emulate USB, LCD, flash hardware, interrupts, audio, or cycle timing.
 
 ## Setup with mise
@@ -29,7 +29,8 @@ mise run build
 mise run test
 ```
 
-`mise.toml` pins uv 0.8.24. uv manages Python 3.12.11, pinned in `.python-version`.
+`mise.toml` pins uv 0.8.24 and Rust 1.91.1. uv manages Python 3.12.11,
+pinned in `.python-version`.
 All Python tasks run through uv. `setup` installs Python and the packages from
 `uv.lock`, downloads the checksum-pinned JieLi compiler, and fetches the
 pinned AC79 SDK. The SDK revision and the three packaging blobs are checked.
@@ -142,6 +143,33 @@ For more result words, also update `NAMES` and `expected()` in `emu.py`, the cou
 in `tools/build.py`, the result array and reporting loop in `firmware/src/diag.c`,
 and the protocol parser/version. Never treat new instructions as hardware-verified
 until the device capture agrees.
+
+## Rust emulator
+
+The Rust interpreter loads unchanged application `.bin` files or reconstructs
+their flash image from ELF load addresses. It executes the embedded probe in
+the full diagnostic firmware and matches the saved physical FM-1 results.
+
+It also boots a separate, 592-byte foundation firmware from `_start`:
+
+```sh
+mise run build-foundation
+mise run rust-foundation
+mise run rust-test
+```
+
+The foundation firmware initializes RAM, executes RAM code and the CPU probe,
+uses TIMER4/TIMER5, services a guest interrupt, and scans all eleven key-matrix
+columns. These exercise five of the ten agreed emulator foundations: CPU,
+memory/startup, timers, interrupts, and controls. Seventeen Rust integration
+tests pass. This is a foundation checklist, not a claim that half of Felucca's
+musical features or instruction set is implemented. Full Felucca boot, flash,
+LCD, USB serial, USB MIDI, and audio/DMA remain future work.
+
+The foundation image is for emulator tests and has no updater/recovery; do not
+flash it. The installed physical firmware remains `FM-1_980`.
+See [the Rust emulator guide](rust-emulator/README.md) and
+`build/foundation/verification.txt` for the measured scope and limitations.
 
 ## Files and verification
 

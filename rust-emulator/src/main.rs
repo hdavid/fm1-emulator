@@ -11,16 +11,26 @@ fn number(value: &str) -> Result<u32, String> {
     .map_err(|_| format!("invalid number: {value}"))
 }
 
+fn address(firmware: &Firmware, value: &str) -> Result<u32, String> {
+    firmware
+        .symbols
+        .get(value)
+        .copied()
+        .map(Ok)
+        .unwrap_or_else(|| number(value))
+}
+
 fn main_run() -> Result<(), String> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.len() < 2 || !matches!(args[0].as_str(), "probe" | "boot") {
-        return Err("usage: fm1-emu <probe|boot> <application.elf|application.bin> [--entry ADDRESS] [--limit COUNT] [--trace PATH] [--until SYMBOL] [--inspect SYMBOL:WORDS]".into());
+        return Err("usage: fm1-emu <probe|boot> <application.elf|application.bin> [--entry ADDRESS] [--limit COUNT] [--trace PATH] [--until SYMBOL_OR_ADDRESS] [--inspect SYMBOL_OR_ADDRESS:WORDS] [--press COLUMN:ROW]".into());
     }
     let mut entry = None;
     let mut limit = 100_000;
     let mut trace_path = None;
     let mut until = None;
     let mut inspect = None;
+    let mut keys = Vec::new();
     let mut i = 2;
     while i < args.len() {
         let value = args
@@ -32,30 +42,27 @@ fn main_run() -> Result<(), String> {
             "--trace" => trace_path = Some(value),
             "--until" => until = Some(value),
             "--inspect" => inspect = Some(value),
+            "--press" => {
+                let (column, row) = value.split_once(':').ok_or("--press requires COLUMN:ROW")?;
+                keys.push((
+                    column
+                        .parse::<usize>()
+                        .map_err(|_| "invalid matrix column")?,
+                    row.parse::<usize>().map_err(|_| "invalid matrix row")?,
+                ));
+            }
             option => return Err(format!("unknown option: {option}")),
         }
         i += 2;
     }
     let firmware = Firmware::load(Path::new(&args[1]))?;
-    let stop = until
-        .map(|name| {
-            firmware
-                .symbols
-                .get(name)
-                .copied()
-                .ok_or_else(|| format!("unknown stop symbol: {name}"))
-        })
-        .transpose()?;
+    let stop = until.map(|name| address(&firmware, name)).transpose()?;
     let inspection = inspect
         .map(|request| {
             let (name, count) = request
                 .split_once(':')
                 .ok_or("--inspect requires SYMBOL:WORDS")?;
-            let address = firmware
-                .symbols
-                .get(name)
-                .copied()
-                .ok_or_else(|| format!("unknown inspection symbol: {name}"))?;
+            let address = address(&firmware, name)?;
             let count: u32 = count.parse().map_err(|_| "invalid inspection word count")?;
             if count > 1024 {
                 return Err("inspection is limited to 1024 words".into());
@@ -75,6 +82,9 @@ fn main_run() -> Result<(), String> {
     };
     let image_bytes = firmware.image.len();
     let mut cpu = Cpu::new(Bus::new(firmware.image)?, entry);
+    for (column, row) in keys {
+        cpu.bus.devices.gpio.press(column, row, true)?;
+    }
     let mut trace = trace_path
         .map(File::create)
         .transpose()
