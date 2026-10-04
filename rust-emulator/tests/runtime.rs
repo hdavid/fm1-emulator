@@ -131,6 +131,17 @@ fn three_operand_subtraction_preserves_the_text_canvas_address() {
         assert_eq!(c.r[12], left);
     }
 }
+
+#[test]
+fn halfword_postincrement_reads_before_advancing_parameter_pointer() {
+    let mut c = cpu(&[0xedd0, 0x2104]); // r2 = h[r0++=20] (u)
+    c.r[0] = RAM;
+    c.bus.write(RAM, 0xfedc, 2).unwrap();
+    c.bus.write(RAM + 20, 0x1234, 2).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.r[2], 0xfedc);
+    assert_eq!(c.r[0], RAM + 20);
+}
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {

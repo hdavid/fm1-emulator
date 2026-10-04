@@ -163,6 +163,19 @@ pub(crate) fn execute(
                 if h & 8 != 0 { Some(addr) } else { None },
             ));
             op = "halfword_extended";
+        } else if h == 0xedd0 {
+            let increment = ((x >> 8) & 15) * 16 + (x & 15);
+            let address = cpu.r[s];
+            mem = Some((
+                d,
+                s,
+                address,
+                2,
+                false,
+                false,
+                Some(address.wrapping_add(increment)),
+            ));
+            op = "halfword_postincrement";
         } else if h == 0xeed4 {
             let off = ((x >> 8) & 15) * 16 + (x & 15);
             let addr = cpu.r[s];
