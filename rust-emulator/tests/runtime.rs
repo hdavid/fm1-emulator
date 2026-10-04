@@ -322,6 +322,23 @@ fn packed_memory_and_preserves_the_high_cache_way_bits() {
 }
 
 #[test]
+fn stock_adc_handler_saves_and_restores_the_interrupted_pc() {
+    let mut c = cpu(&[0x04c1, 0x0481, 0x0488]);
+    c.sr[0] = XIP + 128;
+    c.sr[14] = RAM + 64;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 60, 4).unwrap(), XIP + 128);
+    c.sr[0] = 0;
+    c.step().unwrap();
+    assert_eq!(c.sr[0], XIP + 128);
+    assert_eq!(c.sr[14], RAM + 64);
+    c.bus.write(RAM + 64, XIP + 256, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.sr[3], XIP + 256);
+    assert_eq!(c.pc, XIP + 6);
+}
+
+#[test]
 fn stock_p33_field_update_ands_the_value_with_the_inverted_mask() {
     // Vendor RAM routine: r2 = r3 & ~r0. Omitting r3 selects all PMU inputs.
     for (value, expected) in [(5, 5), (0, 0), (0xffffffff, 7), (0x12345678, 0)] {

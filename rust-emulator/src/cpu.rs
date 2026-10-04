@@ -617,6 +617,12 @@ impl Cpu {
         } else if h == 0x0410 {
             self.push(self.sr[3])?;
             op = "push_rets";
+        } else if h == 0x04c1 {
+            self.push(self.sr[0])?;
+            op = "push_reti";
+        } else if matches!(h, 0x0481 | 0x0488) {
+            self.sr[if h == 0x0481 { 0 } else { 3 }] = self.pop()?;
+            op = "pop_return_register";
         } else if h & 0xfff0 == 0x0440 {
             let boundary = (h & 15) as usize;
             let range = if boundary < 4 {
