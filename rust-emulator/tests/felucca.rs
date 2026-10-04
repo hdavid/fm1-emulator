@@ -11,6 +11,39 @@ fn advance(cpu: &mut Cpu, instructions: u64) {
 }
 
 #[test]
+#[ignore = "requires FELUCCA_FWSC; run in release mode with --ignored"]
+fn published_felucca_package_boots_and_renders_a_note() {
+    let path =
+        env::var("FELUCCA_FWSC").expect("set FELUCCA_FWSC to the published firmware package");
+    let firmware = Firmware::load(Path::new(&path)).unwrap();
+    let mut cpu = Cpu::new(firmware.bus().unwrap(), firmware.entry);
+    cpu.r[0] = 0x01c7fe08;
+    advance(&mut cpu, 100_000_000);
+    assert!(cpu.bus.screen_visible());
+    assert!(cpu.bus.lcd.pixels_written > 1_000_000);
+    assert!(cpu.bus.audio.halves > 100);
+    assert!(cpu.bus.devices.adc.conversions > 10);
+    assert!(cpu.bus.system.watchdog_feeds > 50);
+    assert_eq!(cpu.bus.usb.setups, 5);
+    let serial: Vec<_> = cpu.bus.usb.serial.drain(..).collect();
+    assert!(String::from_utf8_lossy(&serial).contains("Felucca 0.9-BETA console"));
+    assert!(cpu.bus.audio.samples.iter().all(|frame| *frame == [0, 0]));
+    cpu.bus.audio.samples.clear();
+    cpu.bus.devices.gpio.press(3, 4, true).unwrap();
+    advance(&mut cpu, 5_000_000);
+    assert!(
+        cpu.bus.audio.samples.iter().any(|frame| *frame != [0, 0]),
+        "the published firmware must render a note through guest audio DMA"
+    );
+    cpu.bus.devices.gpio.press(3, 4, false).unwrap();
+    advance(&mut cpu, 5_000_000);
+    eprintln!(
+        "Published Felucca: {} instructions, {} LCD pixels, {} audio halves, {} watchdog feeds",
+        cpu.steps, cpu.bus.lcd.pixels_written, cpu.bus.audio.halves, cpu.bus.system.watchdog_feeds
+    );
+}
+
+#[test]
 #[ignore = "requires FELUCCA_ELF; run in release mode with --ignored"]
 fn unchanged_felucca_boots_and_responds_to_a_matrix_note() {
     let path = env::var("FELUCCA_ELF").expect("set FELUCCA_ELF to the full firmware ELF");
