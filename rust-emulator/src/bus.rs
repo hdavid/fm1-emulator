@@ -300,12 +300,15 @@ impl Bus {
     }
 
     pub fn pending_irq(&self, icfg: u32) -> Option<usize> {
-        let timer = self.devices.pending_irq(icfg);
-        let audio_priority = self.devices.irq_priority(crate::audio::IRQ, icfg);
+        self.pending_irq_for(icfg, 0)
+    }
+    pub(crate) fn pending_irq_for(&self, icfg: u32, core: usize) -> Option<usize> {
+        let timer = self.devices.pending_irq_for(icfg, core);
+        let audio_priority = self.devices.irq_priority_for(crate::audio::IRQ, icfg, core);
         if self.audio.pending_irq() {
             if let Some(priority) = audio_priority {
                 if timer.is_none_or(|source| {
-                    priority > self.devices.irq_priority(source, icfg).unwrap()
+                    priority > self.devices.irq_priority_for(source, icfg, core).unwrap()
                 }) {
                     return Some(crate::audio::IRQ);
                 }

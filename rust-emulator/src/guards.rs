@@ -19,8 +19,6 @@ impl Guards {
                 | 0x1eef0dc
                 | 0x1eef0e0
                 | 0x1eef0e4
-                | 0x1eef1a0
-                | 0x1eef1a4
                 | 0x1eef1c0
                 | 0x1eef1c4
                 | 0x1eef1c8
@@ -55,8 +53,6 @@ impl Guards {
             0x1eef0d4 | 0x1eef2d4 => {
                 self.registers.insert(a, self.value(a) & !v);
             }
-            0x1eef1a0 if v != 0 => return Some(Err("software interrupts are not implemented")),
-            0x1eef1a4 => {}
             _ => {
                 self.registers.insert(a, v);
             }

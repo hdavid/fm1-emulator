@@ -30,6 +30,44 @@ mod lock_tests {
         assert!(!c.bus_locked);
         assert_eq!(c.r, before);
     }
+
+    #[test]
+    fn secondary_uses_the_guest_handoff_and_serializes_bus_locks() {
+        let mut c = Cpu::new(Bus::new(vec![0; 32]).unwrap(), crate::XIP);
+        let entry = crate::RAM + 512;
+        c.bus.write(entry, 0x00400041, 4).unwrap(); // lockset; lockclr
+        c.bus.write(0x01c7fff8, entry, 4).unwrap();
+        c.bus.write(0x1eee004, 8, 4).unwrap();
+        c.step().unwrap();
+        assert_eq!(c.pc, crate::XIP + 2);
+        let secondary = c.secondary.as_ref().unwrap();
+        assert_eq!(secondary.pc, entry + 2);
+        assert_eq!(secondary.sr[6], 1);
+        assert!(secondary.bus_locked);
+        c.step().unwrap(); // Secondary owns the bus until LOCKCLR.
+        assert_eq!(c.pc, crate::XIP + 2);
+        assert!(!c.secondary.as_ref().unwrap().bus_locked);
+        c.step().unwrap();
+        assert_eq!(c.pc, crate::XIP + 4);
+        c.bus.write(0x1eee004, 2, 4).unwrap();
+        c.step().unwrap();
+        assert!(c.secondary.is_none());
+    }
+
+    #[test]
+    fn software_interrupt_masks_and_acknowledgements_are_per_core() {
+        use crate::devices::IRQ_CONFIG;
+        let mut c = Cpu::new(Bus::new(vec![0; 32]).unwrap(), crate::XIP);
+        c.bus
+            .write(IRQ_CONFIG + 0x200 + 15 * 4, 3 << 28, 4)
+            .unwrap();
+        c.bus.write(0x1eef3a0, 128, 4).unwrap();
+        assert_eq!(c.bus.pending_irq_for(0x100, 0), None);
+        assert_eq!(c.bus.pending_irq_for(0x100, 1), Some(127));
+        assert_eq!(c.bus.read(0x1eef38c, 4).unwrap(), 0x80000000);
+        c.bus.write(0x1eef3a4, 128, 4).unwrap();
+        assert_eq!(c.bus.pending_irq_for(0x100, 1), None);
+    }
 }
 
 impl fmt::Display for Fault {
@@ -64,6 +102,53 @@ pub struct Cpu {
     repeat: Option<(u32, u32, u32)>,
     irq_repeat: Option<(u32, u32, u32)>,
     bus_locked: bool,
+    secondary: Option<Core>,
+}
+
+// Per-core context. Memory and devices remain on the one shared bus.
+struct Core {
+    r: [u32; 16],
+    sr: [u32; 16],
+    pc: u32,
+    interrupts_enabled: bool,
+    in_interrupt: bool,
+    predicate_skip: Option<(u32, u32)>,
+    irq_predicate: Option<(u32, u32)>,
+    repeat: Option<(u32, u32, u32)>,
+    irq_repeat: Option<(u32, u32, u32)>,
+    bus_locked: bool,
+}
+impl Core {
+    fn reset(pc: u32) -> Self {
+        let mut sr = [0; 16];
+        sr[6] = 1;
+        Self {
+            r: [0; 16],
+            sr,
+            pc,
+            interrupts_enabled: false,
+            // ROM's secondary handoff is in supervisor/interrupt context.
+            in_interrupt: true,
+            predicate_skip: None,
+            irq_predicate: None,
+            repeat: None,
+            irq_repeat: None,
+            bus_locked: false,
+        }
+    }
+    fn swap(&mut self, cpu: &mut Cpu) {
+        use std::mem::swap;
+        swap(&mut self.r, &mut cpu.r);
+        swap(&mut self.sr, &mut cpu.sr);
+        swap(&mut self.pc, &mut cpu.pc);
+        swap(&mut self.interrupts_enabled, &mut cpu.interrupts_enabled);
+        swap(&mut self.in_interrupt, &mut cpu.in_interrupt);
+        swap(&mut self.predicate_skip, &mut cpu.predicate_skip);
+        swap(&mut self.irq_predicate, &mut cpu.irq_predicate);
+        swap(&mut self.repeat, &mut cpu.repeat);
+        swap(&mut self.irq_repeat, &mut cpu.irq_repeat);
+        swap(&mut self.bus_locked, &mut cpu.bus_locked);
+    }
 }
 
 impl Cpu {
@@ -82,6 +167,7 @@ impl Cpu {
             repeat: None,
             irq_repeat: None,
             bus_locked: false,
+            secondary: None,
         }
     }
 
@@ -111,6 +197,38 @@ impl Cpu {
     }
 
     pub fn step(&mut self) -> Result<&'static str, Fault> {
+        let control = self.read(0x1eee004, 4)?;
+        if control & 2 != 0 {
+            self.secondary = None;
+        }
+        if self.secondary.is_none() && control & 10 == 8 {
+            // SPL's RAM handoff vector, written by the unchanged stock guest.
+            let entry = self.read(0x01c7fff8, 4)?;
+            self.bus
+                .fetch(entry)
+                .map_err(|fault| Fault::Access { pc: self.pc, fault })?;
+            self.secondary = Some(Core::reset(entry));
+        }
+        if self.secondary.as_ref().is_some_and(|core| core.bus_locked) {
+            return self.step_secondary();
+        }
+        let op = self.step_core()?;
+        if !self.bus_locked && self.secondary.is_some() {
+            self.step_secondary()?;
+        }
+        Ok(op)
+    }
+
+    fn step_secondary(&mut self) -> Result<&'static str, Fault> {
+        let mut secondary = self.secondary.take().unwrap();
+        secondary.swap(self);
+        let result = self.step_core();
+        secondary.swap(self);
+        self.secondary = Some(secondary);
+        result
+    }
+
+    fn step_core(&mut self) -> Result<&'static str, Fault> {
         if let Some((at, end)) = self.predicate_skip {
             if self.pc == at {
                 self.pc = end;
@@ -226,7 +344,7 @@ impl Cpu {
             if h & 0xfff0 == 0xffc0 {
                 self.r[n] = value;
                 op = "mov_imm32";
-            } else if n == 13 || n == 14 {
+            } else if matches!(n, 0 | 12 | 13 | 14) {
                 self.sr[n] = value;
                 op = "stack_imm32";
             } else {
@@ -528,7 +646,7 @@ impl Cpu {
         if !self.interrupts_enabled || self.in_interrupt {
             return Ok(());
         }
-        if let Some(source) = self.bus.pending_irq(self.sr[11]) {
+        if let Some(source) = self.bus.pending_irq_for(self.sr[11], self.sr[6] as usize) {
             let handler = self.read(0x01c7_fe00 + source as u32 * 4, 4)?;
             self.bus
                 .fetch(handler)

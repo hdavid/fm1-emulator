@@ -127,59 +127,99 @@ pub struct Devices {
     pub timer4: Timer,
     pub timer5: Timer,
     pub tick: TickTimer,
-    irq_config: [u32; 32],
+    tick_secondary: TickTimer,
+    irq_config: [[u32; 32]; 2],
+    software: [u8; 2],
 }
 
 impl Devices {
+    fn bank(address: u32) -> (usize, u32) {
+        if (0x1eef200..0x1eef400).contains(&address) {
+            (1, address - 0x200)
+        } else {
+            (0, address)
+        }
+    }
     pub fn read(&self, address: u32, size: usize) -> Option<Result<u32, &'static str>> {
-        let value = if (TIMER4..TIMER4 + 12).contains(&address) {
-            self.timer4.read(address - TIMER4)
-        } else if (TIMER5..TIMER5 + 12).contains(&address) {
-            self.timer5.read(address - TIMER5)
-        } else if (TICK_TIMER..TICK_TIMER + 12).contains(&address) {
-            self.tick.read(address - TICK_TIMER)
-        } else if (IRQ_CONFIG..IRQ_CONFIG + 128).contains(&address) {
-            Some(self.irq_config[((address - IRQ_CONFIG) / 4) as usize])
-        } else if (IRQ_PENDING..IRQ_PENDING + 16).contains(&address) {
-            Some(if address == IRQ_PENDING && self.tick.pending {
-                1 << TICK_IRQ
-            } else if address == IRQ_PENDING + 4 && self.timer5.pending {
-                1 << 31
-            } else {
-                0
+        let (core, a) = Self::bank(address);
+        let tick = if core == 0 {
+            &self.tick
+        } else {
+            &self.tick_secondary
+        };
+        let value = if (TIMER4..TIMER4 + 12).contains(&a) {
+            self.timer4.read(a - TIMER4)
+        } else if (TIMER5..TIMER5 + 12).contains(&a) {
+            self.timer5.read(a - TIMER5)
+        } else if (TICK_TIMER..TICK_TIMER + 12).contains(&a) {
+            tick.read(a - TICK_TIMER)
+        } else if (IRQ_CONFIG..IRQ_CONFIG + 128).contains(&a) {
+            Some(self.irq_config[core][((a - IRQ_CONFIG) / 4) as usize])
+        } else if matches!(a, 0x1eef1a0 | 0x1eef1a4) {
+            Some(0)
+        } else if (IRQ_PENDING..IRQ_PENDING + 16).contains(&a) {
+            Some(match (a - IRQ_PENDING) / 4 {
+                0 => {
+                    if tick.pending {
+                        1 << TICK_IRQ
+                    } else {
+                        0
+                    }
+                }
+                1 => {
+                    if self.timer5.pending {
+                        1 << 31
+                    } else {
+                        0
+                    }
+                }
+                3 => (self.software[core] as u32) << 24,
+                _ => 0,
             })
         } else {
             self.adc.read(address).or_else(|| self.gpio.read(address))
         }?;
-        Some(if size == 4 || (address == TICK_TIMER && size == 1) {
+        Some(if size == 4 || (a == TICK_TIMER && size == 1) {
             Ok(value)
         } else {
             Err("device registers require word accesses")
         })
     }
-
     pub fn write(
         &mut self,
         address: u32,
         value: u32,
         size: usize,
     ) -> Option<Result<(), &'static str>> {
-        if size != 4
-            && !(address == TICK_TIMER && size == 1)
-            && self.read(address & !3, 4).is_some()
-        {
+        let (core, a) = Self::bank(address);
+        if size != 4 && !(a == TICK_TIMER && size == 1) && self.read(address & !3, 4).is_some() {
             return Some(Err("device registers require word accesses"));
         }
-        if (TIMER4..TIMER4 + 12).contains(&address) {
-            self.timer4.write(address - TIMER4, value)
-        } else if (TIMER5..TIMER5 + 12).contains(&address) {
-            self.timer5.write(address - TIMER5, value)
-        } else if (TICK_TIMER..TICK_TIMER + 12).contains(&address) {
-            self.tick.write(address - TICK_TIMER, value)
-        } else if (IRQ_CONFIG..IRQ_CONFIG + 128).contains(&address) {
-            self.irq_config[((address - IRQ_CONFIG) / 4) as usize] = value;
+        if (TIMER4..TIMER4 + 12).contains(&a) {
+            self.timer4.write(a - TIMER4, value)
+        } else if (TIMER5..TIMER5 + 12).contains(&a) {
+            self.timer5.write(a - TIMER5, value)
+        } else if (TICK_TIMER..TICK_TIMER + 12).contains(&a) {
+            let tick = if core == 0 {
+                &mut self.tick
+            } else {
+                &mut self.tick_secondary
+            };
+            tick.write(a - TICK_TIMER, value)
+        } else if (IRQ_CONFIG..IRQ_CONFIG + 128).contains(&a) {
+            self.irq_config[core][((a - IRQ_CONFIG) / 4) as usize] = value;
             Some(Ok(()))
-        } else if (IRQ_PENDING..IRQ_PENDING + 16).contains(&address) {
+        } else if matches!(a, 0x1eef1a0 | 0x1eef1a4) {
+            if value & !255 != 0 {
+                return Some(Err("invalid software interrupt mask"));
+            }
+            if a & 4 == 0 {
+                self.software[core] |= value as u8;
+            } else {
+                self.software[core] &= !(value as u8);
+            }
+            Some(Ok(()))
+        } else if (IRQ_PENDING..IRQ_PENDING + 16).contains(&a) {
             Some(Err("interrupt pending registers are read-only"))
         } else {
             self.adc
@@ -187,27 +227,36 @@ impl Devices {
                 .or_else(|| self.gpio.write(address, value))
         }
     }
-
     pub fn advance(&mut self, ticks: u32) {
         self.adc.advance(ticks);
         self.timer4.advance(ticks);
         self.timer5.advance(ticks);
         self.tick.advance(ticks);
+        self.tick_secondary.advance(ticks);
     }
-
     pub fn pending_irq(&self, icfg: u32) -> Option<usize> {
-        [
-            (TICK_IRQ, self.tick.pending),
-            (TIMER5_IRQ, self.timer5.pending),
-        ]
-        .into_iter()
-        .filter(|(source, pending)| *pending && self.irq_priority(*source, icfg).is_some())
-        .max_by_key(|(source, _)| self.irq_priority(*source, icfg).unwrap())
-        .map(|(source, _)| source)
+        self.pending_irq_for(icfg, 0)
     }
-
+    pub(crate) fn pending_irq_for(&self, icfg: u32, core: usize) -> Option<usize> {
+        let tick = if core == 0 {
+            &self.tick
+        } else {
+            &self.tick_secondary
+        };
+        [(TICK_IRQ, tick.pending), (TIMER5_IRQ, self.timer5.pending)]
+            .into_iter()
+            .chain((0..8).map(|bit| (120 + bit, self.software[core] & (1 << bit) != 0)))
+            .filter(|(source, pending)| {
+                *pending && self.irq_priority_for(*source, icfg, core).is_some()
+            })
+            .max_by_key(|(source, _)| self.irq_priority_for(*source, icfg, core).unwrap())
+            .map(|(source, _)| source)
+    }
     pub fn irq_priority(&self, source: usize, icfg: u32) -> Option<u32> {
-        let bits = self.irq_config[source >> 3] >> ((source & 7) * 4);
+        self.irq_priority_for(source, icfg, 0)
+    }
+    pub(crate) fn irq_priority_for(&self, source: usize, icfg: u32, core: usize) -> Option<u32> {
+        let bits = self.irq_config[core][source >> 3] >> ((source & 7) * 4);
         (icfg & 0x100 != 0 && bits & 1 != 0).then_some((bits >> 1) & 7)
     }
 }

@@ -3,6 +3,7 @@
 // Register layout: vendor SDK asm/csfr.h; startup ranges: unchanged stock code.
 pub(crate) struct Cache {
     regs: [u32; 3],
+    cores: [u32; 2],
     tags: Vec<u8>,
     ram: Vec<u8>,
 }
@@ -10,6 +11,7 @@ impl Default for Cache {
     fn default() -> Self {
         Self {
             regs: [0; 3],
+            cores: [0, 2],
             tags: vec![0; 0xc000],
             ram: vec![0; 0x10000],
         }
@@ -21,6 +23,9 @@ impl Cache {
         (offset.checked_add(n)? <= len).then_some(offset)
     }
     pub fn read(&self, a: u32, n: usize) -> Option<u32> {
+        if n == 4 && matches!(a, 0x1eee000 | 0x1eee004) {
+            return Some(self.cores[((a - 0x1eee000) / 4) as usize]);
+        }
         if n == 4 && matches!(a, 0x40400 | 0x40500 | 0x40438) {
             // SRAM/SFC machine: SDR and PSRAM controllers are disabled.
             return Some(0);
@@ -45,6 +50,10 @@ impl Cache {
         )
     }
     pub fn write(&mut self, a: u32, n: usize, v: u32) -> Option<()> {
+        if n == 4 && matches!(a, 0x1eee000 | 0x1eee004) {
+            self.cores[((a - 0x1eee000) / 4) as usize] = v;
+            return Some(());
+        }
         if n == 4 && matches!(a, 0x40400 | 0x40500 | 0x40438) && v == 0 {
             return Some(());
         }
