@@ -17,6 +17,21 @@ pub enum Fault {
     Trace(String),
 }
 
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+    #[test]
+    fn lock_instructions_change_ownership_without_changing_registers() {
+        let mut c = Cpu::new(Bus::new(vec![0x41, 0, 0x40, 0]).unwrap(), crate::XIP);
+        let before = c.r;
+        assert_eq!(c.step().unwrap(), "lockset");
+        assert!(c.bus_locked);
+        assert_eq!(c.step().unwrap(), "lockclr");
+        assert!(!c.bus_locked);
+        assert_eq!(c.r, before);
+    }
+}
+
 impl fmt::Display for Fault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -48,6 +63,7 @@ pub struct Cpu {
     irq_predicate: Option<(u32, u32)>,
     repeat: Option<(u32, u32, u32)>,
     irq_repeat: Option<(u32, u32, u32)>,
+    bus_locked: bool,
 }
 
 impl Cpu {
@@ -65,6 +81,7 @@ impl Cpu {
             irq_predicate: None,
             repeat: None,
             irq_repeat: None,
+            bus_locked: false,
         }
     }
 
@@ -483,6 +500,15 @@ impl Cpu {
         } else if h == 0x0060 {
             self.interrupts_enabled = false;
             op = "cli";
+        } else if matches!(h, 0x0040 | 0x0041) {
+            // CPU bus ownership latch. With one executing core acquisition
+            // cannot contend; this does not replace the guest's memory locks.
+            self.bus_locked = h == 0x0041;
+            op = if self.bus_locked {
+                "lockset"
+            } else {
+                "lockclr"
+            };
         } else if h == 0x0061 {
             self.interrupts_enabled = true;
             op = "sti";
