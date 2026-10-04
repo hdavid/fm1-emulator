@@ -527,6 +527,33 @@ fn carry_arithmetic_matches_seven_physical_fm1_measurements() {
 }
 
 #[test]
+fn wide_multiply_accumulate_keeps_carry_and_incoming_aliased_operands() {
+    for (encoding, left, right, accumulator, expected) in [
+        (0xae60, u32::MAX, 2, u32::MAX as u64, 0x2fffffffd),
+        (0xae60, u32::MAX, u32::MAX, u64::MAX, 0xfffffffe00000000),
+        (0xbe60, (-3i32) as u32, 7, 5, (-16i64) as u64),
+    ] {
+        let mut c = cpu(&[0xe1fc, encoding]);
+        c.r[6] = left;
+        c.r[14] = right;
+        c.r[10] = accumulator as u32;
+        c.r[11] = (accumulator >> 32) as u32;
+        c.step().unwrap();
+        assert_eq!(c.r[10] as u64 | ((c.r[11] as u64) << 32), expected);
+    }
+    // Both multiplicands overlap the accumulator, so read them first.
+    let mut c = cpu(&[0xe1fc, 0x0010]);
+    c.r[0] = u32::MAX;
+    c.r[1] = 2;
+    let value = 0x2ffffffffu64;
+    c.step().unwrap();
+    assert_eq!(
+        c.r[0] as u64 | ((c.r[1] as u64) << 32),
+        value + 2 * u32::MAX as u64
+    );
+}
+
+#[test]
 fn stock_wide_arithmetic_preserves_high_words_and_overlapping_operands() {
     // Vendor stock clock arithmetic, with aliased inputs/outputs and values
     // requiring both words. The destination's low bit selects signed multiply.

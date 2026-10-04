@@ -253,15 +253,26 @@ pub(crate) fn execute(
         } else if h == 0xe1f0 && x & 15 == 0 {
             cpu.r[d] = cpu.r[s].wrapping_mul(cpu.r[c]);
             op = "multiply_extended";
-        } else if h == 0xe1f8 && x & 15 == 0 {
-            let result = if d & 1 == 0 {
+        } else if matches!(h, 0xe1f8 | 0xe1fc) && x & 15 == 0 {
+            let product = if d & 1 == 0 {
                 cpu.r[s] as u64 * cpu.r[c] as u64
             } else {
                 (cpu.r[s] as i32 as i64 * cpu.r[c] as i32 as i64) as u64
             };
+            let pair = d & 14;
+            let result = if h == 0xe1fc {
+                let accumulator = cpu.r[pair] as u64 | ((cpu.r[pair + 1] as u64) << 32);
+                accumulator.wrapping_add(product)
+            } else {
+                product
+            };
             cpu.r[d & 14] = result as u32;
             cpu.r[(d & 14) + 1] = (result >> 32) as u32;
-            op = "multiply_wide";
+            op = if h == 0xe1fc {
+                "multiply_accumulate_wide"
+            } else {
+                "multiply_wide"
+            };
         } else if h == 0xe1f6 && d & 1 == 0 && s & 1 == 0 && x & 15 <= 1 {
             let dividend = cpu.r[s] as u64 | ((cpu.r[s + 1] as u64) << 32);
             let quotient = if x & 1 == 0 {
