@@ -7,35 +7,15 @@ screen and buttons. USB serial output from the firmware appears in your terminal
 
 ## Download and run
 
-**[Download a prebuilt emulator from Releases](../../releases).** Extract the
-archive for your platform; Rust, mise and Docker are not needed to run it.
-Firmware is supplied separately. [Felucca 0.9-beta](https://github.com/hugelton/Felucca/releases/tag/v0.9-beta)
-boots with partial functionality.
-
-| Platform | Archive |
-| --- | --- |
-| Linux AMD64 | `emulator-linux-amd64.tar.gz` |
-| Linux ARM64 | `emulator-linux-arm64.tar.gz` |
-| macOS ARM64 (Apple Silicon) | `emulator-macos-arm64.tar.gz` |
-| Windows AMD64 | `emulator-windows-amd64.zip` |
-
-From the extracted directory, run:
+Download and extract the [release](https://github.com/simonjohansson/fm1-emulator/releases)
+for your OS and architecture, then run it with a firmware path:
 
 ```sh
-# Linux / macOS
-./emulator /path/to/felucca-0.9-beta.fwsc
+./emulator /path/to/firmware.fwsc
 ```
 
-```powershell
-# Windows
-.\emulator.exe C:\path\to\felucca-0.9-beta.fwsc
-```
-
-The loader accepts `.fwsc` packages, application `.elf` files and raw `.bin`
-images. Click and hold the panel buttons, use the arrow keys for octave changes,
-and `A W S E D R F G T H Y J K` for notes. Pause and Restart control execution.
-Linux downloads target Ubuntu 24.04 or newer and need a working OpenGL display.
-The macOS application is ad-hoc signed, without Apple notarization.
+Use `emulator.exe` on Windows. Firmware is supplied separately; `.fwsc`, `.elf`
+and `.bin` are supported.
 
 ## Build from source
 
@@ -60,11 +40,6 @@ On Linux/macOS, run `./emulator /path/to/firmware.fwsc`; the launcher builds and
 opens the emulator. On Windows, run
 `.\rust-emulator\target\release\fm1-ui.exe C:\path\to\firmware.fwsc`.
 Building the emulator does not require the vendor firmware compiler or Docker.
-
-[GitHub Actions](.github/workflows/emulator.yml) tests and builds all four
-platforms, including boot, note-rendering and FX checks using the checksum-pinned
-Felucca release. Successful push builds publish a release tagged with the commit
-SHA, with archives and SHA256 checksums. Pull requests run the same checks.
 
 ## Firmware compatibility
 
