@@ -446,16 +446,16 @@ pub(crate) fn execute(
                 next = next.wrapping_add((signed(x & 511, 9) * 2) as u32);
             }
             op = "branch_bit";
-        } else if h & 0xffe0 == 0xef00 || h & 0xffe0 == 0xefc0 {
+        } else if matches!(h & 0xffe0, 0xef00 | 0xef80 | 0xefc0) {
             let addr = cpu.r[d].wrapping_add((h & 31) * 4);
             let old = cpu.read(addr, 4)?;
             let value = packed(x);
             cpu.write(
                 addr,
-                if h & 0xc0 == 0 {
-                    old | value
-                } else {
-                    old & !value
+                match h & 0xc0 {
+                    0 => old | value,
+                    0x80 => old & value,
+                    _ => old & !value,
                 },
             )?;
             op = "memory_mask";

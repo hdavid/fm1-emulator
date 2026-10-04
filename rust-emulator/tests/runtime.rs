@@ -45,6 +45,17 @@ fn startup_repeat_clears_exactly_the_requested_words() {
 }
 
 #[test]
+fn packed_memory_and_preserves_the_high_cache_way_bits() {
+    // Stock cache setup: [r0+4] &= 0xff000000.
+    let mut c = cpu(&[0xef81, 0x047f]);
+    c.r[0] = RAM;
+    c.bus.write(RAM + 4, 0x87654321, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 4, 4).unwrap(), 0x87000000);
+    assert_eq!(c.r[0], RAM);
+}
+
+#[test]
 fn conditional_skip_counts_the_whole_long_call() {
     // if (r5 < 5) { call ... } else { r0=22 }.
     let mut c = cpu(&[0xe9b5, 0x1005, 0xff80, 0x00b0, 0x0000, 0x3640]);
