@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // SPI0 serial NOR. Application ELF supplies decrypted XIP separately.
 use std::collections::BTreeMap;
+
+enum Pending {
+    Program(usize, Vec<u8>),
+    Erase(usize),
+}
+
 pub struct Nor {
     regs: BTreeMap<u32, u32>,
     command: Vec<u8>,
@@ -8,6 +14,10 @@ pub struct Nor {
     pub bytes: Vec<u8>,
     cursor: usize,
     decoded: Option<Vec<u8>>,
+    key: u16,
+    write_enabled: bool,
+    busy_ticks: u32,
+    pending: Option<Pending>,
 }
 
 impl Default for Nor {
@@ -19,6 +29,10 @@ impl Default for Nor {
             bytes: vec![255; 1024 * 1024],
             cursor: 0,
             decoded: None,
+            key: 0,
+            write_enabled: false,
+            busy_ticks: 0,
+            pending: None,
         }
     }
 }
@@ -29,6 +43,7 @@ impl Nor {
         let mut decoded = self.bytes[0x4000..].to_vec();
         crate::package::sfc(&mut decoded, key);
         self.decoded = Some(decoded);
+        self.key = key;
         self.regs
             .extend([(0x40200, 0x809803b5), (0x40204, 1), (0x40208, 0x8e17)]);
     }
@@ -43,6 +58,9 @@ impl Nor {
         // The SFC maps flash offset 0x4000 at CPU address 0x02000000.
         let offset = address.checked_sub(0x0200_0000)? as usize + self.read(0x4020c)? as usize;
         let bytes = self.bytes.get(offset..offset.checked_add(size)?)?;
+        if self.busy_ticks != 0 {
+            return Some(Err("XIP unavailable while SPI NOR is busy"));
+        }
         if !self.xip_active() {
             return Some(Err(
                 "XIP unavailable while SFC or flash pin routing is disabled",
@@ -107,10 +125,68 @@ impl Nor {
     }
     pub fn chip_select(&mut self, selected: bool) {
         if self.selected != selected {
+            if !selected && self.busy_ticks == 0 {
+                self.finish_command();
+            }
             self.command.clear();
             self.cursor = 0;
         }
         self.selected = selected;
+    }
+
+    fn finish_command(&mut self) {
+        // P25Q80H datasheet sections 10.2, 10.3, 10.20 and 10.24:
+        // commands latch on CS rising; writes require WEL. Typical times are
+        // 2 ms program and 8 ms sector erase, on the 24 MHz oscillator clock.
+        match self.command.as_slice() {
+            [0x06] => self.write_enabled = true,
+            [0x04] => self.write_enabled = false,
+            [0x02, a, b, c, data @ ..] if self.write_enabled && !data.is_empty() => {
+                let address = ((*a as usize) << 16) | ((*b as usize) << 8) | *c as usize;
+                self.pending = Some(Pending::Program(address % self.bytes.len(), data.to_vec()));
+                self.busy_ticks = 48_000;
+            }
+            [0x20, a, b, c] if self.write_enabled => {
+                let address = ((*a as usize) << 16) | ((*b as usize) << 8) | *c as usize;
+                self.pending = Some(Pending::Erase(address % self.bytes.len() & !0xfff));
+                self.busy_ticks = 192_000;
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn advance(&mut self, ticks: u32) {
+        self.busy_ticks = self.busy_ticks.saturating_sub(ticks);
+        if self.busy_ticks != 0 {
+            return;
+        }
+        let (start, end) = match self.pending.take() {
+            Some(Pending::Program(address, data)) => {
+                let page = address & !255;
+                // The page buffer wraps; when overloaded, only its last 256
+                // bytes survive. Programming can only clear bits.
+                for (i, byte) in data.iter().enumerate().skip(data.len().saturating_sub(256)) {
+                    self.bytes[page + ((address + i) & 255)] &= byte;
+                }
+                (page, page + 256)
+            }
+            Some(Pending::Erase(address)) => {
+                self.bytes[address..address + 4096].fill(255);
+                (address, address + 4096)
+            }
+            None => return,
+        };
+        self.write_enabled = false;
+        if let Some(decoded) = &mut self.decoded {
+            let start = start.max(0x4000);
+            if start < end {
+                let plain = &mut decoded[start - 0x4000..end - 0x4000];
+                plain.copy_from_slice(&self.bytes[start..end]);
+                for (i, block) in plain.chunks_mut(32).enumerate() {
+                    crate::package::enc(block, self.key ^ ((start - 0x4000) / 4 + i * 8) as u16);
+                }
+            }
+        }
     }
     pub fn write(&mut self, a: u32, v: u32) -> Option<Result<(), &'static str>> {
         self.read(a)?;
@@ -147,7 +223,9 @@ impl Nor {
                         value = [0x85, 0x60, 0x14].get(len - 2).copied().unwrap_or(255);
                     }
                 }
-                0x05 | 0x35 => value = 0,
+                0x05 => value = ((self.write_enabled as u32) << 1) | (self.busy_ticks != 0) as u32,
+                0x35 => value = 0,
+                0x06 | 0x04 | 0x02 | 0x20 => {}
                 0x03 | 0x0b | 0x6b => {
                     let start = if self.command[0] == 3 { 4 } else { 5 };
                     if len == 4 {
@@ -173,6 +251,89 @@ impl Nor {
 #[cfg(test)]
 mod tests {
     use super::Nor;
+
+    fn transaction(nor: &mut Nor, bytes: &[u32]) -> u32 {
+        nor.chip_select(true);
+        for &byte in bytes {
+            nor.write(0x11c08, byte).unwrap().unwrap();
+        }
+        let result = nor.read(0x11c08).unwrap();
+        nor.chip_select(false);
+        result
+    }
+
+    #[test]
+    fn writes_require_a_complete_write_enable_transaction() {
+        let mut nor = Nor::default();
+        nor.chip_select(true);
+        nor.write(0x11c08, 6).unwrap().unwrap();
+        assert!(!nor.write_enabled);
+        nor.chip_select(false);
+        assert_eq!(transaction(&mut nor, &[5, 255]), 2);
+        transaction(&mut nor, &[4]);
+        assert_eq!(transaction(&mut nor, &[5, 255]), 0);
+        transaction(&mut nor, &[2, 9, 0, 0, 0]);
+        nor.advance(48_000);
+        assert_eq!(nor.bytes[0x90000], 255);
+        transaction(&mut nor, &[6]);
+        transaction(&mut nor, &[0x20, 9, 0]); // incomplete address
+        assert_eq!(nor.busy_ticks, 0);
+        assert!(nor.write_enabled);
+    }
+
+    #[test]
+    fn page_program_waits_for_completion_wraps_and_only_clears_bits() {
+        let mut nor = Nor::default();
+        transaction(&mut nor, &[6]);
+        transaction(&mut nor, &[2, 9, 0, 255, 0x0f, 0xf0]);
+        assert_eq!(nor.bytes[0x900ff], 255);
+        assert_eq!(transaction(&mut nor, &[5, 255]), 3); // WEL and WIP
+        assert!(nor.xip(0x0208c000, 1).unwrap().is_err());
+        nor.advance(47_999);
+        assert_eq!(transaction(&mut nor, &[5, 255]), 3);
+        nor.advance(1);
+        assert_eq!(transaction(&mut nor, &[5, 255]), 0);
+        assert_eq!(nor.bytes[0x900ff], 0x0f);
+        assert_eq!(nor.bytes[0x90000], 0xf0);
+        assert_eq!(nor.bytes[0x90100], 255);
+        transaction(&mut nor, &[6]);
+        transaction(&mut nor, &[2, 9, 0, 255, 0xf0]);
+        nor.advance(48_000);
+        assert_eq!(nor.bytes[0x900ff], 0);
+    }
+
+    #[test]
+    fn page_buffer_keeps_only_the_last_256_bytes() {
+        let mut nor = Nor::default();
+        let mut command = vec![2, 9, 0, 0, 0];
+        command.extend([255; 256]);
+        transaction(&mut nor, &[6]);
+        transaction(&mut nor, &command);
+        nor.advance(48_000);
+        assert!(nor.bytes[0x90000..0x90100].iter().all(|&byte| byte == 255));
+    }
+
+    #[test]
+    fn erase_updates_raw_and_encrypted_xip_without_touching_neighbors() {
+        let mut nor = Nor::default();
+        nor.load(&vec![0x55; 0x94000], 0x980f);
+        transaction(&mut nor, &[6]);
+        transaction(&mut nor, &[0x20, 9, 0x11, 0x23]);
+        assert_eq!(transaction(&mut nor, &[5, 255]), 3);
+        nor.advance(192_000);
+        assert_eq!(transaction(&mut nor, &[5, 255]), 0);
+        assert!(nor.bytes[0x91000..0x92000].iter().all(|&byte| byte == 255));
+        assert_eq!(nor.bytes[0x90fff], 0x55);
+        assert_eq!(nor.bytes[0x92000], 0x55);
+        let mut block = [255; 32];
+        crate::package::enc(&mut block, 0x980f ^ ((0x91000 - 0x4000) / 4) as u16);
+        assert_eq!(
+            nor.xip(0x0208d000, 4).unwrap().unwrap(),
+            u32::from_le_bytes(block[..4].try_into().unwrap())
+        );
+        nor.write(0x40300, 0).unwrap().unwrap();
+        assert_eq!(nor.xip(0x0208d000, 4).unwrap().unwrap(), u32::MAX);
+    }
 
     #[test]
     fn unique_id_consumes_four_dummy_bytes_and_restarts_on_chip_select() {

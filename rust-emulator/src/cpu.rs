@@ -333,6 +333,7 @@ impl Cpu {
         }
         self.steps += 1;
         self.bus.devices.advance(OSC_TICKS_PER_INSTRUCTION);
+        self.bus.advance_nor(OSC_TICKS_PER_INSTRUCTION);
         self.bus
             .system
             .advance(OSC_TICKS_PER_INSTRUCTION)

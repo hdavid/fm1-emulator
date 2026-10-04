@@ -280,6 +280,10 @@ impl Bus {
         Ok(())
     }
 
+    pub(crate) fn advance_nor(&mut self, ticks: u32) {
+        self.nor.advance(ticks);
+    }
+
     pub fn advance_usb(&mut self, ticks: u32) -> Result<(), AccessFault> {
         self.usb
             .advance(ticks, &mut self.ram)
