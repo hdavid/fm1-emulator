@@ -246,6 +246,20 @@ pub(crate) fn execute(
             } else {
                 "divide_signed"
             };
+        } else if h == 0xe430 && x & 255 == 0 {
+            cpu.r[d] = (cpu.r[c] as i32).wrapping_abs() as u32;
+            op = "absolute";
+        } else if h == 0xe434 && x & 15 <= 1 {
+            cpu.r[d] = if x & 1 == 0 {
+                cpu.r[s].max(cpu.r[c])
+            } else {
+                (cpu.r[s] as i32).max(cpu.r[c] as i32) as u32
+            };
+            op = if x & 1 == 0 {
+                "maximum_unsigned"
+            } else {
+                "maximum_signed"
+            };
         } else if h == 0xe435 && x & 15 <= 1 {
             cpu.r[d] = if x & 1 == 0 {
                 cpu.r[s].min(cpu.r[c])

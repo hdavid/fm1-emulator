@@ -218,6 +218,23 @@ fn signed_minimum_clips_audio_with_signed_comparison() {
     }
 }
 
+#[test]
+fn absolute_and_maximum_compute_the_audio_peak() {
+    for (value, expected) in [(-123, 123), (123, 123), (i32::MIN, i32::MIN)] {
+        let mut c = cpu(&[0xe430, 0x1500]); // r1 = abs(r5)
+        c.r[5] = value as u32;
+        c.step().unwrap();
+        assert_eq!(c.r[1], expected as u32);
+    }
+    for (mode, expected) in [(0, u32::MAX), (1, 123)] {
+        let mut c = cpu(&[0xe434, 0x1130 | mode]); // r1 = u/smax(r3, r1)
+        c.r[3] = u32::MAX;
+        c.r[1] = 123;
+        c.step().unwrap();
+        assert_eq!(c.r[1], expected);
+    }
+}
+
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {
