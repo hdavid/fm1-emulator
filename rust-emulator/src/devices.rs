@@ -130,6 +130,7 @@ pub struct Devices {
     startup_timers: [Timer; 4],
     tick_secondary: TickTimer,
     irq_config: [[u32; 32]; 2],
+    priority_mask: [u32; 2],
     software: u8,
 }
 
@@ -160,6 +161,8 @@ impl Devices {
             Some(self.irq_config[core][((a - IRQ_CONFIG) / 4) as usize])
         } else if matches!(a, 0x1eef1a0 | 0x1eef1a4) {
             Some(0)
+        } else if a == 0x1eef1a8 {
+            Some(self.priority_mask[core])
         } else if (IRQ_PENDING..IRQ_PENDING + 16).contains(&a) {
             Some(match (a - IRQ_PENDING) / 4 {
                 0 => {
@@ -222,6 +225,12 @@ impl Devices {
             } else {
                 self.software &= !(value as u8);
             }
+            Some(Ok(()))
+        } else if a == 0x1eef1a8 {
+            if value > 7 {
+                return Some(Err("invalid CPU interrupt priority mask"));
+            }
+            self.priority_mask[core] = value;
             Some(Ok(()))
         } else if (IRQ_PENDING..IRQ_PENDING + 16).contains(&a) {
             Some(Err("interrupt pending registers are read-only"))

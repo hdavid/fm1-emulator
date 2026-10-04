@@ -57,6 +57,27 @@ fn timer5_prescaler_period_and_interrupt_masks() {
 }
 
 #[test]
+fn irq_priority_register_tracks_the_handler_and_restores_on_return() {
+    let mut c = Cpu::new(Bus::new(vec![0x61, 0, 0, 0]).unwrap(), fm1_emu::XIP);
+    let handler = fm1_emu::RAM + 512;
+    c.bus.write(handler, 0x0081, 2).unwrap();
+    c.bus.write(0x01c7fe00 + 127 * 4, handler, 4).unwrap();
+    c.bus.write(IRQ_CONFIG + 15 * 4, 0xb0000000, 4).unwrap();
+    c.bus.write(0x1eef1a0, 128, 4).unwrap();
+    c.sr[11] = 0x100;
+    c.sr[14] = USER_STACK;
+    c.sr[13] = SYSTEM_STACK;
+    c.step().unwrap();
+    assert_eq!(c.pc, handler);
+    assert_eq!(c.bus.read(0x1eef1a8, 4).unwrap(), 5);
+    assert_eq!(c.sr[11] & 255, 127);
+    c.bus.write(0x1eef1a4, 128, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.bus.read(0x1eef1a8, 4).unwrap(), 0);
+    assert_eq!(c.sr[11] & 0x3ff, 0x300);
+}
+
+#[test]
 fn firmware_boot_initializes_ram_and_services_a_real_guest_isr() {
     let firmware = Firmware::load(&root().join("build/foundation/firmware.elf")).unwrap();
     assert_eq!(
