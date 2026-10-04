@@ -40,6 +40,20 @@ fn conditional_block_executes_only_the_selected_arm() {
         assert_eq!(c.pc, XIP + 10);
     }
 }
+
+#[test]
+fn unsigned_immediate_conditional_selects_storage_header_region() {
+    // Vendor form from st_head: if (r5 < 5) { r0=11 } else { r0=22 }.
+    for (value, expected) in [(0, 11), (4, 11), (5, 22), (u32::MAX, 22)] {
+        let mut c = cpu(&[0xe9b5, 0x1005, 0x2b40, 0x3640, 0x0000]);
+        c.r[5] = value;
+        for _ in 0..3 {
+            c.step().unwrap();
+        }
+        assert_eq!(c.r[0], expected);
+        assert_eq!(c.pc, XIP + 10);
+    }
+}
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {
