@@ -1,274 +1,90 @@
-# FM-1 minimal diagnostic firmware and CPU emulator
+![FM-1 emulator running the Felucca firmware](docs/felucca.jpg)
 
-Version 0.2. This is a separate, small firmware derived from Felucca. It contains
-USB serial, the USB-MIDI update protocol, the update loader, timer/input drivers,
-basic LCD status, watchdog and crash recovery, and a deterministic CPU probe.
-It contains **no synth engines, effects, sequencer, sample data, editor, or preset
-storage**. The compiled application is 14,804 bytes. Its experimental package
-identity is `FM-1_980`; this is not an official M-VAVE or Felucca release.
+# FM-1 emulator
 
-**Initial physical FM-1 comparison passed on 2026-10-04.** The device was updated
-from Felucca `FM-1_909` to diagnostic `FM-1_980`, restarted successfully, and all
-twelve CPU-probe result words matched the emulator with the same probe hash.
-The initial capture is preserved in `build/hardware-initial.txt`; the session record is
-`build/hardware-verification.txt`. This validates the probe's tested instruction
-forms and inputs; recovery paths and other hardware behavior remain unverified.
-The Python reference executes the shared CPU probe. It does not boot the complete diagnostic firmware
-or emulate USB, LCD, flash hardware, interrupts, audio, or cycle timing.
+A Rust emulator for the M-VAVE FM-1. Load firmware and interact with its own
+screen and buttons. USB serial output from the firmware appears in your terminal.
 
-## Graphical emulator
+## Download and run
 
-```sh
-./emulator build/display/firmware.elf
-# Or load the identical raw application:
-./emulator build/display/firmware.bin
-```
+**[Download a prebuilt emulator from Releases](../../releases).** Extract the
+archive for your platform; Rust, mise and Docker are not needed to run it.
+Firmware is supplied separately. [Felucca 0.9-beta](https://github.com/hugelton/Felucca/releases/tag/v0.9-beta)
+is a working starting point.
 
-This opens a native window with an illustrated FM-1 panel. Its screen displays
-actual guest LCD writes through the emulated SPI/DMA controller. The included
-17,056-byte FM-1_981 hardware firmware shows a live hexadecimal TIMER4 value and an
-11-column × 4-row key/button matrix. Hold a panel key or button to light its
-matrix cell. Arrow keys press OCT−/OCT+; `A W S E D R F G T H Y J K` play the
-first thirteen matrix note keys. There is no audio output yet.
+| Platform | Archive |
+| --- | --- |
+| Linux AMD64 | `emulator-linux-amd64.tar.gz` |
+| Linux ARM64 | `emulator-linux-arm64.tar.gz` |
+| macOS ARM64 (Apple Silicon) | `emulator-macos-arm64.tar.gz` |
+| Windows AMD64 | `emulator-windows-amd64.zip` |
 
-The launcher uses mise's Rust and builds the native interface on first use;
-that first build needs network access for Cargo dependencies and a host C/linker
-toolchain (Xcode Command Line Tools on macOS). Subsequent launches use the cached
-build. Docker is needed only to **rebuild guest firmware**, not to run the window.
-Use `mise run build-display` to rebuild the included display demo.
-
-Any supported application `.elf` or `.bin` can be passed as the path. Loading an
-image does not imply its instructions/peripherals are all implemented. The
-FM-1_981 display application boots; full Felucca is not supported yet. Unsupported instructions and
-peripherals stop execution and report the reason below the device. `.fwsc` update
-packages are not yet accepted. Pause freezes the CPU; Restart reloads the file.
-Rotary controls are visual only. No physical device is accessed by this launcher.
-
-The display application includes the hardware startup, watchdog, USB updater,
-and recovery code. Its exact application bytes are packaged in
-`build/display/firmware.fwsc`. This package was installed on the connected FM-1
-on 2026-10-04: FM-1_981 identity, USB console, advancing display counter, and all
-12 CPU probe words passed. Captures are under `build/display/hardware-*.txt`.
-
-Button and note transitions print `KEY <id> down` / `KEY <id> up` in the launching
-terminal. These bytes travel through the guest's USB CDC driver and emulated
-USB endpoint DMA. The emulator host enumerates USB and opens CDC automatically.
-IDs 0..13 are buttons; 14..40 are notes. The physical FM-1 emits the same messages
-when its USB serial port is open. No debug message is synthesized by the UI.
-
-To install this same build again:
+From the extracted directory, run:
 
 ```sh
-mise exec -- uv run --frozen python tools/fm1_install.py build/display/firmware.fwsc
+# Linux / macOS
+./emulator /path/to/felucca-0.9-beta.fwsc
 ```
 
-## Setup with mise
+```powershell
+# Windows
+.\emulator.exe C:\path\to\felucca-0.9-beta.fwsc
+```
 
-Install [mise](https://mise.jdx.dev/installing-mise.html), unzip this project, and
-run these commands from the `fm1-emulator` directory:
+The loader accepts `.fwsc` packages, application `.elf` files and raw `.bin`
+images. Click and hold the panel buttons, use the arrow keys for octave changes,
+and `A W S E D R F G T H Y J K` for notes. Pause and Restart control execution.
+Linux downloads target Ubuntu 24.04 or newer and need a working OpenGL display.
+The macOS application is ad-hoc signed, without Apple notarization.
+
+## Build from source
+
+Install [mise](https://mise.jdx.dev/installing-mise.html) and a native C/C++
+toolchain: Xcode Command Line Tools on macOS, Visual Studio Build Tools with
+**Desktop development with C++** on Windows, or the following on Ubuntu:
+
+```sh
+sudo apt-get install build-essential pkg-config libx11-dev libxi-dev libgl1-mesa-dev libxkbcommon-dev libwayland-dev
+```
+
+From this checkout:
 
 ```sh
 mise trust
-mise install
-mise run setup
-mise run build
-mise run test
+mise install rust
+mise exec -- cargo build --manifest-path rust-emulator/Cargo.toml --locked --release --features gui --bin fm1-ui
+mise exec -- cargo test --manifest-path rust-emulator/Cargo.toml --locked --release --features gui
 ```
 
-`mise.toml` pins uv 0.8.24 and Rust 1.91.1. uv manages Python 3.12.11,
-pinned in `.python-version`.
-All Python tasks run through uv. `setup` installs Python and the packages from
-`uv.lock`, downloads the checksum-pinned JieLi compiler, and fetches the
-pinned AC79 SDK. The SDK revision and the three packaging blobs are checked.
-Git and network access are required on first setup. Dependencies go in `.deps`
-and `.venv`. They are not included in the archive.
+On Linux/macOS, run `./emulator /path/to/firmware.fwsc`; the launcher builds and
+opens the emulator. On Windows, run
+`.\rust-emulator\target\release\fm1-ui.exe C:\path\to\firmware.fwsc`.
+Building the emulator does not require the vendor firmware compiler or Docker.
 
-The compiler runs natively on Linux x86-64. On macOS or Linux ARM, the build
-uses Docker with `linux/amd64`; install and start Docker first and put this
-project somewhere Docker can share. Docker is a system prerequisite, not installed
-by mise. Native Windows builds are not supported by these build scripts; use
-WSL for building. Serial capture accepts Windows COM names when run with Python.
+[GitHub Actions](.github/workflows/emulator.yml) tests and builds all four
+platforms, including a boot and note-rendering test using the checksum-pinned
+Felucca release. Successful push builds publish a release tagged with the commit
+SHA, with archives and SHA256 checksums. Pull requests run the same checks.
 
-The archive already includes built artifacts. `setup` and `build` let you reproduce
-them or change the probe. The vendor archive is pinned by SHA256, not its mutable
-"latest" download endpoint. Its directory/version is `20250324.1`.
+## Firmware compatibility
 
-## Flash the minimal firmware
+Last checked on 2026-10-05. **Pass** means the listed boot/input checks passed;
+it does not guarantee every synth feature works.
 
-The installable file is **`build/fm1-diag.fwsc`**. Do not flash `probe.bin` or the
-raw `fm1-diag.bin` as an update package.
+| Firmware | Boot | Verified behavior / blocker |
+| --- | --- | --- |
+| Felucca 0.9-beta (`FM-1_909`, `.fwsc`) | Pass | LCD, USB console, watchdog and note audio/DMA; 110 million instructions |
+| Felucca source build (`1e838e1`, `.elf`) | Pass | LCD, USB console, note press/release and ENV page; 112 million instructions |
+| Official `FM-1_015` (`FM-1.fwsc`) | Fails | Missing CPU instruction during startup; no screen yet |
+| Baud Girl `FM-1_093` (`FM-1_093.fwsc`) | Fails | Same startup blocker; no screen yet |
 
-Connect the FM-1 with a USB data cable and close applications using its MIDI
-port. This replaces the running synth with the diagnostic firmware; it will not
-play notes. Keep a known working firmware package and your recovery method
-available for this first hardware test. Use stable power during the update.
+## Still to implement
 
-```sh
-mise run flash
-```
+- Remaining CPU instructions and peripherals needed by official/Baud Girl firmware.
+- Host audio playback, rotary controls, USB MIDI and serial input.
+- Flash erase/program and persistence, plus fuller encryption, interrupt and timing behavior.
 
-The included Felucca-derived updater identifies the device, asks before writing,
-sends the package, and checks for `FM-1_980` after restart. If there are multiple
-MIDI devices or auto-selection fails, specify the FM-1 MIDI port name:
-
-```sh
-mise run flash -- --port "FM-1"
-```
-
-This is a MIDI port name, not the serial device path used below. The firmware
-currently on the device must support the FM-1 update protocol. This workflow is
-not a universal ROM/UBOOT recovery flasher. The inherited updater and loader
-have passed simulations; that does not prove this new firmware boots on hardware.
-
-After boot, the screen shows:
-
-- `D1A60001`: diagnostic firmware, protocol version 1.
-- A hex counter beneath it: number of completed `probe` commands.
-- Green top strip: expected flash JEDEC ID found. Yellow: unexpected ID;
-  flash staging is disabled. The CPU probe can still run.
-- Blue during an update; red on a fault, with vector, PC, and exception data.
-
-Holding OCT− and OCT+ for five seconds requests UBOOT recovery. The serial
-`uboot` command does the same. Two early failed boots also request UBOOT.
-These paths are inherited from Felucca and still require hardware confirmation
-in this minimal build. UBOOT mode needs a compatible recovery tool; the normal
-MIDI update command cannot be assumed to work in that mode.
-
-## Run and compare
-
-Run the emulator, then find the diagnostic USB serial port:
-
-```sh
-mise run emulate
-mise run ports
-```
-
-Capture from the port shown by the second command, for example:
-
-```sh
-mise run capture -- /dev/ttyACM0
-mise run compare
-```
-
-On macOS, the path normally starts with `/dev/cu.usbmodem`. The capture tool
-asserts DTR, sends `probe`, and saves `build/hardware.txt`. It performs no flash
-writes. Incomplete output is also saved so that timeouts can be diagnosed.
-A serial terminal at 115200 with DTR enabled can issue `info`, `probe`, or `uboot`.
-
-The comparator checks the probe hash and all twelve result words. Exit codes:
-0 = all match; 1 = values differ; 2 = invalid/incomplete capture or a build hash
-mismatch. It does not authenticate the origin of a text file.
-
-Send back `build/hardware.txt` and `build/emulator.json`. For a mismatch, also
-include `build/trace.jsonl`. If USB never appears, report the screen contents and
-the updater output. The original archive's `build/validation.json` describes
-host validation before the physical test; see `build/hardware-verification.txt`
-for the subsequent device comparison.
-
-## What is compared
-
-`firmware/probe.S` is assembled once for a tiny emulator test image and once into
-the diagnostic firmware. The build checks that the function's 114 machine-code
-bytes match exactly in both ELFs. Interrupts are masked only during this short
-probe on hardware. The probe uses stack-local output there; the emulator uses a
-fixed SRAM result buffer. The memory addresses need not match for these tests.
-
-The twelve words cover a 32-bit constant, wrapping addition, subtraction, XOR,
-AND, OR, NOT, logical left/right shifts, a load followed by addition, a loop sum
-(55), and stack storage. Emulator tests also check register/stack preservation.
-A successful capture validates these instruction forms for these inputs only.
-
-The emulator maps XIP at `0x02000120` and 512 KiB of SRAM at `0x01C00000`, supports
-the 16/32/48-bit instruction encodings needed by this probe, and rejects unknown
-instructions. The 142-byte test image executes 75 instructions. The JSONL trace
-records each instruction and register state.
-
-To extend coverage, edit `firmware/probe.S`, implement new instruction forms in
-`emu.py`, add independent expected-value tests, rebuild, flash, and capture again.
-For more result words, also update `NAMES` and `expected()` in `emu.py`, the count
-in `tools/build.py`, the result array and reporting loop in `firmware/src/diag.c`,
-and the protocol parser/version. Never treat new instructions as hardware-verified
-until the device capture agrees.
-
-## Rust emulator
-
-The Rust interpreter loads unchanged application `.bin` files or reconstructs
-their flash image from ELF load addresses. It executes the embedded probe in
-the full diagnostic firmware and matches the saved physical FM-1 results.
-
-It also boots a separate, 592-byte foundation firmware from `_start`:
-
-```sh
-mise run build-foundation
-mise run rust-foundation
-mise run rust-test
-```
-
-The foundation firmware initializes RAM, executes RAM code and the CPU probe,
-uses TIMER4/TIMER5, services a guest interrupt, and scans all eleven key-matrix
-columns. These exercise five of the ten agreed emulator foundations: CPU,
-memory/startup, timers, interrupts, and controls. The original milestone had seventeen Rust integration
-tests. The hardware display application additionally exercises LCD and USB
-serial. Full, unchanged Felucca now boots and exercises audio/DMA as an eighth
-foundation, plus battery/master ADC reads. The main screen, CDC console banner,
-note rendering and ENV selection are verified. NOR reads are partial;
-erase/program, persistence, USB MIDI host transport, rotary input and host audio
-playback remain. See [the full Felucca investigation](rust-emulator/FELUCCA.md).
-This checklist does not measure musical features or full instruction coverage.
-
-The foundation image is for emulator tests and has no updater/recovery; do not
-flash it. These historical test fixtures are separate from the flashable
-FM-1_981 application in `build/display`.
-See [the Rust emulator guide](rust-emulator/README.md) and
-`build/foundation/verification.txt` for the measured scope and limitations.
-
-## Files and verification
-
-| File | Purpose |
-| --- | --- |
-| `firmware/src/diag.c` | Minimal application and diagnostic console |
-| `firmware/src/startup.c` | Felucca-derived startup and boot-loop guard |
-| `firmware/probe.S` | Shared CPU test |
-| `firmware/hal`, `firmware/loader` | Hardware access and update loader |
-| `build/fm1-diag.fwsc` | Installable update package |
-| `build/fm1-diag.elf`, `.dis`, `.symbols` | Hardware debugging artifacts |
-| `build/fm1-diag.json` | Source, compiler, SDK, and binary hashes |
-| `build/probe.bin`, `.elf`, `.json` | Emulator image and manifest |
-| `build/validation.json` | Scope and results of host validation |
-
-The 609,649-byte update package includes the fixed, padded app slot and the
-loader; its size does not indicate bundled synthesis engines.
-
-`mise run test` runs thirteen tests covering the CPU, parser, package CRCs, and the
-decrypted packaged app. Arithmetic and logic tests include 1,056 input cases.
-The build also checks XIP placement, RAM use, and that flash-driver RAM code
-contains no calls back into flash.
-
-With a host C compiler (`cc`, or set `CC`), run the optional updater simulations:
-
-```sh
-mise run test-update
-```
-
-They test staging, timeout cleanup, simulated NOR installation, boot-area
-preservation, corrupt-header rejection, and host reconnect/failure handling.
-They do not emulate the CPU or prove physical flash behavior. The temporary
-baseline used in these simulations is never installed on a device.
-
-## Sources and licence
-
-GPL-3.0-only; see `LICENSE`. Borrowed files retain their upstream copyright
-notices. This project adapts Felucca startup, HAL, USB/CDC, OTA, loader, packaging,
-installer, and updater tests. The synth sources and assets are omitted. Local
-changes are the diagnostic app and console, probe, emulator, build/setup tasks,
-USB product string, timer-only ISR wrapper, and associated tests.
-
-- [Felucca pinned source](https://github.com/hugelton/Felucca/tree/1e838e17e170b20ff09b9660c9a7171aadfc5dca)
-- [JieLi AC79 SDK](https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK/tree/AC79NN_SDK_V1.2.1_2023-12-13), commit `d179b4484759423312073f5fbb232501aa491047`
-- [Quarkslab pi32v2 reference](https://github.com/quarkslab/ghidra-jieli/tree/e1bd0707874b77b759401555d24839ad43af1267)
-- [AL-255 FM-1 research](https://github.com/AL-255/FM-1-RE)
-
-The package incorporates the SDK's `uboot.boot`, `cfg_tool.bin`, and
-`cfg/eq_cfg_hw.bin`; its Apache-2.0 licence is included under `LICENSES`.
-The compiler is downloaded from JieLi separately. No vendor toolchain binaries
-or Felucca sound/font assets are redistributed in this source archive.
+GPL-3.0-only; see [LICENSE](LICENSE). Based on research and components from
+[Felucca](https://github.com/hugelton/Felucca), the
+[JieLi AC79 SDK](https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK), and
+[Quarkslab's pi32v2 reference](https://github.com/quarkslab/ghidra-jieli).
