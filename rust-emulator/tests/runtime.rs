@@ -71,6 +71,23 @@ fn register_list_loads_descend_without_changing_the_base() {
         }
     }
 }
+
+#[test]
+fn register_pairs_move_both_words_without_clobbering_the_source() {
+    for destination in (0..16).step_by(2) {
+        for source in (0..16).step_by(2) {
+            let mut c = cpu(&[0x1500 | (source as u16) << 4 | destination as u16]);
+            c.r = std::array::from_fn(|i| 0x12345600 + i as u32);
+            let before = c.r;
+            c.step().unwrap();
+            assert_eq!(
+                c.r[destination..destination + 2],
+                before[source..source + 2]
+            );
+            assert_eq!(c.pc, XIP + 2);
+        }
+    }
+}
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {

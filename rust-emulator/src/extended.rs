@@ -22,7 +22,13 @@ pub(crate) fn execute(
     let mut next = pc + 2;
     let mut mem = None;
     let op;
-    if h & 0xff00 == 0x1b00 {
+    if h & 0xff11 == 0x1500 {
+        let destination = (h & 14) as usize;
+        let source = ((h >> 4) & 14) as usize;
+        let values = [cpu.r[source], cpu.r[source + 1]];
+        cpu.r[destination..destination + 2].copy_from_slice(&values);
+        op = "move_register_pair";
+    } else if h & 0xff00 == 0x1b00 {
         let n = (h & 15) as usize;
         cpu.r[n] = cpu.r[n].wrapping_mul(cpu.r[((h >> 4) & 15) as usize]);
         op = "multiply";
