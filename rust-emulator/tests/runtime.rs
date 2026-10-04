@@ -55,6 +55,14 @@ fn leading_zero_count_selects_the_highest_ready_task_priority() {
 }
 
 #[test]
+fn stock_can_disable_the_unused_high_speed_usb_controller() {
+    let mut c = cpu(&[0]);
+    c.bus.write(0x16800, 0, 4).unwrap();
+    assert_eq!(c.bus.read(0x16800, 4).unwrap(), 0);
+    assert!(c.bus.write(0x16800, 1, 4).is_err());
+}
+
+#[test]
 fn stock_startup_long_calls_return_after_six_bytes() {
     // Vendor disassembly: call 176, and nested call -10 to an rts.
     let mut c = cpu(&[0xff80, 0x00b0, 0x0000]);

@@ -27,6 +27,8 @@ impl Usb {
         match a {
             0x51000 => Some(self.io),
             0x10010 => Some(self.clock),
+            // SDK H0_SIE_CON: stock startup disables the unused high-speed port.
+            0x16800 => Some(0),
             0x11800..=0x1183c if a.is_multiple_of(4) => {
                 Some(self.regs[((a - 0x11800) / 4) as usize])
             }
@@ -89,6 +91,11 @@ impl Usb {
     }
     fn write_inner(&mut self, a: u32, v: u32, ram: &mut [u8]) -> Result<(), &'static str> {
         match a {
+            0x16800 => {
+                if v != 0 {
+                    return Err("high-speed USB controller is not implemented");
+                }
+            }
             0x51000 => self.io = v,
             0x10010 => self.clock = v,
             0x11800 => {
