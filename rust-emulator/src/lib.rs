@@ -4,6 +4,7 @@ pub mod audio;
 pub mod bus;
 mod cache;
 pub mod cpu;
+mod crc;
 pub mod devices;
 pub mod firmware;
 pub mod gpio;

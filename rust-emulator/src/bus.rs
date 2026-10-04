@@ -33,6 +33,7 @@ pub struct Bus {
     pub usb: crate::usb::Usb,
     pub audio: crate::audio::Audio,
     cache: crate::cache::Cache,
+    crc: crate::crc::Crc,
 }
 
 impl Bus {
@@ -54,6 +55,7 @@ impl Bus {
             usb: Default::default(),
             audio: Default::default(),
             cache: Default::default(),
+            crc: Default::default(),
         })
     }
 
@@ -118,6 +120,9 @@ impl Bus {
         } else if let Some(offset) = Self::offset(address, size, RAM, self.ram.len()) {
             &self.ram[offset..offset + size]
         } else {
+            if let Some(value) = self.crc.read(address) {
+                return Ok(value);
+            }
             if let Some(value) = self.cache.read(address, size) {
                 return Ok(value);
             }
@@ -187,6 +192,9 @@ impl Bus {
 
     pub fn write(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
         Self::check(address, size, "write")?;
+        if self.crc.write(address, value).is_some() {
+            return Ok(());
+        }
         if let Some(result) = self.audio.write(address, value) {
             return result.map_err(|reason| Self::fault(address, size, "write", reason));
         }
