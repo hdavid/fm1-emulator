@@ -2,6 +2,7 @@
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Rect, Sense, Stroke, StrokeKind};
 use fm1_emu::{bus::Bus, cpu::Cpu, firmware::Firmware};
 use std::{
+    io::{self, Write},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -91,8 +92,8 @@ impl Emulator {
             if !self.paused && self.fault.is_none() {
                 // Keep the UI responsive even if guest code spins forever.
                 // This is an instruction budget, not a cycle-accuracy claim.
-                let deadline = Instant::now() + Duration::from_millis(6);
-                for i in 0..16_667 {
+                let deadline = Instant::now() + Duration::from_millis(12);
+                for i in 0..400_000 {
                     if let Err(error) = cpu.step() {
                         self.fault = Some(error.to_string());
                         break;
@@ -100,6 +101,13 @@ impl Emulator {
                     if i % 1024 == 0 && Instant::now() >= deadline {
                         break;
                     }
+                }
+            }
+            if !cpu.bus.usb.serial.is_empty() {
+                let bytes: Vec<u8> = cpu.bus.usb.serial.drain(..).collect();
+                let mut stdout = io::stdout().lock();
+                if let Err(error) = stdout.write_all(&bytes).and_then(|_| stdout.flush()) {
+                    self.fault = Some(format!("USB serial stdout: {error}"));
                 }
             }
             let visible = cpu.bus.screen_visible();
@@ -494,7 +502,8 @@ mod tests {
     use super::*;
     fn demo() -> Emulator {
         Emulator::new(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../build/display/firmware.elf"),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../tests/fixtures/display/firmware.elf"),
         )
     }
     fn draw(app: &mut Emulator, ctx: &egui::Context, events: Vec<egui::Event>, focused: bool) {
@@ -530,7 +539,7 @@ mod tests {
         app.run_slice(&ctx);
         let stop = Firmware::load(&app.path).unwrap().symbols["display_frame_done"];
         let cpu = app.cpu.as_mut().unwrap();
-        cpu.run(Some(stop), 200_000, None).unwrap();
+        cpu.run(Some(stop), cpu.steps + 200_000, None).unwrap();
         assert_eq!(cpu.bus.lcd.pixels[202 * 240 + 24], 0xf7cb00);
         draw(&mut app, &ctx, vec![], false);
         assert!(app.pressed.iter().all(|&value| !value));
@@ -565,8 +574,8 @@ mod tests {
     }
     #[test]
     fn unsupported_firmware_stops_without_fabricating_a_screen() {
-        let mut app =
-            Emulator::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../build/fm1-diag.elf"));
+        let mut app = demo();
+        app.cpu = Some(Cpu::new(Bus::new(vec![0xff, 0x00]).unwrap(), 0x02000120));
         let ctx = egui::Context::default();
         app.run_slice(&ctx);
         assert!(app

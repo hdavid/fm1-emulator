@@ -11,7 +11,15 @@ Felucca-derived hardware code. The renderer is shared assembly.
 Guest button debug messages traverse USB CDC endpoint DMA to emulator stdout.
 Emulator boot/USB/display/button press/release integration test passes.
 Package checksums and embedded application comparison pass.
-Physical installation and post-flash comparison pending at this commit.
+Physical package installation succeeded: FM-1_980 -> FM-1_981.
+USB-MIDI updater confirmed the restarted FM-1_981 identity.
+USB CDC info: flash 1; display_frames 534 -> 544 across one second.
+All 12 hardware CPU probe words match build/emulator.json.
+Captures: hardware-info.txt, hardware-probe.txt (CRLF normalized to LF).
+Native GUI: Left, A and a mouse click on FX produced KEY 0 / KEY 14 /
+KEY 2 down/up on stdout. See emulator-serial.txt.
+34 Rust core/GUI tests and 13 Python tests pass; fmt and Clippy pass.
+The physical LCD was not photographed or visually inspected by the agent.
 
 CPU timing is functional, not calibrated; one 24 MHz oscillator tick per
 instruction bundle. SPI NOR reads and USB CDC host support are partial;

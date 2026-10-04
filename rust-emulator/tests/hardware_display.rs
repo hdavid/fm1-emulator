@@ -84,6 +84,11 @@ fn hardware_renderer_returns_and_matches_the_emulator_screen() {
 #[test]
 fn hardware_application_boots_usb_and_updates_the_display() {
     let firmware = load("build/display/firmware.elf");
+    assert_eq!(
+        firmware.image,
+        load("build/display/firmware.bin").image,
+        "booted ELF must equal the application checked inside the flash package"
+    );
     let mut cpu = Cpu::new(Bus::new(firmware.image).unwrap(), firmware.entry);
     cpu.r[0] = 0x01c7fe08;
     for _ in 0..35_000_000 {

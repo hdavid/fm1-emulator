@@ -26,7 +26,7 @@ or emulate USB, LCD, flash hardware, interrupts, audio, or cycle timing.
 
 This opens a native window with an illustrated FM-1 panel. Its screen displays
 actual guest LCD writes through the emulated SPI/DMA controller. The included
-2,700-byte display firmware shows a live hexadecimal TIMER4 value and an
+17,056-byte FM-1_981 hardware firmware shows a live hexadecimal TIMER4 value and an
 11-column × 4-row key/button matrix. Hold a panel key or button to light its
 matrix cell. Arrow keys press OCT−/OCT+; `A W S E D R F G T H Y J K` play the
 first thirteen matrix note keys. There is no audio output yet.
@@ -38,14 +38,29 @@ build. Docker is needed only to **rebuild guest firmware**, not to run the windo
 Use `mise run build-display` to rebuild the included display demo.
 
 Any supported application `.elf` or `.bin` can be passed as the path. Loading an
-image does not imply its instructions/peripherals are all implemented: the full
-FM-1_980 diagnostic and Felucca do **not** boot yet. Unsupported instructions and
+image does not imply its instructions/peripherals are all implemented. The
+FM-1_981 display application boots; full Felucca is not supported yet. Unsupported instructions and
 peripherals stop execution and report the reason below the device. `.fwsc` update
 packages are not yet accepted. Pause freezes the CPU; Restart reloads the file.
 Rotary controls are visual only. No physical device is accessed by this launcher.
 
-The display demo is emulator-only firmware without an updater or recovery;
-**do not flash it**. The original installable diagnostic package is unchanged.
+The display application includes the hardware startup, watchdog, USB updater,
+and recovery code. Its exact application bytes are packaged in
+`build/display/firmware.fwsc`. This package was installed on the connected FM-1
+on 2026-10-04: FM-1_981 identity, USB console, advancing display counter, and all
+12 CPU probe words passed. Captures are under `build/display/hardware-*.txt`.
+
+Button and note transitions print `KEY <id> down` / `KEY <id> up` in the launching
+terminal. These bytes travel through the guest's USB CDC driver and emulated
+USB endpoint DMA. The emulator host enumerates USB and opens CDC automatically.
+IDs 0..13 are buttons; 14..40 are notes. The physical FM-1 emits the same messages
+when its USB serial port is open. No debug message is synthesized by the UI.
+
+To install this same build again:
+
+```sh
+mise exec -- uv run --frozen python tools/fm1_install.py build/display/firmware.fwsc
+```
 
 ## Setup with mise
 
@@ -193,12 +208,14 @@ The foundation firmware initializes RAM, executes RAM code and the CPU probe,
 uses TIMER4/TIMER5, services a guest interrupt, and scans all eleven key-matrix
 columns. These exercise five of the ten agreed emulator foundations: CPU,
 memory/startup, timers, interrupts, and controls. The original milestone had seventeen Rust integration
-tests. The display extension adds LCD support as a sixth exercised foundation. This is a foundation checklist, not a claim that half of Felucca's
-musical features or instruction set is implemented. Full Felucca boot, flash,
-USB serial, USB MIDI, and audio/DMA remain future work.
+tests. The hardware display application additionally exercises LCD and USB
+serial, bringing the checklist to seven foundations. NOR reads are partial;
+erase/program, USB MIDI host transport, audio/DMA, and full Felucca boot remain.
+This checklist does not measure musical features or full instruction coverage.
 
 The foundation image is for emulator tests and has no updater/recovery; do not
-flash it. The installed physical firmware remains `FM-1_980`.
+flash it. These historical test fixtures are separate from the flashable
+FM-1_981 application in `build/display`.
 See [the Rust emulator guide](rust-emulator/README.md) and
 `build/foundation/verification.txt` for the measured scope and limitations.
 
@@ -219,7 +236,7 @@ See [the Rust emulator guide](rust-emulator/README.md) and
 The 609,649-byte update package includes the fixed, padded app slot and the
 loader; its size does not indicate bundled synthesis engines.
 
-`mise run test` runs eleven tests covering the CPU, parser, package CRCs, and the
+`mise run test` runs thirteen tests covering the CPU, parser, package CRCs, and the
 decrypted packaged app. Arithmetic and logic tests include 1,056 input cases.
 The build also checks XIP placement, RAM use, and that flash-driver RAM code
 contains no calls back into flash.

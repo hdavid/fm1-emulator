@@ -49,17 +49,29 @@ addresses fault visibly. Completion is synchronous, not cycle-accurate; INVON
 is treated as the FM-1 panel's normal electrical drive mode, not an RGB invert.
 The CPU runs bounded slices on the UI thread, not at a calibrated real-time rate.
 
-`firmware/display.S` is an opt-in extension of the foundation guest. After the
-same five foundation checks, it configures SPI/LCD, draws its own labels and
-buffered hexadecimal TIMER4 readout, rescans the matrix, and sends key tiles.
-The first frame takes 84,921 instructions and services one guest IRQ. Firmware
-is 2,700 bytes. This exercises LCD as a sixth foundation, with no claim of full
-panel compatibility or physical validation of this new path.
+`build/display/firmware.elf` is the 17,056-byte FM-1_981 hardware application.
+It uses Felucca-derived startup, watchdog, recovery, input scanning, USB CDC and
+MIDI updater code. `firmware/display.S` draws labels, a buffered TIMER4 readout
+and key tiles, called by the hardware application's main loop. There is no
+emulator-specific application path in this image. Package integrity tests
+compare its bytes against the decrypted `build/display/firmware.fwsc` payload.
+The same package was flashed successfully to the FM-1; its USB serial status
+reports advancing display frames, and all twelve CPU probe words match.
 
-The full FM-1_980 diagnostic still stops on opcode `0xE160` at `0x02001DB6` before
-initializing its LCD. That produces a stopped indicator and an error below a
-black device screen. It does not display a simulated diagnostic menu. Full
-Felucca, USB, audio, and flash emulation remain incomplete.
+Button transitions pass through guest GPIO scanning and debounce, the CDC
+ring, USB endpoint DMA and the emulator host before stdout receives
+`KEY <id> down` or `KEY <id> up`. The host performs GET_DESCRIPTOR,
+SET_ADDRESS, SET_CONFIGURATION and CDC SET_CONTROL_LINE_STATE requests.
+It discovers the CDC interface and IN endpoint from the configuration descriptor.
+Host-to-device console input and USB MIDI host transport are not implemented.
+The hardware firmware retains both its serial console and MIDI updater.
+
+P33 accesses model watchdog arming/feeding and stop with an expiry fault if
+feeding ceases. NOR supports JEDEC/status/read transactions used at startup;
+erase/program and persistent flash images are not implemented. CPU write guards
+reject protected RAM writes; full guard exception dispatch and stack/PC limit
+hardware remain incomplete. Reset requests stop rather than emulate ROM boot.
+Full Felucca, audio and additional CPU/peripheral behavior remain incomplete.
 
 The loader accepts an application `.bin` mapped at `0x02000120`, or an executable
 ELF32-pi32v2. ELF flash load addresses reconstruct the exact application `.bin`,
@@ -102,7 +114,8 @@ mise exec -- cargo run --manifest-path rust-emulator/Cargo.toml --offline -- \
 `--press COLUMN:ROW` injects a physical matrix closure; repeat it for multiple
 keys. Columns are 0..10 and packed rows 0..5. `0:4` is OCT-minus; `3:4` is the F3
 note key. Debouncing and encoder decoding belong to firmware, not the GPIO
-model. Scheduled input events and the full Felucca input routine are future work.
+model. The hardware display application runs the inherited full input routine.
+Scheduled input events and UI encoder contacts remain future work.
 
 `--until` accepts a breakpoint symbol or numeric address, and `--inspect` accepts
 `SYMBOL_OR_ADDRESS:WORDS`. Raw `.bin` boot works with numeric addresses. Successful
@@ -110,20 +123,23 @@ boot output reports the reached PC, executed instructions, IRQ entries, and
 inspected guest RAM. `--trace PATH` saves executed instructions as JSONL.
 
 This ELF/raw application is for emulator tests. It has no updater or recovery
-and must not be installed on the FM-1. The physical device retains the working
-FM-1_980 diagnostic firmware.
+and must not be installed on the FM-1. It is a historical unit-test fixture;
+use the shared hardware display build for device comparisons.
 
-Timers use a deterministic virtual clock of 24 oscillator ticks per guest
-instruction (one microsecond), not measured CPU cycle timing. TIMER4 supports
+Timers use a deterministic virtual clock of one 24 MHz oscillator tick per guest
+instruction bundle, not measured CPU cycle timing. TIMER4 supports
 OSC /1 and TIMER5 supports OSC /4; other clock modes fail explicitly. Interrupt
 delivery currently covers non-nested TIMER5/IRQ63 with global and per-source
 masking. SPL initial state and the interrupt stack handoff are functional
 approximations that still need independent physical validation.
 
-The full diagnostic image still stops at its first unsupported instruction,
-currently `r0 = r0 & 0xF` in startup. There are no silent MMIO defaults,
-instruction skips, or host substitutions for firmware functions. This is
-application emulation after the SPL handoff, not ROM or SPL emulation.
+The hardware display image runs from its application entry without host
+substitutions for firmware functions. Unknown MMIO and instructions still
+fault. This models the application after the SPL handoff, not ROM or SPL.
+Parallel instruction pairs execute the following slot first. Conditional-block
+state is preserved across IRQ63 entry/return. Compiler-derived encodings have
+regression tests and boot coverage; only the probe's forms have individual
+physical comparison evidence.
 
 Probe encodings come from the Python reference, vendor disassembly, and the
 physical comparison. Startup stack arithmetic, immediate masks, and special
@@ -139,14 +155,14 @@ not a percentage of complete instruction-set or musical-feature coverage.
 
 | Foundation | Milestone evidence | Remaining scope |
 | --- | --- | --- |
-| CPU | Guest executes real vendor machine code; twelve probe words match hardware | Further ISA forms, flags, parallel instructions |
+| CPU | Guest executes real vendor machine code; twelve probe words match hardware | Further ISA forms, flags and independent instruction probes |
 | Memory/startup | ELF equals raw flash image; guest copies data and RAM code, clears dirty BSS, executes RAM code | ROM/SPL, reset retention, boot parameters |
 | Timers | Guest sees TIMER4 progress; TIMER5 produces a periodic event | Other sources/dividers and measured cycle timing |
 | Interrupts | IRQ63 vector, masking, SSP handler frame, acknowledgment, `rti` | Nested priorities, other IRQs, physical entry-state validation |
-| Controls | Guest scans eleven columns; released/pressed and multiple-key cases agree | Scheduled events and full firmware debounce/encoder routines |
-| Flash | Not implemented | NOR, SPI, erase/program, XIP busy behavior |
-| LCD | Display guest initializes SPI/DMA, draws RGB565 pixels and live timer/key data | Other controller modes, SPI timing, hardware comparison |
-| USB serial | Not implemented | Controller, endpoints, enumeration, CDC |
+| Controls | Guest scans eleven columns; released/pressed and multiple-key cases agree | Scheduled events and UI encoder input |
+| Flash | Startup JEDEC/status/NOR reads | Erase/program, persistence, XIP busy behavior |
+| LCD | Display guest initializes SPI/DMA, draws RGB565 pixels and live timer/key data | Other controller modes, SPI timing, pixel-exact physical comparison |
+| USB serial | Hardware guest enumerates and sends CDC debug bytes through DMA | Host OUT packets, broader controller/USB behavior |
 | USB MIDI | Not implemented | USB transport and MIDI packet handling |
 | Audio/DMA | Not implemented | Audio clocks, DMA, buffers and sample output |
 
@@ -154,5 +170,5 @@ Original foundation evidence: seventeen Rust integration tests passed; a native 
 2,371 instructions, services one guest interrupt, and reaches `foundation_done`.
 The guest's last result is `0x0050F00D`. See `build/foundation/verification.txt`.
 
-Current suite: 24 core integration tests and 3 GUI integration tests pass.
+Current suite: 31 core integration tests and 3 GUI tests pass.
 See `build/display/verification.txt` for the display milestone and limitations.
