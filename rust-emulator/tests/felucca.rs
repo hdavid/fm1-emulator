@@ -31,6 +31,11 @@ fn unchanged_felucca_boots_and_responds_to_a_matrix_note() {
     assert!(String::from_utf8_lossy(&serial).contains("Felucca 0.9-BETA console"));
 
     let before = cpu.bus.lcd.pixels.clone();
+    assert_eq!(cpu.bus.read(inputs, 4).unwrap(), 0);
+    assert!(
+        cpu.bus.audio.samples.iter().all(|frame| *frame == [0, 0]),
+        "idle boot must be silent before the note"
+    );
     cpu.bus.audio.samples.clear();
     cpu.bus.devices.gpio.press(3, 4, true).unwrap(); // First white note, panel ID 14.
     advance(&mut cpu, 5_000_000);
