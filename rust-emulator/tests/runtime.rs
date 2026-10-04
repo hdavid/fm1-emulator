@@ -322,6 +322,22 @@ fn packed_memory_and_preserves_the_high_cache_way_bits() {
 }
 
 #[test]
+fn stock_signed_greater_block_updates_the_formatting_width() {
+    // ifs (r5 > r2) { r0 = 1; r1 = 2; }
+    for (left, right, taken) in [(1, u32::MAX, true), (u32::MAX, 1, false), (2, 2, false)] {
+        let mut c = cpu(&[0xee15, 0x4200, 0x2140, 0x2241, 0]);
+        c.r[5] = left;
+        c.r[2] = right;
+        c.r[0] = 0;
+        c.r[1] = 0;
+        while c.pc < XIP + 8 {
+            c.step().unwrap();
+        }
+        assert_eq!((c.r[0], c.r[1]), if taken { (1, 2) } else { (0, 0) });
+    }
+}
+
+#[test]
 fn stock_adc_handler_saves_and_restores_the_interrupted_pc() {
     let mut c = cpu(&[0x04c1, 0x0481, 0x0488]);
     c.sr[0] = XIP + 128;

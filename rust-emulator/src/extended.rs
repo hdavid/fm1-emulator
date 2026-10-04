@@ -554,6 +554,9 @@ pub(crate) fn execute(
                 | 0xd9
                 | 0xda
                 | 0xdb
+                | 0xe1
+                | 0xe2
+                | 0xe3
                 | 0xe9
                 | 0xeb
         ) && h & 0xf000 == 0xe000
@@ -562,7 +565,7 @@ pub(crate) fn execute(
             let lhs = cpu.r[n];
             let rhs = if kind & 7 == 1 {
                 cpu.r[c]
-            } else if matches!(kind, 0x83 | 0x93 | 0x9b | 0xd3 | 0xdb | 0xeb) {
+            } else if matches!(kind, 0x83 | 0x93 | 0x9b | 0xd3 | 0xdb | 0xe3 | 0xeb) {
                 signed(x & 4095, 12) as u32
             } else {
                 packed(x)
@@ -585,6 +588,7 @@ pub(crate) fn execute(
                 0xc9..=0xcb => lhs <= rhs,
                 0xd1..=0xd3 => (lhs as i32) >= (rhs as i32),
                 0xd9..=0xdb => (lhs as i32) < (rhs as i32),
+                0xe1..=0xe3 => (lhs as i32) > (rhs as i32),
                 _ => (lhs as i32) <= (rhs as i32),
             };
             next = cpu.conditional(test, x)?;
