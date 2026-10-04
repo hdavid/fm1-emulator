@@ -219,6 +219,9 @@ impl Devices {
             Some(match (a - IRQ_PENDING) / 4 {
                 0 => {
                     let mut bits = if tick.pending { 1 << TICK_IRQ } else { 0 };
+                    if self.adc.pending_irq() {
+                        bits |= 1 << 24;
+                    }
                     for (index, timer) in self.startup_timers.iter().enumerate() {
                         if timer.pending {
                             bits |= 1 << (4 + index);
@@ -325,6 +328,7 @@ impl Devices {
         };
         [
             (TICK_IRQ, tick.pending),
+            (24, self.adc.pending_irq()),
             (44, self.rc_measurement.pending),
             (62, self.timer4.pending),
             (TIMER5_IRQ, self.timer5.pending),

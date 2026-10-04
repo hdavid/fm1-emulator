@@ -28,6 +28,41 @@ fn polled_conversion_samples_the_selected_input_and_completes_later() {
 }
 
 #[test]
+fn stock_pmu_calibration_samples_the_mux_and_restarts_with_completion_clear() {
+    use fm1_emu::devices::{IRQ_CONFIG, IRQ_PENDING};
+    let mut bus = Bus::new(vec![0, 0]).unwrap();
+    // Set P33 ANA_CON4 through the guest's serial bridge, then configure ADC
+    // channel 15. Exercise repeated conversion acknowledgements and IRQ 24.
+    bus.write(IRQ_CONFIG + 12, 1, 4).unwrap();
+    for (source, millivolts) in [(5, 1050), (0, 1200)] {
+        bus.write(0x13e08, 0, 4).unwrap();
+        bus.write(0x13e08, 1, 4).unwrap();
+        for byte in [0, 4, (source << 1) | 1] {
+            bus.write(0x13e0c, byte, 4).unwrap();
+            bus.write(0x13e08, 0x11, 4).unwrap();
+        }
+        bus.write(0x13e08, 0, 4).unwrap();
+        bus.write(CONTROL, 0, 4).unwrap();
+        bus.write(CONTROL, 0xff7f, 4).unwrap();
+        for _ in 0..20 {
+            assert_eq!(bus.pending_irq(0x100), None);
+            bus.devices.advance(31);
+            assert_eq!(bus.read(CONTROL, 4).unwrap() & 128, 0);
+            bus.devices.advance(1);
+            assert_eq!(bus.pending_irq(0x100), Some(24));
+            assert_eq!(bus.read(IRQ_PENDING, 4).unwrap(), 1 << 24);
+            let measured_mv = bus.read(RESULT, 4).unwrap() * 3300 / 1023;
+            assert!((millivolts - 3..=millivolts).contains(&measured_mv));
+            let control = bus.read(CONTROL, 4).unwrap();
+            bus.write(CONTROL, control | 64, 4).unwrap();
+        }
+    }
+    assert_eq!(bus.devices.adc.conversions, 40);
+    bus.write(CONTROL, 64, 4).unwrap();
+    assert_eq!(bus.pending_irq(0x100), None);
+}
+
+#[test]
 fn disable_cancels_conversion_and_unknown_channels_fault() {
     let mut bus = Bus::new(vec![0, 0]).unwrap();
     bus.write(CONTROL, 0xf45e, 4).unwrap();

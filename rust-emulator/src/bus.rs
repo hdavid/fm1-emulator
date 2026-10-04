@@ -231,6 +231,7 @@ impl Bus {
             return result.map_err(|reason| Self::fault(address, size, "write", reason));
         }
         if let Some(result) = self.system.write(address, value) {
+            self.devices.adc.select_pmu(self.system.adc_pmu_selection());
             return result.map_err(|reason| Self::fault(address, size, "write", reason));
         }
         if self.lcd.read(address & !3).is_some() {

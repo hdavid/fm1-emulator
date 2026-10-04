@@ -29,6 +29,9 @@ impl Default for System {
     }
 }
 impl System {
+    pub(crate) fn adc_pmu_selection(&self) -> u8 {
+        (self.registers[4] >> 1) & 7
+    }
     pub fn read(&self, address: u32) -> Option<u32> {
         match address {
             0x13400 => Some(self.osa_control),

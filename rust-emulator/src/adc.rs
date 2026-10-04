@@ -11,6 +11,7 @@ pub struct Adc {
     remaining: u32,
     sample: u16,
     wireless_control: u32,
+    pmu_channel: u8,
     pub master: u16,
     pub battery: u16,
     pub conversions: u64,
@@ -24,6 +25,7 @@ impl Default for Adc {
             remaining: 0,
             sample: 0,
             wireless_control: 0,
+            pmu_channel: 0,
             master: 512,
             battery: 800,
             conversions: 0,
@@ -32,6 +34,12 @@ impl Default for Adc {
 }
 
 impl Adc {
+    pub(crate) fn select_pmu(&mut self, channel: u8) {
+        self.pmu_channel = channel;
+    }
+    pub(crate) fn pending_irq(&self) -> bool {
+        self.control & 0xa0 == 0xa0
+    }
     pub fn read(&self, address: u32) -> Option<u32> {
         match address {
             CONTROL => Some(self.control),
@@ -44,11 +52,20 @@ impl Adc {
     pub fn write(&mut self, address: u32, value: u32) -> Option<Result<(), &'static str>> {
         match address {
             CONTROL => {
-                let start = value & 0x50 == 0x50 && self.control & 0x50 != 0x50;
+                // Bit 6 acknowledges completion and restarts an enabled ADC.
+                // Stock takes repeated samples by writing this strobe again.
+                let start = value & 0x50 == 0x50;
                 if start {
                     self.sample = match (value >> 8) & 15 {
                         3 => self.battery,
                         4 => self.master,
+                        // P33 ANA_CON4 mux: nominal 1.2 V reference and
+                        // quarter of a 4.2 V battery, measured against 3.3 V.
+                        15 => match self.pmu_channel {
+                            0 => (1023u32 * 1200 / 3300) as u16,
+                            5 => (1023u32 * 1050 / 3300) as u16,
+                            _ => return Some(Err("unsupported PMU ADC source")),
+                        },
                         _ => return Some(Err("unsupported ADC channel")),
                     } & 1023;
                     self.remaining = CONVERSION_TICKS;
@@ -58,7 +75,7 @@ impl Adc {
                 }
                 // Conversion completion is hardware-owned, cleared on restart
                 // or disable; a normal read/modify/write retains it.
-                self.control = (value & !0x80)
+                self.control = (value & !0xc0)
                     | if !start && value & 0x10 != 0 {
                         self.control & 0x80
                     } else {
