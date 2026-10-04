@@ -54,6 +54,23 @@ fn unsigned_immediate_conditional_selects_storage_header_region() {
         assert_eq!(c.pc, XIP + 10);
     }
 }
+
+#[test]
+fn register_list_loads_descend_without_changing_the_base() {
+    // Vendor form: 04 eb 04 01 => {r8, r2} = [r4+].
+    for upper in [4, 8, 15] {
+        let mut c = cpu(&[0xeb04, (1 << upper) | (1 << 2)]);
+        c.r[4] = RAM;
+        c.bus.write(RAM, 0x11223344, 4).unwrap();
+        c.bus.write(RAM + 4, 0xaabbccdd, 4).unwrap();
+        c.step().unwrap();
+        assert_eq!(c.r[upper], 0x11223344);
+        assert_eq!(c.r[2], 0xaabbccdd);
+        if upper != 4 {
+            assert_eq!(c.r[4], RAM);
+        }
+    }
+}
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {
