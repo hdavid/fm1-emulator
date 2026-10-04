@@ -9,6 +9,22 @@ fn full_package_preserves_application_and_supplies_the_spl_handoff() {
     let elf = Firmware::load(&root.join("firmware.elf")).unwrap();
     assert!(package.image.starts_with(&elf.image));
     let bus = package.bus().unwrap();
+    // Measured FM-1 handoff before application peripheral initialization.
+    for (address, value) in [
+        (0x10008, 0x10200),
+        (0x1000c, 0x1c1),
+        (0x10010, 0x10000),
+        (0x10014, 6),
+        (0x10018, 2),
+        (0x119a0, 0x45400203),
+        (0x119a4, 0x3f503026),
+        (0x119a8, 0x0940022b),
+        (0x119ac, 0x0750310c),
+        (0x13e00, 0x100),
+        (0x13e04, 0xe0),
+    ] {
+        assert_eq!(bus.read(address, 4).unwrap(), value);
+    }
     let head = bus.read(0x01c7fe08, 4).unwrap();
     assert_eq!(bus.read(head + 8, 4).unwrap(), 0xff000);
     assert_eq!(bus.read(0x01c7fe0c, 4).unwrap(), 0x4000);

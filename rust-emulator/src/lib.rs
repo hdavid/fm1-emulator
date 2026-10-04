@@ -3,6 +3,7 @@ pub mod adc;
 pub mod audio;
 pub mod bus;
 mod cache;
+mod clock;
 pub mod cpu;
 mod crc;
 pub mod devices;

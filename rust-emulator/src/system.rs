@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // P33 serial register bridge, as used by the hardware watchdog HAL.
 pub struct System {
+    pmu_control: u32,
+    rtc_control: u32,
     control: u32,
     data: u8,
     transaction: Vec<u8>,
@@ -13,6 +15,8 @@ impl Default for System {
         let mut registers = [0; 1024];
         registers[0x12] = 1; // Power-on reset.
         Self {
+            pmu_control: 0x100,
+            rtc_control: 0xe0,
             control: 0,
             data: 0,
             transaction: Vec::new(),
@@ -25,6 +29,8 @@ impl Default for System {
 impl System {
     pub fn read(&self, address: u32) -> Option<u32> {
         match address {
+            0x13e00 => Some(self.pmu_control),
+            0x13e04 => Some(self.rtc_control),
             0x13e08 => Some(self.control),
             0x13e0c => Some(self.data as u32),
             0x100c0 => Some(0),
@@ -33,6 +39,8 @@ impl System {
     }
     pub fn write(&mut self, address: u32, value: u32) -> Option<Result<(), &'static str>> {
         match address {
+            0x13e00 => self.pmu_control = value,
+            0x13e04 => self.rtc_control = value,
             0x13e0c => self.data = value as u8,
             0x13e08 => {
                 if value & 0x100 != 0 {

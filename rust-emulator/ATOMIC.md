@@ -29,3 +29,22 @@ Local captures and build outputs are ignored under `.deps/firmware-trial/atomic/
 The original 114-byte instruction probe still passed hardware comparison after
 each installation. Firmware packages and device-specific captures are not
 redistributed in the repository.
+
+## SPL clock handoff
+
+The same compatible diagnostic captures the WL82 clock/PLL and P33 bridge
+registers before its application peripheral initialization. The `clocks`
+command returned:
+
+```text
+10000=00000000 10008=00010200 1000c=000001c1
+10010=00010000 10014=00000006 10018=00000002
+119a0=45400203 119a4=3f503026 119a8=0940022b 119ac=0750310c
+13e00=00000100 13e04=000000e0
+```
+
+These seed the packaged application's clock configuration. The diagnostic
+uses Felucca startup before capture; this is evidence for its SPL handoff,
+not a direct capture of the stock application. The model retains documented
+clock/PLL and USB common PHY configuration registers. Analog lock timing,
+dynamic CPU frequency and high-speed USB traffic are not modeled.

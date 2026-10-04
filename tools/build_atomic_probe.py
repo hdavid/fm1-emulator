@@ -39,9 +39,22 @@ report='''static void testset_report(void) {
     con_puts("TESTSET END\\r\\n");
 }
 '''
+registers = [0x10000, 0x10008, 0x1000c, 0x10010, 0x10014, 0x10018,
+             0x119a0, 0x119a4, 0x119a8, 0x119ac, 0x13e00, 0x13e04]
+report += 'static uint32_t boot_registers[12];\n'
+report += '''static void clocks_report(void) {
+    uint32_t i;
+    con_puts("CLOCKS BEGIN\\r\\n");
+    for(i=0;i<12;i++) { con_puts("W ");con_dec(i);con_putc(' ');con_hex(boot_registers[i],8);con_puts("\\r\\n"); }
+    con_puts("CLOCKS END\\r\\n");
+}
+'''
 code=code.replace('static int equal(',report+'static int equal(')
 code=code.replace('if(equal(con.line,"probe")) probe_report();',
-    'if(equal(con.line,"probe")) probe_report();\n            else if(equal(con.line,"testset")) testset_report();')
+    'if(equal(con.line,"probe")) probe_report();\n            else if(equal(con.line,"testset")) testset_report();\n            else if(equal(con.line,"clocks")) clocks_report();')
+code = code.replace('    fm1_audio_stop();\n    f=irq_save();',
+    ''.join(f'    boot_registers[{i}]=*(volatile uint32_t *)0x{address:x}u;\n'
+            for i, address in enumerate(registers)) + '    fm1_audio_stop();\n    f=irq_save();')
 p.write_text(code)
 b.FW=src; b.OUT=base/'build'; b.GEN=b.OUT/'gen'; b.LDR=b.OUT/'loader'
 b.PRODUCT='FM-1_982'; b.NAME='fm1-atomic'; b.HARDWARE_DISPLAY=False

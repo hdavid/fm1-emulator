@@ -34,11 +34,18 @@ pub struct Bus {
     pub audio: crate::audio::Audio,
     cache: crate::cache::Cache,
     crc: crate::crc::Crc,
+    clock: crate::clock::Clock,
 }
 
 impl Bus {
     pub(crate) fn load_flash(&mut self, bytes: &[u8], key: u16) {
         self.nor.load(bytes, key);
+        // SPL handoff values measured before peripheral initialization.
+        self.usb
+            .write(0x10010, 0x10000, &mut self.ram)
+            .unwrap()
+            .unwrap();
+        self.audio.write(0x10014, 6).unwrap().unwrap();
     }
     pub fn new(flash: Vec<u8>) -> Result<Self, String> {
         if flash.is_empty() || flash.len() > (XIP_END - XIP) as usize {
@@ -56,6 +63,7 @@ impl Bus {
             audio: Default::default(),
             cache: Default::default(),
             crc: Default::default(),
+            clock: Default::default(),
         })
     }
 
@@ -120,6 +128,9 @@ impl Bus {
         } else if let Some(offset) = Self::offset(address, size, RAM, self.ram.len()) {
             &self.ram[offset..offset + size]
         } else {
+            if let Some(value) = self.clock.read(address) {
+                return Ok(value);
+            }
             if let Some(value) = self.crc.read(address) {
                 return Ok(value);
             }
@@ -192,6 +203,9 @@ impl Bus {
 
     pub fn write(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
         Self::check(address, size, "write")?;
+        if self.clock.write(address, value).is_some() {
+            return Ok(());
+        }
         if self.crc.write(address, value).is_some() {
             return Ok(());
         }
