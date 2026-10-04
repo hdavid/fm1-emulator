@@ -20,6 +20,7 @@ impl Guards {
                 | 0x1eef0e0
                 | 0x1eef0e4
                 | 0x1eef1c0
+                | 0x1eef3c0
                 | 0x1eef1c4
                 | 0x1eef1c8
                 | 0x1eef1cc
