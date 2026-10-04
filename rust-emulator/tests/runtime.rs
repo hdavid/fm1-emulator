@@ -24,6 +24,29 @@ fn stock_startup_long_calls_return_after_six_bytes() {
 }
 
 #[test]
+fn core_tick_timer_wraps_acknowledges_and_obeys_irq_priority() {
+    use fm1_emu::devices::{IRQ_CONFIG, IRQ_PENDING, TICK_IRQ, TICK_TIMER};
+    let mut c = cpu(&[0; 16]);
+    c.bus.write(TICK_TIMER + 8, 29, 4).unwrap();
+    c.bus.write(TICK_TIMER, 1, 1).unwrap();
+    c.bus.devices.advance(1);
+    assert_eq!(c.bus.read(TICK_TIMER + 4, 4).unwrap(), 15);
+    assert_eq!(c.bus.pending_irq(0x100), None);
+    c.bus.devices.advance(1);
+    assert_eq!(c.bus.read(TICK_TIMER + 4, 4).unwrap(), 0);
+    assert_eq!(c.bus.read(TICK_TIMER, 1).unwrap(), 129);
+    assert_eq!(c.bus.read(IRQ_PENDING, 4).unwrap(), 8);
+    c.bus.write(IRQ_CONFIG, 3 << 12, 4).unwrap();
+    assert_eq!(c.bus.pending_irq(0x100), Some(TICK_IRQ));
+    c.bus.write(TICK_TIMER, 65, 1).unwrap();
+    assert_eq!(c.bus.pending_irq(0x100), None);
+    assert_eq!(c.bus.read(TICK_TIMER, 1).unwrap(), 1);
+    c.bus.write(TICK_TIMER, 0, 1).unwrap();
+    c.bus.devices.advance(100);
+    assert_eq!(c.bus.read(TICK_TIMER + 4, 4).unwrap(), 0);
+}
+
+#[test]
 fn startup_repeat_clears_exactly_the_requested_words() {
     // Stock startup: rep 2 r2 { [r3++=4] = r1 }; if (r2 != 0) goto rep.
     for count in [0, 1, 3] {

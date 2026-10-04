@@ -6,7 +6,54 @@ pub const TIMER5: u32 = 0x10900;
 pub const IRQ_CONFIG: u32 = 0x01ee_f100;
 pub const IRQ_PENDING: u32 = 0x01ee_f180;
 pub const TIMER5_IRQ: usize = 63;
+pub const TICK_TIMER: u32 = 0x01eef0ec;
+pub const TICK_IRQ: usize = 3;
 pub const OSC_TICKS_PER_INSTRUCTION: u32 = 1;
+
+// Core TTMR: WL82 csfr.h/hwi.h; stock code acknowledges with bit 6 and
+// enables with bit 0. Functional 360 MHz core / 24 MHz oscillator handoff.
+#[derive(Default)]
+pub struct TickTimer {
+    control: u8,
+    counter: u32,
+    period: u32,
+    pub pending: bool,
+}
+impl TickTimer {
+    fn read(&self, offset: u32) -> Option<u32> {
+        match offset {
+            0 => Some(self.control as u32 | if self.pending { 128 } else { 0 }),
+            4 => Some(self.counter),
+            8 => Some(self.period),
+            _ => None,
+        }
+    }
+    fn write(&mut self, offset: u32, value: u32) -> Option<Result<(), &'static str>> {
+        match offset {
+            0 => {
+                if value & 64 != 0 {
+                    self.pending = false;
+                }
+                self.control = (value & 63) as u8;
+            }
+            4 => self.counter = value,
+            8 => self.period = value,
+            _ => return None,
+        }
+        Some(Ok(()))
+    }
+    fn advance(&mut self, ticks: u32) {
+        if self.control & 1 == 0 {
+            return;
+        }
+        let period = self.period as u64 + 1;
+        let next = self.counter as u64 + ticks as u64 * 15;
+        if next >= period {
+            self.pending = true;
+        }
+        self.counter = (next % period) as u32;
+    }
+}
 
 #[derive(Default)]
 pub struct Timer {
@@ -79,6 +126,7 @@ pub struct Devices {
     pub gpio: Gpio,
     pub timer4: Timer,
     pub timer5: Timer,
+    pub tick: TickTimer,
     irq_config: [u32; 32],
 }
 
@@ -88,10 +136,14 @@ impl Devices {
             self.timer4.read(address - TIMER4)
         } else if (TIMER5..TIMER5 + 12).contains(&address) {
             self.timer5.read(address - TIMER5)
+        } else if (TICK_TIMER..TICK_TIMER + 12).contains(&address) {
+            self.tick.read(address - TICK_TIMER)
         } else if (IRQ_CONFIG..IRQ_CONFIG + 128).contains(&address) {
             Some(self.irq_config[((address - IRQ_CONFIG) / 4) as usize])
         } else if (IRQ_PENDING..IRQ_PENDING + 16).contains(&address) {
-            Some(if address == IRQ_PENDING + 4 && self.timer5.pending {
+            Some(if address == IRQ_PENDING && self.tick.pending {
+                1 << TICK_IRQ
+            } else if address == IRQ_PENDING + 4 && self.timer5.pending {
                 1 << 31
             } else {
                 0
@@ -99,7 +151,7 @@ impl Devices {
         } else {
             self.adc.read(address).or_else(|| self.gpio.read(address))
         }?;
-        Some(if size == 4 {
+        Some(if size == 4 || (address == TICK_TIMER && size == 1) {
             Ok(value)
         } else {
             Err("device registers require word accesses")
@@ -112,13 +164,18 @@ impl Devices {
         value: u32,
         size: usize,
     ) -> Option<Result<(), &'static str>> {
-        if size != 4 && self.read(address & !3, 4).is_some() {
+        if size != 4
+            && !(address == TICK_TIMER && size == 1)
+            && self.read(address & !3, 4).is_some()
+        {
             return Some(Err("device registers require word accesses"));
         }
         if (TIMER4..TIMER4 + 12).contains(&address) {
             self.timer4.write(address - TIMER4, value)
         } else if (TIMER5..TIMER5 + 12).contains(&address) {
             self.timer5.write(address - TIMER5, value)
+        } else if (TICK_TIMER..TICK_TIMER + 12).contains(&address) {
+            self.tick.write(address - TICK_TIMER, value)
         } else if (IRQ_CONFIG..IRQ_CONFIG + 128).contains(&address) {
             self.irq_config[((address - IRQ_CONFIG) / 4) as usize] = value;
             Some(Ok(()))
@@ -135,12 +192,18 @@ impl Devices {
         self.adc.advance(ticks);
         self.timer4.advance(ticks);
         self.timer5.advance(ticks);
+        self.tick.advance(ticks);
     }
 
     pub fn pending_irq(&self, icfg: u32) -> Option<usize> {
-        let shift = (TIMER5_IRQ & 7) * 4;
-        let enabled = self.irq_config[TIMER5_IRQ >> 3] & (1 << shift) != 0;
-        (icfg & 0x100 != 0 && enabled && self.timer5.pending).then_some(TIMER5_IRQ)
+        [
+            (TICK_IRQ, self.tick.pending),
+            (TIMER5_IRQ, self.timer5.pending),
+        ]
+        .into_iter()
+        .filter(|(source, pending)| *pending && self.irq_priority(*source, icfg).is_some())
+        .max_by_key(|(source, _)| self.irq_priority(*source, icfg).unwrap())
+        .map(|(source, _)| source)
     }
 
     pub fn irq_priority(&self, source: usize, icfg: u32) -> Option<u32> {
