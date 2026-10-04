@@ -78,6 +78,9 @@ erase/program and persistent flash images are not implemented. CPU write guards
 reject protected RAM writes; full guard exception dispatch and stack/PC limit
 hardware remain incomplete. Reset requests stop rather than emulate ROM boot.
 Full Felucca boots into its UI and renders note samples through ALNK DMA.
+Support is partial: clicking FX in the local source ELF was reported to stop
+emulation on unsupported instruction `0xedd4` at PC `0x020c0516`. See the
+[Felucca investigation](FELUCCA.md) for the verified scope and known failure.
 Additional engines, CPU forms and peripheral behavior remain incomplete;
 host audio playback is absent. See [the measured full-firmware checks](FELUCCA.md).
 

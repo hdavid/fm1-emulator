@@ -1,5 +1,11 @@
 # Felucca boot investigation (2026-10-04)
 
+**Compatibility: partially functioning.** On 2026-10-05 the user reported that
+clicking FX in the local `felucca.elf` stops emulation with unsupported
+instruction `0xedd4` at PC `0x020c0516`. This path is not covered by the bounded
+boot, note and ENV checks below. The FX failure has not yet been reproduced
+with the published package.
+
 Full, unchanged Felucca now boots into its main screen. The published 0.9-beta
 application and the local source build both run for 100 million instructions
 without a guest fault, send the console banner through USB CDC, update the LCD,

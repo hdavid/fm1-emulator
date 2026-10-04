@@ -10,7 +10,7 @@ screen and buttons. USB serial output from the firmware appears in your terminal
 **[Download a prebuilt emulator from Releases](../../releases).** Extract the
 archive for your platform; Rust, mise and Docker are not needed to run it.
 Firmware is supplied separately. [Felucca 0.9-beta](https://github.com/hugelton/Felucca/releases/tag/v0.9-beta)
-is a working starting point.
+boots with partial functionality.
 
 | Platform | Archive |
 | --- | --- |
@@ -68,19 +68,22 @@ SHA, with archives and SHA256 checksums. Pull requests run the same checks.
 
 ## Firmware compatibility
 
-Last checked on 2026-10-05. **Pass** means the listed boot/input checks passed;
-it does not guarantee every synth feature works.
+Updated on 2026-10-05. **Partial** means boot and some controls work, but
+other firmware paths can stop emulation.
 
-| Firmware | Boot | Verified behavior / blocker |
+| Firmware | Status | Verified behavior / blocker |
 | --- | --- | --- |
-| Felucca 0.9-beta (`FM-1_909`, `.fwsc`) | Pass | LCD, USB console, watchdog and note audio/DMA; 110 million instructions |
-| Felucca source build (`1e838e1`, `.elf`) | Pass | LCD, USB console, note press/release and ENV page; 112 million instructions |
+| Felucca 0.9-beta (`FM-1_909`, `.fwsc`) | Partial | LCD, USB console, watchdog and note audio/DMA pass; full UI coverage remains incomplete |
+| Felucca source build (`1e838e1`, `.elf`) | Partial | Boot, note press/release and ENV pass; clicking FX stops emulation |
 | Official `FM-1_015` (`FM-1.fwsc`) | Fails | Missing CPU instruction during startup; no screen yet |
 | Baud Girl `FM-1_093` (`FM-1_093.fwsc`) | Fails | Same startup blocker; no screen yet |
 
+The reported FX failure in the source build is an unsupported instruction
+`0xedd4` at PC `0x020c0516`. The existing boot/note tests do not cover this path.
+
 ## Still to implement
 
-- Remaining CPU instructions and peripherals needed by official/Baud Girl firmware.
+- Remaining CPU instructions and peripherals, including Felucca's FX path and official/Baud Girl startup.
 - Host audio playback, rotary controls, USB MIDI and serial input.
 - Flash erase/program and persistence, plus fuller encryption, interrupt and timing behavior.
 
