@@ -103,6 +103,23 @@ fn packed_unsigned_less_equal_checks_the_stock_ram_code_size() {
 }
 
 #[test]
+fn interrupt_enable_instructions_expose_the_global_icfg_bit() {
+    let mut c = cpu(&[0x0061, 0x0060, 0x0061, 0xe064, 0x0b00, 0xe064, 0x0b80]);
+    c.sr[11] = 0x100;
+    c.step().unwrap();
+    assert_eq!(c.sr[11], 0x300);
+    c.step().unwrap();
+    assert!(!c.interrupts_enabled);
+    assert_eq!(c.sr[11], 0x100);
+    c.step().unwrap();
+    c.step().unwrap();
+    assert_eq!(c.r[0], 0x300);
+    c.r[0] = 0x100;
+    c.step().unwrap();
+    assert!(!c.interrupts_enabled);
+}
+
+#[test]
 fn stock_startup_long_calls_return_after_six_bytes() {
     // Vendor disassembly: call 176, and nested call -10 to an rts.
     let mut c = cpu(&[0xff80, 0x00b0, 0x0000]);

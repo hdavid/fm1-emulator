@@ -421,6 +421,9 @@ impl Cpu {
             }
             if extra & 255 == 128 {
                 self.sr[special] = self.r[reg];
+                if special == 11 {
+                    self.interrupts_enabled = self.sr[11] & 0x200 != 0;
+                }
             } else {
                 self.r[reg] = self.sr[special];
             }
@@ -667,9 +670,11 @@ impl Cpu {
             self.predicate_skip = self.irq_predicate.take();
             self.repeat = self.irq_repeat.take();
             self.interrupts_enabled = true;
+            self.sr[11] = (self.sr[11] & !255) | 0x200;
             op = "rti";
         } else if h == 0x0060 {
             self.interrupts_enabled = false;
+            self.sr[11] &= !0x200;
             op = "cli";
         } else if matches!(h, 0x0040 | 0x0041) {
             // CPU bus ownership latch. With one executing core acquisition
@@ -682,6 +687,7 @@ impl Cpu {
             };
         } else if h == 0x0061 {
             self.interrupts_enabled = true;
+            self.sr[11] |= 0x200;
             op = "sti";
         } else if h == 0x0020 || h == 0x0000 {
             op = if h == 0x0020 { "csync" } else { "nop" };
@@ -708,6 +714,7 @@ impl Cpu {
             self.sr[12] = self.sr[14];
             self.sr[14] = self.sr[13];
             self.pc = handler;
+            self.sr[11] = (self.sr[11] & !0x2ff) | source as u32;
             self.in_interrupt = true;
             self.irq_predicate = self.predicate_skip.take();
             self.irq_repeat = self.repeat.take();
