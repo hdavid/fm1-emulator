@@ -39,11 +39,12 @@ pub(crate) fn execute(
         op = "clear_high_register";
     } else if h & 0xfff0 == 0x0230 {
         op = "cache_flush_invalidate";
-    } else if h & 0xe078 == 0x2000 {
+    } else if h & 0xe058 == 0x2000 {
         mem = Some((
             a,
             0,
-            cpu.sr[14] + ((h >> 8) & 31) * 4,
+            // Bit 5 supplies offset bit 7; Felucca spills beyond 128 bytes.
+            cpu.sr[14].wrapping_add((((h >> 8) & 31) | (h & 32)) * 4),
             4,
             h & 128 != 0,
             false,

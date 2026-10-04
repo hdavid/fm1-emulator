@@ -132,6 +132,34 @@ fn arithmetic_wraps_and_logic_uses_vendor_encodings() {
 }
 
 #[test]
+fn short_stack_spills_cover_both_halves_of_the_offset_range() {
+    // Vendor disassembly: 21a0 is [sp+132] = r0, 25a0 is [sp+148] = r0.
+    for (store, offset) in [
+        (0x2080u16, 0),
+        (0x3f80, 124),
+        (0x20a0, 128),
+        (0x21a0, 132),
+        (0x25a0, 148),
+        (0x3fa0, 252),
+    ] {
+        for register in 0..8 {
+            let mut program = (store | register as u16).to_le_bytes().to_vec();
+            program.extend(((store & !0x80) | register as u16).to_le_bytes());
+            let mut cpu = cpu(&program);
+            cpu.sr[14] = RAM + 0x100;
+            cpu.r[register] = 0xa5a5_1234;
+            cpu.step().unwrap();
+            assert_eq!(cpu.bus.read(RAM + 0x100 + offset, 4).unwrap(), 0xa5a5_1234);
+            cpu.r[register] = 0;
+            cpu.step().unwrap();
+            assert_eq!(cpu.r[register], 0xa5a5_1234);
+            assert_eq!(cpu.sr[14], RAM + 0x100);
+            assert_eq!(cpu.pc, XIP + 4);
+        }
+    }
+}
+
+#[test]
 fn branch_and_instruction_limits_do_not_succeed_silently() {
     for (value, target) in [(0, XIP + 2), (1, XIP - 4), (u32::MAX, XIP - 4)] {
         let mut cpu = cpu(&[0xf3, 0x5d]);
