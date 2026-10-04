@@ -189,6 +189,24 @@ fn immediate_arithmetic_shift_extends_the_sign_in_mixer_interpolation() {
     }
 }
 
+#[test]
+fn extended_halfword_load_separates_sign_extension_from_the_offset() {
+    for (h, expected) in [(0xed51, 0xfedc), (0xed55, 0xfffffedc)] {
+        let mut c = cpu(&[h, 0x120c]); // r1 = h[r0+300] (u/s)
+        c.r[0] = RAM + 1024;
+        c.bus.write(RAM + 1324, 0xfedc, 2).unwrap();
+        c.bus.write(RAM + 300, 0x1234, 2).unwrap();
+        c.step().unwrap();
+        assert_eq!(c.r[1], expected);
+        assert_eq!(c.r[0], RAM + 1024);
+    }
+    let mut c = cpu(&[0xed51, 0x1e85]); // h[r8+484] = r1
+    c.r[8] = RAM;
+    c.r[1] = 0xabcdef12;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 484, 2).unwrap(), 0xef12);
+}
+
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {

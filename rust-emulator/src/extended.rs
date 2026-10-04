@@ -151,15 +151,17 @@ pub(crate) fn execute(
             cpu.write(addr, cpu.read(addr, 4)?.wrapping_add(cpu.r[c]))?;
             op = "memory_add_register";
         } else if h & 0xfff8 == 0xed50 || h & 0xfff8 == 0xed58 {
-            let offset = (signed(h & 7, 3) << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 14) as i32;
+            let store = x & 1 != 0;
+            let high = if store { signed(h & 7, 3) } else { (h & 1) as i32 };
+            let offset = (high << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 14) as i32;
             let addr = cpu.r[s].wrapping_add(offset as u32);
             mem = Some((
                 d,
                 s,
                 addr,
                 2,
-                x & 1 != 0,
-                false,
+                store,
+                !store && h & 4 != 0,
                 if h & 8 != 0 { Some(addr) } else { None },
             ));
             op = "halfword_extended";
