@@ -488,7 +488,7 @@ pub(crate) fn execute(
             let lhs = cpu.r[n];
             let rhs = if kind & 7 == 1 {
                 cpu.r[c]
-            } else if matches!(kind, 0x83 | 0x93 | 0x9b | 0xd3 | 0xdb) {
+            } else if matches!(kind, 0x83 | 0x93 | 0x9b | 0xd3 | 0xdb | 0xeb) {
                 signed(x & 4095, 12) as u32
             } else {
                 packed(x)

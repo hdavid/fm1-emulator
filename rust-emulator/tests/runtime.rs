@@ -301,6 +301,21 @@ fn extended_byte_postincrement_reads_before_advancing_the_string() {
     }
 }
 
+#[test]
+fn signed_immediate_conditional_adds_a_minus_only_for_negative_numbers() {
+    for (value, expected_pc) in [
+        (-1, XIP + 4),
+        (-120, XIP + 4),
+        (0, XIP + 10),
+        (120, XIP + 10),
+    ] {
+        let mut c = cpu(&[0xeeb1, 0x8fff, 0x2140, 0, 0, 0]); // ifs (r1 <= -1) { 3 instructions }
+        c.r[1] = value as u32;
+        c.step().unwrap();
+        assert_eq!(c.pc, expected_pc);
+    }
+}
+
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {
