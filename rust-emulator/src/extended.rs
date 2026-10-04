@@ -567,6 +567,11 @@ pub(crate) fn execute(
                 if mode & 2 != 0 { Some(addr) } else { None },
             ));
             op = "word_extended";
+        } else if h == 0xecdc && x & 15 == 3 {
+            let address = cpu.r[s].wrapping_add(cpu.r[c]);
+            cpu.write(address, cpu.r[d])?;
+            cpu.r[s] = address;
+            op = "word_register_preincrement_store";
         } else if h == 0xecdc && x & 15 == 2 {
             // Vendor form: rD = [++rS=rC]. Commit the base before the
             // destination so a load into its own base retains the loaded word.

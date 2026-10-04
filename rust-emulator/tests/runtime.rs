@@ -156,6 +156,18 @@ fn single_return_address_push_and_pop_restore_the_call_target() {
     assert_eq!(c.pc, XIP + 0x200);
     assert_eq!(c.sr[14], RAM + 16);
 }
+
+#[test]
+fn register_preincrement_store_advances_the_mixer_buffer_pointer() {
+    let mut c = cpu(&[0xecdc, 0x5013]); // [++r1=r0] = r5
+    c.r[0] = 4;
+    c.r[1] = RAM;
+    c.r[5] = 0x11223344;
+    c.step().unwrap();
+    assert_eq!(c.r[1], RAM + 4);
+    assert_eq!(c.bus.read(RAM + 4, 4).unwrap(), 0x11223344);
+    assert_eq!(c.bus.read(RAM, 4).unwrap(), 0);
+}
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {
