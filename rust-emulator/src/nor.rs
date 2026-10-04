@@ -148,7 +148,7 @@ impl Nor {
                     }
                 }
                 0x05 | 0x35 => value = 0,
-                0x03 | 0x0b => {
+                0x03 | 0x0b | 0x6b => {
                     let start = if self.command[0] == 3 { 4 } else { 5 };
                     if len == 4 {
                         self.cursor = ((self.command[1] as usize) << 16)
@@ -205,6 +205,20 @@ mod tests {
         }
         for expected in [0x46, 0x53, 0x4d, 0x50] {
             nor.write(0x11c08, 0xff).unwrap().unwrap();
+            assert_eq!(nor.read(0x11c08), Some(expected));
+        }
+    }
+
+    #[test]
+    fn quad_output_read_uses_the_raw_package_bytes_after_its_dummy_byte() {
+        let mut nor = Nor::default();
+        nor.bytes[0x92ff0..0x92ff4].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+        nor.chip_select(true);
+        for byte in [0x6b, 9, 0x2f, 0xf0, 0] {
+            nor.write(0x11c08, byte).unwrap().unwrap();
+        }
+        for expected in [0x12, 0x34, 0x56, 0x78] {
+            nor.write(0x11c08, 255).unwrap().unwrap();
             assert_eq!(nor.read(0x11c08), Some(expected));
         }
     }
