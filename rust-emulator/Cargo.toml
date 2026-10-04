@@ -1,0 +1,8 @@
+[package]
+name = "fm1-emu"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Incremental pi32v2 interpreter for unchanged FM-1 application firmware"
+
+[dependencies]

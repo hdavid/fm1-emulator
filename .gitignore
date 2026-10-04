@@ -5,3 +5,4 @@ __pycache__/
 build/*.o
 build/loader/*.o
 build/hardware.txt
+rust-emulator/target/

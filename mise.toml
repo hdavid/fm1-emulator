@@ -1,4 +1,5 @@
 [tools]
+rust = "1.91.1"
 uv = "0.8.24"
 
 [env]
@@ -42,3 +43,15 @@ run = "uv run --frozen python tools/fm1_install.py build/fm1-diag.fwsc"
 [tasks.test-update]
 description = "Simulate update staging and NOR writes; requires a host C compiler (cc)"
 run = "uv run --frozen python tools/test_update.py"
+
+[tasks.rust-test]
+description = "Test the Rust CPU, firmware loader, and hardware probe agreement"
+run = "cargo test --manifest-path rust-emulator/Cargo.toml --offline"
+
+[tasks.rust-probe]
+description = "Execute the probe directly from the unchanged diagnostic ELF"
+run = "cargo run --manifest-path rust-emulator/Cargo.toml --offline -- probe build/fm1-diag.elf"
+
+[tasks.rust-boot]
+description = "Start the diagnostic firmware and report the first emulation blocker"
+run = "cargo run --manifest-path rust-emulator/Cargo.toml --offline -- boot build/fm1-diag.elf"
