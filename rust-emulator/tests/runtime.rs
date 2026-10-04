@@ -179,6 +179,16 @@ fn byte_postincrement_store_updates_the_event_cursor() {
     assert_eq!(c.bus.read(RAM + 1, 1).unwrap(), 0);
     assert_eq!(c.r[1], RAM + 1);
 }
+#[test]
+fn immediate_arithmetic_shift_extends_the_sign_in_mixer_interpolation() {
+    for (value, expected) in [(65536, 2), (-65536, -2), (-1, -1)] {
+        let mut c = cpu(&[0xaf88]); // r0 = r0 >>> 15
+        c.r[0] = value as u32;
+        c.step().unwrap();
+        assert_eq!(c.r[0], expected as u32);
+    }
+}
+
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {

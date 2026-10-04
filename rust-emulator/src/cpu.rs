@@ -287,6 +287,9 @@ impl Cpu {
                     op = "not";
                 }
             }
+        } else if h & 0xe088 == 0xa088 {
+            self.r[a] = ((self.r[b] as i32) >> ((h >> 8) & 31)) as u32;
+            op = "asr";
         } else if h & 0xe008 == 0xa000 {
             let shift = (h >> 8) & 31;
             if h & 0x80 != 0 {
