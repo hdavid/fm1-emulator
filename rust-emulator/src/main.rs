@@ -14,11 +14,13 @@ fn number(value: &str) -> Result<u32, String> {
 fn main_run() -> Result<(), String> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.len() < 2 || !matches!(args[0].as_str(), "probe" | "boot") {
-        return Err("usage: fm1-emu <probe|boot> <application.elf|application.bin> [--entry ADDRESS] [--limit COUNT] [--trace PATH]".into());
+        return Err("usage: fm1-emu <probe|boot> <application.elf|application.bin> [--entry ADDRESS] [--limit COUNT] [--trace PATH] [--until SYMBOL] [--inspect SYMBOL:WORDS]".into());
     }
     let mut entry = None;
     let mut limit = 100_000;
     let mut trace_path = None;
+    let mut until = None;
+    let mut inspect = None;
     let mut i = 2;
     while i < args.len() {
         let value = args
@@ -28,11 +30,39 @@ fn main_run() -> Result<(), String> {
             "--entry" => entry = Some(number(value)?),
             "--limit" => limit = value.parse().map_err(|_| "invalid instruction limit")?,
             "--trace" => trace_path = Some(value),
+            "--until" => until = Some(value),
+            "--inspect" => inspect = Some(value),
             option => return Err(format!("unknown option: {option}")),
         }
         i += 2;
     }
     let firmware = Firmware::load(Path::new(&args[1]))?;
+    let stop = until
+        .map(|name| {
+            firmware
+                .symbols
+                .get(name)
+                .copied()
+                .ok_or_else(|| format!("unknown stop symbol: {name}"))
+        })
+        .transpose()?;
+    let inspection = inspect
+        .map(|request| {
+            let (name, count) = request
+                .split_once(':')
+                .ok_or("--inspect requires SYMBOL:WORDS")?;
+            let address = firmware
+                .symbols
+                .get(name)
+                .copied()
+                .ok_or_else(|| format!("unknown inspection symbol: {name}"))?;
+            let count: u32 = count.parse().map_err(|_| "invalid inspection word count")?;
+            if count > 1024 {
+                return Err("inspection is limited to 1024 words".into());
+            }
+            Ok::<_, String>((address, count))
+        })
+        .transpose()?;
     let entry = if let Some(entry) = entry {
         entry
     } else if args[0] == "probe" {
@@ -67,8 +97,22 @@ fn main_run() -> Result<(), String> {
         // Application handoff, not a ROM/SPL emulator. Unknown initial CPU state
         // is zeroed; crt0 immediately supplies the application's own stacks.
         cpu.r[0] = 0x01c7_fe08;
-        cpu.run(None, limit, trace_writer)
-            .map_err(|error| format!("after {} instructions: {error}", cpu.steps))
+        cpu.run(stop, limit, trace_writer)
+            .map_err(|error| format!("after {} instructions: {error}", cpu.steps))?;
+        let values = if let Some((address, count)) = inspection {
+            (0..count)
+                .map(|i| {
+                    let address = address
+                        .checked_add(i * 4)
+                        .ok_or("inspection address overflow")?;
+                    cpu.bus.read(address, 4).map_err(|error| error.to_string())
+                })
+                .collect::<Result<Vec<_>, String>>()?
+        } else {
+            Vec::new()
+        };
+        println!("{{\"mode\":\"boot\",\"pc\":{},\"instructions\":{},\"irq_entries\":{},\"inspection\":{:?}}}", cpu.pc,cpu.steps,cpu.irq_entries,values);
+        Ok(())
     }
 }
 

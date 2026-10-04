@@ -48,6 +48,10 @@ run = "uv run --frozen python tools/test_update.py"
 description = "Test the Rust CPU, firmware loader, and hardware probe agreement"
 run = "cargo test --manifest-path rust-emulator/Cargo.toml --offline"
 
+[tasks.build-foundation]
+description = "Build separate firmware exercising emulator hardware foundations"
+run = "uv run --frozen python tools/build_foundation.py"
+
 [tasks.rust-probe]
 description = "Execute the probe directly from the unchanged diagnostic ELF"
 run = "cargo run --manifest-path rust-emulator/Cargo.toml --offline -- probe build/fm1-diag.elf"

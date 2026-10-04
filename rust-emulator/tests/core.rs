@@ -96,7 +96,7 @@ fn bus_checks_alignment_boundaries_and_flash_writes() {
     assert!(bus.write(XIP, 0, 4).is_err());
     assert!(bus.read(RAM + RAM_SIZE as u32, 4).is_err());
     assert!(bus.read(0xffff_fffc, 4).is_err());
-    assert!(bus.read(0x10800, 4).is_err());
+    assert!(bus.read(0x11d00, 4).is_err());
     assert!(bus.read(RAM, 3).is_err());
     bus.write(RAM, 0x80, 2).unwrap();
     assert_eq!(bus.fetch(RAM).unwrap(), 0x80);
@@ -174,17 +174,17 @@ fn malformed_elf_is_rejected_without_panicking() {
 }
 
 #[test]
-fn startup_stops_at_the_first_unmodeled_timer_register() {
+fn diagnostic_startup_stops_at_an_unimplemented_instruction() {
     let firmware = Firmware::load(&root().join("build/fm1-diag.elf")).unwrap();
     let mut cpu = Cpu::new(Bus::new(firmware.image).unwrap(), firmware.entry);
     cpu.r[0] = 0x01c7_fe08;
     match cpu.run(None, 100, None).unwrap_err() {
-        Fault::Access { pc, fault } => {
-            assert_eq!(pc, 0x0200_1db4);
-            assert_eq!(fault.address, 0x10800);
+        Fault::Unsupported { pc, word } => {
+            assert_eq!(pc, 0x0200_1db6);
+            assert_eq!(word, 0xe160);
         }
         fault => panic!("unexpected fault: {fault}"),
     }
-    assert_eq!(cpu.steps, 17);
+    assert_eq!(cpu.steps, 18);
     assert_eq!(cpu.bus.read(0x01c0_7f28, 4).unwrap(), 0x01c7_fe08);
 }

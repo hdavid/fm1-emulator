@@ -31,11 +31,34 @@ mise exec -- cargo run --manifest-path rust-emulator/Cargo.toml --offline -- \
 The address above belongs to the current FM-1_980 build, not arbitrary firmware.
 Both commands accept `--limit COUNT` and `--trace PATH` (JSONL).
 
-The first boot milestone executes the application's entry and startup until
-the TIMER4 register at `0x10800`, where an explicit access fault reports the
-missing device. There are no silent MMIO defaults, instruction skips, or host
-substitutions for firmware functions. This is application emulation after the
-SPL handoff, not ROM or SPL emulation. Initial CPU state is approximate.
+The separate foundation firmware boots from `_start`, copies `.data` and
+`.ram_text`, clears `.bss`, runs the hardware-verified CPU probe, executes RAM
+code, observes TIMER4 progressing, and services a TIMER5 interrupt through a
+guest vector and handler. The handler runs on SSP, saves/restores registers,
+acknowledges the timer, and returns with `rti` to the application stack.
+
+```sh
+mise run build-foundation
+mise exec -- cargo run --manifest-path rust-emulator/Cargo.toml --offline -- \
+  boot build/foundation/firmware.elf --until foundation_done \
+  --inspect foundation_results:10
+```
+
+This ELF/raw application is for emulator tests. It has no updater or recovery
+and must not be installed on the FM-1. The physical device retains the working
+FM-1_980 diagnostic firmware.
+
+Timers use a deterministic virtual clock of 24 oscillator ticks per guest
+instruction (one microsecond), not measured CPU cycle timing. TIMER4 supports
+OSC /1 and TIMER5 supports OSC /4; other clock modes fail explicitly. Interrupt
+delivery currently covers non-nested TIMER5/IRQ63 with global and per-source
+masking. SPL initial state and the interrupt stack handoff are functional
+approximations that still need independent physical validation.
+
+The full diagnostic image still stops at its first unsupported instruction,
+currently `r0 = r0 & 0xF` in startup. There are no silent MMIO defaults,
+instruction skips, or host substitutions for firmware functions. This is
+application emulation after the SPL handoff, not ROM or SPL emulation.
 
 Probe encodings come from the Python reference, vendor disassembly, and the
 physical comparison. Startup stack arithmetic, immediate masks, and special

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+use crate::devices::Devices;
 use crate::{RAM, RAM_SIZE, XIP, XIP_END};
 use std::fmt;
 
@@ -22,6 +23,7 @@ impl fmt::Display for AccessFault {
 
 pub struct Bus {
     pub flash: Vec<u8>,
+    pub devices: Devices,
     ram: Vec<u8>,
 }
 
@@ -32,6 +34,7 @@ impl Bus {
         }
         Ok(Self {
             flash,
+            devices: Devices::default(),
             ram: vec![0; RAM_SIZE],
         })
     }
@@ -82,6 +85,9 @@ impl Bus {
         } else if let Some(offset) = Self::offset(address, size, RAM, self.ram.len()) {
             &self.ram[offset..offset + size]
         } else {
+            if let Some(value) = self.devices.read(address, size) {
+                return value.map_err(|reason| Self::fault(address, size, operation, reason));
+            }
             // No generic zero-filled MMIO: missing peripherals must be visible.
             return Err(Self::fault(
                 address,
@@ -107,6 +113,9 @@ impl Bus {
 
     pub fn write(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
         Self::check(address, size, "write")?;
+        if let Some(result) = self.devices.write(address, value, size) {
+            return result.map_err(|reason| Self::fault(address, size, "write", reason));
+        }
         let offset = Self::offset(address, size, RAM, self.ram.len()).ok_or_else(|| {
             Self::fault(
                 address,

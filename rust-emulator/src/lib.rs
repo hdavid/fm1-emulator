@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 pub mod bus;
 pub mod cpu;
+pub mod devices;
 pub mod firmware;
 
 pub const XIP: u32 = 0x0200_0120;

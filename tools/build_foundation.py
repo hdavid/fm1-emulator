@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+"""Build a separate application-entry firmware for emulator foundations."""
+from pathlib import Path
+import struct
+from build import tool, ROOT
+
+
+def main():
+    out = ROOT / "build/foundation"
+    out.mkdir(parents=True, exist_ok=True)
+    for source, name in [("foundation", "start"), ("probe", "probe")]:
+        tool("pi32v2/bin/clang", "-target", "pi32v2", "-c",
+             f"firmware/{source}.S", "-o", f"build/foundation/{name}.o")
+    tool("pi32v2/bin/ld", "-e", "_start", "-T", "firmware/app.ld",
+         "build/foundation/start.o", "build/foundation/probe.o",
+         "-o", "build/foundation/firmware.elf")
+    (out / "firmware.dis").write_text(tool("common/bin/objdump", "-d", "build/foundation/firmware.elf"))
+    (out / "firmware.symbols").write_text(tool("common/bin/objdump", "-t", "build/foundation/firmware.elf"))
+    elf = (out / "firmware.elf").read_bytes()
+    phoff = struct.unpack_from("<I", elf, 28)[0]
+    phsize, phcount = struct.unpack_from("<HH", elf, 42)
+    image = bytearray()
+    base = 0x02000120
+    for i in range(phcount):
+        kind, off, _, load, size, _, _, _ = struct.unpack_from("<IIIIIIII", elf, phoff + i * phsize)
+        if kind != 1 or not size or load + size <= base or load >= 0x02100000:
+            continue
+        start = max(load, base)
+        source = elf[off + start - load:off + size]
+        end = start - base + len(source)
+        image.extend(b"\xff" * max(0, end - len(image)))
+        image[start - base:end] = source
+    (out / "firmware.bin").write_bytes(image)
+    print(f"Built {len(image)} bytes of application firmware for emulator testing.")
+    print("No update package, USB updater, or recovery is included; do not flash this image.")
+
+
+if __name__ == "__main__":
+    main()

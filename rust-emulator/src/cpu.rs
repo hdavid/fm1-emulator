@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Probe decodings mirror emu.py, checked against vendor objdump and the FM-1.
 // Startup-only additions use the pinned Quarkslab pi32v2 reference; see README.
+use crate::devices::OSC_TICKS_PER_INSTRUCTION;
 use crate::{
     bus::{AccessFault, Bus},
     PROBE_RETURN, RESULT, USER_STACK,
@@ -41,6 +42,8 @@ pub struct Cpu {
     pub pc: u32,
     pub steps: u64,
     pub interrupts_enabled: bool,
+    pub irq_entries: u64,
+    in_interrupt: bool,
 }
 
 impl Cpu {
@@ -52,6 +55,8 @@ impl Cpu {
             pc: entry,
             steps: 0,
             interrupts_enabled: false,
+            irq_entries: 0,
+            in_interrupt: false,
         }
     }
 
@@ -224,14 +229,50 @@ impl Cpu {
                 op = "pop_mask";
             }
             next = pc + 4;
-        } else if h == 0x0464 || h == 0x0444 {
-            if h == 0x0464 {
-                self.push(self.r[4])?;
-                op = "push_r4";
+        } else if h & 0xfff0 == 0x0460 {
+            let boundary = (h & 15) as usize;
+            let range = if boundary < 4 {
+                boundary..=3
             } else {
-                self.r[4] = self.pop()?;
-                op = "pop_r4";
+                4..=boundary
+            };
+            for n in range.rev() {
+                self.push(self.r[n])?;
             }
+            op = "push_regs";
+        } else if h & 0xfff0 == 0x0440 {
+            let boundary = (h & 15) as usize;
+            let range = if boundary < 4 {
+                boundary..=3
+            } else {
+                4..=boundary
+            };
+            for n in range {
+                self.r[n] = self.pop()?;
+            }
+            op = "pop_regs";
+        } else if h & 0xfff0 == 0x0470 && h & 15 >= 4 {
+            self.push(self.sr[3])?;
+            for n in (4..=(h & 15) as usize).rev() {
+                self.push(self.r[n])?;
+            }
+            op = "push_rets_regs";
+        } else if h & 0xfff0 == 0x0450 && h & 15 >= 4 {
+            for n in 4..=(h & 15) as usize {
+                self.r[n] = self.pop()?;
+            }
+            next = self.pop()?;
+            op = "pop_pc_regs";
+        } else if h == 0x04e9 {
+            self.push(self.sr[5])?;
+            self.push(self.sr[3])?;
+            self.push(self.sr[0])?;
+            op = "push_irq_frame";
+        } else if h == 0x04a9 {
+            self.sr[0] = self.pop()?;
+            self.sr[3] = self.pop()?;
+            self.sr[5] = self.pop()?;
+            op = "pop_irq_frame";
         } else if matches!(h & 0xffc0, 0xea80 | 0xeac0) {
             let displacement = signed(((h & 63) << 16) | self.read(pc + 2, 2)?, 22) * 2;
             if h & 0xffc0 == 0xea80 {
@@ -262,15 +303,53 @@ impl Cpu {
         } else if h == 0x0080 {
             next = self.sr[3];
             op = "return";
+        } else if h & 0xfff0 == 0x00c0 {
+            self.sr[3] = pc + 2;
+            next = self.r[(h & 15) as usize];
+            op = "call_reg";
+        } else if h == 0x0081 && self.in_interrupt {
+            next = self.sr[0];
+            self.sr[13] = self.sr[14];
+            self.sr[14] = self.sr[12];
+            self.in_interrupt = false;
+            self.interrupts_enabled = true;
+            op = "rti";
         } else if h == 0x0060 {
             self.interrupts_enabled = false;
             op = "cli";
+        } else if h == 0x0061 {
+            self.interrupts_enabled = true;
+            op = "sti";
+        } else if h == 0x0020 || h == 0x0000 {
+            op = if h == 0x0020 { "csync" } else { "nop" };
         } else {
             return Err(Fault::Unsupported { pc, word: h as u16 });
         }
         self.pc = next;
         self.steps += 1;
+        self.bus.devices.advance(OSC_TICKS_PER_INSTRUCTION);
+        self.dispatch_interrupt()?;
         Ok(op)
+    }
+
+    fn dispatch_interrupt(&mut self) -> Result<(), Fault> {
+        if !self.interrupts_enabled || self.in_interrupt {
+            return Ok(());
+        }
+        if let Some(source) = self.bus.devices.pending_irq(self.sr[11]) {
+            let handler = self.read(0x01c7_fe00 + source as u32 * 4, 4)?;
+            self.bus
+                .fetch(handler)
+                .map_err(|fault| Fault::Access { pc: self.pc, fault })?;
+            self.sr[0] = self.pc;
+            self.sr[12] = self.sr[14];
+            self.sr[14] = self.sr[13];
+            self.pc = handler;
+            self.in_interrupt = true;
+            self.interrupts_enabled = false;
+            self.irq_entries += 1;
+        }
+        Ok(())
     }
 
     pub fn run(

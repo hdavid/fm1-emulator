@@ -6,3 +6,4 @@ build/*.o
 build/loader/*.o
 build/hardware.txt
 rust-emulator/target/
+build/foundation/*.o
