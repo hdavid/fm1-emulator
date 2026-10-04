@@ -47,6 +47,8 @@ jobs:
         with:
           install_args: rust
           cache: false # Rust is installed through rustup; avoid caching its proxies.
+      - name: Install the Rust formatter
+        run: mise exec -- rustup component add rustfmt
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
