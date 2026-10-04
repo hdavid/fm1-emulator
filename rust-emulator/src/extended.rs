@@ -358,7 +358,7 @@ pub(crate) fn execute(
             && matches!(h & 15, 0 | 1 | 2 | 3 | 8 | 9 | 10 | 11 | 12 | 13)
         {
             let value = match h & 0x60 {
-                0 => x & 4095,
+                0 => signed(x & 4095, 12) as u32,
                 0x20 => packed(x),
                 0x40 => cpu.r[c],
                 _ => packed(x),

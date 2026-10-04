@@ -288,6 +288,18 @@ fn packed_memory_and_preserves_the_high_cache_way_bits() {
 }
 
 #[test]
+fn stock_empty_flash_comparison_sign_extends_the_long_branch_immediate() {
+    // Vendor 0x02034bb4: if (r0 == -768) goto +44; six-byte signed-12 immediate.
+    for (value, taken) in [(0xfffffd00, true), (0x00000d00, false), (0, false)] {
+        let mut c = cpu(&[0xff00, 0x0d00, 0x0016]);
+        c.r[0] = value;
+        c.step().unwrap();
+        assert_eq!(c.pc, XIP + 6 + if taken { 44 } else { 0 });
+        assert_eq!(c.r[0], value);
+    }
+}
+
+#[test]
 fn word_postincrement_store_uses_the_old_base_and_preserves_the_gap() {
     let mut c = cpu(&[0xecd8, 0x1009]); // [r0++=8] = r1
     c.r[0] = RAM;
