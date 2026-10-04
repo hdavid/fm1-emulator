@@ -79,6 +79,18 @@ fn packed_memory_and_preserves_the_high_cache_way_bits() {
 }
 
 #[test]
+fn word_postincrement_store_uses_the_old_base_and_preserves_the_gap() {
+    let mut c = cpu(&[0xecd8, 0x1009]); // [r0++=8] = r1
+    c.r[0] = RAM;
+    c.r[1] = u32::MAX;
+    c.bus.write(RAM + 4, 0x12345678, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM, 4).unwrap(), u32::MAX);
+    assert_eq!(c.bus.read(RAM + 4, 4).unwrap(), 0x12345678);
+    assert_eq!(c.r[0], RAM + 8);
+}
+
+#[test]
 fn packed_inequality_selects_the_stock_oscillator_frequency() {
     // Vendor stock disassembly: if (r7 != 0x08000000) { 24 MHz } else { 40 MHz }.
     for (value, expected) in [(0x04000000, 24_000_000), (0x08000000, 40_000_000)] {
