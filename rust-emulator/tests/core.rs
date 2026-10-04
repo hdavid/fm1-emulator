@@ -160,6 +160,28 @@ fn short_stack_spills_cover_both_halves_of_the_offset_range() {
 }
 
 #[test]
+fn register_preincrement_load_uses_old_operands_and_updates_the_base() {
+    // Vendor form in smp_user_scan: dc ec 62 11 => r1 = [++r6=r1].
+    for destination in [1, 6] {
+        for (base, increment, address) in [(RAM, 32, RAM + 32), (0xffff_fff0, RAM + 48, RAM + 32)] {
+            let x = ((destination as u16) << 12) | 0x0162;
+            let mut program = 0xecdc_u16.to_le_bytes().to_vec();
+            program.extend(x.to_le_bytes());
+            let mut cpu = cpu(&program);
+            cpu.r[6] = base;
+            cpu.r[1] = increment;
+            cpu.bus.write(address, 0xabcd_5678, 4).unwrap();
+            cpu.step().unwrap();
+            assert_eq!(cpu.r[destination], 0xabcd_5678);
+            if destination != 6 {
+                assert_eq!(cpu.r[6], address);
+            }
+            assert_eq!(cpu.pc, XIP + 4);
+        }
+    }
+}
+
+#[test]
 fn branch_and_instruction_limits_do_not_succeed_silently() {
     for (value, target) in [(0, XIP + 2), (1, XIP - 4), (u32::MAX, XIP - 4)] {
         let mut cpu = cpu(&[0xf3, 0x5d]);

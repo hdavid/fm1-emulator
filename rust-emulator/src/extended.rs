@@ -521,6 +521,14 @@ pub(crate) fn execute(
                 if mode & 2 != 0 { Some(addr) } else { None },
             ));
             op = "word_extended";
+        } else if h == 0xecdc && x & 15 == 2 {
+            // Vendor form: rD = [++rS=rC]. Commit the base before the
+            // destination so a load into its own base retains the loaded word.
+            let address = cpu.r[s].wrapping_add(cpu.r[c]);
+            let value = cpu.read(address, 4)?;
+            cpu.r[s] = address;
+            cpu.r[d] = value;
+            op = "word_register_preincrement";
         } else if matches!(h, 0xecd8 | 0xedd8 | 0xeed8) {
             let size = match h {
                 0xecd8 => 4,
