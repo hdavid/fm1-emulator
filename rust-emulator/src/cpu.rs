@@ -46,6 +46,8 @@ pub struct Cpu {
     in_interrupt: bool,
     predicate_skip: Option<(u32, u32)>,
     irq_predicate: Option<(u32, u32)>,
+    repeat: Option<(u32, u32, u32)>,
+    irq_repeat: Option<(u32, u32, u32)>,
 }
 
 impl Cpu {
@@ -61,6 +63,8 @@ impl Cpu {
             in_interrupt: false,
             predicate_skip: None,
             irq_predicate: None,
+            repeat: None,
+            irq_repeat: None,
         }
     }
 
@@ -133,6 +137,16 @@ impl Cpu {
         } else {
             self.execute(h)?
         };
+        if let Some((start, end, count)) = self.repeat {
+            if self.pc == end {
+                if count > 1 {
+                    self.pc = start;
+                    self.repeat = Some((start, end, count - 1));
+                } else {
+                    self.repeat = None;
+                }
+            }
+        }
         self.steps += 1;
         self.bus.devices.advance(OSC_TICKS_PER_INSTRUCTION);
         self.bus
@@ -213,6 +227,14 @@ impl Cpu {
                 self.r[register] -= 1;
             }
             op = "repeat_register";
+        } else if h & 0xe00f == 0x8000 {
+            if self.repeat.is_some() {
+                return Err(Fault::Unsupported { pc, word: h as u16 });
+            }
+            let length = (((h >> 4) & 15) + 1) * 2;
+            let count = ((h >> 8) & 31) + 1;
+            self.repeat = Some((pc + 2, pc + 2 + length, count));
+            op = "repeat_immediate";
         } else if h == 0xe064 {
             let extra = self.read(pc + 2, 2)?;
             let reg = ((extra >> 12) & 15) as usize;
@@ -445,6 +467,7 @@ impl Cpu {
             self.sr[14] = self.sr[12];
             self.in_interrupt = false;
             self.predicate_skip = self.irq_predicate.take();
+            self.repeat = self.irq_repeat.take();
             self.interrupts_enabled = true;
             op = "rti";
         } else if h == 0x0060 {
@@ -480,6 +503,7 @@ impl Cpu {
             self.pc = handler;
             self.in_interrupt = true;
             self.irq_predicate = self.predicate_skip.take();
+            self.irq_repeat = self.repeat.take();
             self.interrupts_enabled = false;
             self.irq_entries += 1;
         }

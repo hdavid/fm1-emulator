@@ -56,6 +56,62 @@ fn packed_memory_and_preserves_the_high_cache_way_bits() {
 }
 
 #[test]
+fn immediate_repeat_clears_twenty_words_and_copies_multiword_blocks() {
+    let mut c = cpu(&[0x9300, 0x0592, 0x0000]);
+    c.r[1] = RAM;
+    c.r[2] = 0x12345678;
+    while c.pc != XIP + 4 {
+        c.step().unwrap();
+        assert!(c.steps <= 21);
+    }
+    assert_eq!(c.r[1], RAM + 80);
+    for i in 0..20 {
+        assert_eq!(c.bus.read(RAM + i * 4, 4).unwrap(), 0x12345678);
+    }
+    assert_eq!(c.bus.read(RAM + 80, 4).unwrap(), 0);
+
+    let mut c = cpu(&[0x8210, 0x0513, 0x05c3, 0x0000]);
+    c.r[1] = RAM;
+    c.r[4] = RAM + 32;
+    for i in 0..3 {
+        c.bus.write(RAM + i * 4, 0x12340000 + i, 4).unwrap();
+    }
+    while c.pc != XIP + 6 {
+        c.step().unwrap();
+        assert!(c.steps <= 7);
+    }
+    for i in 0..3 {
+        assert_eq!(c.bus.read(RAM + 32 + i * 4, 4).unwrap(), 0x12340000 + i);
+    }
+}
+
+#[test]
+fn an_interrupt_preserves_the_unfinished_repeat() {
+    use fm1_emu::devices::{IRQ_CONFIG, TIMER5};
+    let mut c = cpu(&[0x8200, 0x0592, 0x0000, 0x0081]);
+    c.r[1] = RAM;
+    c.r[2] = 42;
+    c.sr[14] = RAM + 256;
+    c.sr[13] = RAM + 512;
+    c.sr[11] = 0x100;
+    c.bus.write(0x01c7fe00 + 63 * 4, XIP + 6, 4).unwrap();
+    c.bus.write(IRQ_CONFIG + 7 * 4, 1 << 28, 4).unwrap();
+    c.bus.write(TIMER5 + 8, 1, 4).unwrap();
+    c.bus.write(TIMER5, 9, 4).unwrap();
+    c.interrupts_enabled = true;
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 6);
+    c.bus.write(TIMER5, 0x4000, 4).unwrap();
+    c.step().unwrap(); // rti
+    while c.pc != XIP + 4 {
+        c.step().unwrap();
+        assert!(c.steps <= 5);
+    }
+    assert_eq!(c.r[1], RAM + 12);
+    assert_eq!(c.bus.read(RAM + 8, 4).unwrap(), 42);
+}
+
+#[test]
 fn conditional_skip_counts_the_whole_long_call() {
     // if (r5 < 5) { call ... } else { r0=22 }.
     let mut c = cpu(&[0xe9b5, 0x1005, 0xff80, 0x00b0, 0x0000, 0x3640]);
