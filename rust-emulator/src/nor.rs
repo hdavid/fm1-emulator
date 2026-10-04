@@ -8,6 +8,29 @@ pub struct Nor {
     pub bytes: Vec<u8>,
     cursor: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Nor;
+
+    #[test]
+    fn spi_and_plain_xip_read_the_same_physical_bytes() {
+        let mut nor = Nor::default();
+        nor.bytes[0xa0000..0xa0004].copy_from_slice(&[0x46, 0x53, 0x4d, 0x50]);
+        nor.write(0x4030c, 0x0208f000).unwrap().unwrap();
+        nor.write(0x40308, 0x07ffffff).unwrap().unwrap();
+        nor.write(0x40300, 3).unwrap().unwrap();
+        assert_eq!(nor.xip(0x0209c000, 4).unwrap().unwrap(), 0x504d5346);
+        nor.chip_select(true);
+        for byte in [0x03, 0x0a, 0x00, 0x00] {
+            nor.write(0x11c08, byte).unwrap().unwrap();
+        }
+        for expected in [0x46, 0x53, 0x4d, 0x50] {
+            nor.write(0x11c08, 0xff).unwrap().unwrap();
+            assert_eq!(nor.read(0x11c08), Some(expected));
+        }
+    }
+}
 impl Default for Nor {
     fn default() -> Self {
         Self {
@@ -20,6 +43,34 @@ impl Default for Nor {
     }
 }
 impl Nor {
+    pub fn xip_active(&self) -> bool {
+        self.read(0x40200).unwrap() & 1 != 0 && self.read(0x5101c).unwrap() & 32 != 0
+    }
+
+    pub fn xip(&self, address: u32, size: usize) -> Option<Result<u32, &'static str>> {
+        // The SFC maps flash offset 0x4000 at CPU address 0x02000000.
+        let offset = address.checked_sub(0x0200_0000)? as usize + 0x4000;
+        let bytes = self.bytes.get(offset..offset.checked_add(size)?)?;
+        if !self.xip_active() {
+            return Some(Err(
+                "XIP unavailable while SFC or flash pin routing is disabled",
+            ));
+        }
+        let control = self.read(0x40300).unwrap();
+        let plain = control & 1 == 0
+            || (control & 2 != 0
+                && address >= self.read(0x4030c).unwrap()
+                && address.checked_add(size as u32 - 1)? <= self.read(0x40308).unwrap());
+        if !plain {
+            return Some(Err(
+                "encrypted XIP outside the supplied application is not available",
+            ));
+        }
+        Some(Ok(bytes.iter().enumerate().fold(0, |value, (i, byte)| {
+            value | ((*byte as u32) << (i * 8))
+        })))
+    }
+
     pub fn read(&self, a: u32) -> Option<u32> {
         if a == 0x1eee008 {
             return Some(0x4000);

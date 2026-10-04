@@ -92,10 +92,21 @@ impl Bus {
     ) -> Result<u32, AccessFault> {
         Self::check(address, size, operation)?;
         let bytes = if let Some(offset) = Self::offset(address, size, XIP, self.flash.len()) {
+            if !self.nor.xip_active() {
+                return Err(Self::fault(
+                    address,
+                    size,
+                    operation,
+                    "application XIP is disabled",
+                ));
+            }
             &self.flash[offset..offset + size]
         } else if let Some(offset) = Self::offset(address, size, RAM, self.ram.len()) {
             &self.ram[offset..offset + size]
         } else {
+            if let Some(value) = self.nor.xip(address, size) {
+                return value.map_err(|reason| Self::fault(address, size, operation, reason));
+            }
             if let Some(value) = self.usb.read(address) {
                 return Ok(value);
             }
