@@ -90,6 +90,19 @@ fn flash_identification_shifts_the_jedec_word_in_memory() {
 }
 
 #[test]
+fn packed_unsigned_less_equal_checks_the_stock_ram_code_size() {
+    for (value, expected) in [(0, 0), (0xd80, 0), (4096, 0), (4097, 1), (u32::MAX, 1)] {
+        let mut c = cpu(&[0xeca1, 0x0d80, 0x2040, 0]);
+        c.r[1] = value;
+        c.r[0] = 1;
+        while c.pc < XIP + 6 {
+            c.step().unwrap();
+        }
+        assert_eq!(c.r[0], expected);
+    }
+}
+
+#[test]
 fn stock_startup_long_calls_return_after_six_bytes() {
     // Vendor disassembly: call 176, and nested call -10 to an rts.
     let mut c = cpu(&[0xff80, 0x00b0, 0x0000]);

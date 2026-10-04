@@ -499,6 +499,7 @@ pub(crate) fn execute(
                 | 0xc1
                 | 0xc3
                 | 0xc9
+                | 0xca
                 | 0xcb
                 | 0xd1
                 | 0xd2
@@ -534,7 +535,7 @@ pub(crate) fn execute(
                 0xa2 => lhs & rhs == 0,
                 0xa3 => lhs & rhs != 0,
                 0xc1 | 0xc3 => lhs > rhs,
-                0xc9 | 0xcb => lhs <= rhs,
+                0xc9..=0xcb => lhs <= rhs,
                 0xd1..=0xd3 => (lhs as i32) >= (rhs as i32),
                 0xd9..=0xdb => (lhs as i32) < (rhs as i32),
                 _ => (lhs as i32) <= (rhs as i32),
