@@ -322,6 +322,51 @@ fn packed_memory_and_preserves_the_high_cache_way_bits() {
 }
 
 #[test]
+fn stock_wide_arithmetic_preserves_high_words_and_overlapping_operands() {
+    // Vendor stock clock arithmetic, with aliased inputs/outputs and values
+    // requiring both words. The destination's low bit selects signed multiply.
+    for (encoding, left, right, expected) in [
+        (0x0010, u32::MAX, 2, u32::MAX as u64 * 2),
+        (0x1010, i32::MIN as u32, (-2i32) as u32, 1u64 << 32),
+        (0x1010, (-3i32) as u32, 7, (-21i64) as u64),
+    ] {
+        let mut c = cpu(&[0xe1f8, encoding]); // r1_r0 = r1 * r0
+        c.r[1] = left;
+        c.r[0] = right;
+        c.step().unwrap();
+        assert_eq!((c.r[1] as u64) << 32 | c.r[0] as u64, expected);
+    }
+    for (value, divisor) in [(128_000_000u64, 1_000_000u32), (u64::MAX, 65535)] {
+        let mut c = cpu(&[0xe1f6, 0x0020]); // r1_r0 = r3_r2 / r0 (u)
+        c.r[2] = value as u32;
+        c.r[3] = (value >> 32) as u32;
+        c.r[0] = divisor;
+        c.step().unwrap();
+        assert_eq!(
+            (c.r[1] as u64) << 32 | c.r[0] as u64,
+            value / divisor as u64
+        );
+    }
+    for shift in [0, 1, 32, 63, 64, 65] {
+        for right in [false, true] {
+            let mut c = cpu(&[0xe1d8, 0x0400 | if right { 2 } else { 0 }]);
+            let value = 0x81234567fedcba98u64;
+            c.r[0] = value as u32;
+            c.r[1] = (value >> 32) as u32;
+            c.r[4] = shift;
+            c.step().unwrap();
+            let expected = if right {
+                value.checked_shr(shift)
+            } else {
+                value.checked_shl(shift)
+            }
+            .unwrap_or(0);
+            assert_eq!((c.r[1] as u64) << 32 | c.r[0] as u64, expected);
+        }
+    }
+}
+
+#[test]
 fn stock_cache_bound_keeps_unsigned_long_branch_immediates_positive() {
     // Vendor display startup at 0x0200205a: if (r2 < 2111) goto -22.
     for (condition, value, taken) in [

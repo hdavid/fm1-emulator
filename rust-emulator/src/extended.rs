@@ -253,6 +253,40 @@ pub(crate) fn execute(
         } else if h == 0xe1f0 && x & 15 == 0 {
             cpu.r[d] = cpu.r[s].wrapping_mul(cpu.r[c]);
             op = "multiply_extended";
+        } else if h == 0xe1f8 && x & 15 == 0 {
+            let result = if d & 1 == 0 {
+                cpu.r[s] as u64 * cpu.r[c] as u64
+            } else {
+                (cpu.r[s] as i32 as i64 * cpu.r[c] as i32 as i64) as u64
+            };
+            cpu.r[d & 14] = result as u32;
+            cpu.r[(d & 14) + 1] = (result >> 32) as u32;
+            op = "multiply_wide";
+        } else if h == 0xe1f6 && d & 1 == 0 && s & 1 == 0 && x & 15 <= 1 {
+            let dividend = cpu.r[s] as u64 | ((cpu.r[s + 1] as u64) << 32);
+            let quotient = if x & 1 == 0 {
+                dividend.checked_div(cpu.r[c] as u64)
+            } else {
+                (dividend as i64)
+                    .checked_div(cpu.r[c] as i32 as i64)
+                    .map(|n| n as u64)
+            }
+            .ok_or(Fault::Unsupported { pc, word: h as u16 })?;
+            cpu.r[d] = quotient as u32;
+            cpu.r[d + 1] = (quotient >> 32) as u32;
+            op = "divide_wide";
+        } else if h == 0xe1d8 && d & 1 == 0 && s == 0 && matches!(x & 15, 0 | 2) {
+            let value = cpu.r[d] as u64 | ((cpu.r[d + 1] as u64) << 32);
+            let shift = cpu.r[c];
+            let result = if x & 2 == 0 {
+                value.checked_shl(shift)
+            } else {
+                value.checked_shr(shift)
+            }
+            .unwrap_or(0);
+            cpu.r[d] = result as u32;
+            cpu.r[d + 1] = (result >> 32) as u32;
+            op = "shift_wide_register";
         } else if h == 0xe1f4 && x & 15 <= 1 {
             cpu.r[d] = if x & 1 == 0 {
                 cpu.r[s].checked_div(cpu.r[c])
