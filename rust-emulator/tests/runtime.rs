@@ -36,6 +36,25 @@ fn scheduler_restores_the_task_frame_and_stack_pointer_banks() {
 }
 
 #[test]
+fn leading_zero_count_selects_the_highest_ready_task_priority() {
+    for (value, expected) in [
+        (0, 32),
+        (1, 31),
+        (0x2000c001, 2),
+        (0x80000000, 0),
+        (u32::MAX, 0),
+    ] {
+        let mut c = cpu(&[0xe180, 0x4200]); // r4 = clz(r2)
+        c.r[2] = value;
+        c.r[0] = 0x55555555;
+        c.step().unwrap();
+        assert_eq!(c.r[4], expected);
+        assert_eq!(c.r[2], value);
+        assert_eq!(c.r[0], 0x55555555);
+    }
+}
+
+#[test]
 fn stock_startup_long_calls_return_after_six_bytes() {
     // Vendor disassembly: call 176, and nested call -10 to an rts.
     let mut c = cpu(&[0xff80, 0x00b0, 0x0000]);

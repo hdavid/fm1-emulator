@@ -262,6 +262,9 @@ pub(crate) fn execute(
             } else {
                 "divide_signed"
             };
+        } else if h == 0xe180 && x & 255 == 0 {
+            cpu.r[d] = cpu.r[c].leading_zeros();
+            op = "count_leading_zeros";
         } else if h == 0xe430 && x & 255 == 0 {
             cpu.r[d] = (cpu.r[c] as i32).wrapping_abs() as u32;
             op = "absolute";
