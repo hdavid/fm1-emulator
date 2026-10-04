@@ -244,9 +244,17 @@ pub(crate) fn execute(
                 },
             )?;
             op = "memory_bit";
-        } else if h == 0xe0b4 {
-            cpu.r[d] = cpu.r[s].wrapping_add(cpu.r[c]);
-            op = "add_extended";
+        } else if h == 0xe0b4 && matches!(x & 15, 0 | 2) {
+            cpu.r[d] = if x & 2 == 0 {
+                cpu.r[s].wrapping_add(cpu.r[c])
+            } else {
+                cpu.r[s].wrapping_sub(cpu.r[c])
+            };
+            op = if x & 2 == 0 {
+                "add_extended"
+            } else {
+                "subtract_extended"
+            };
         } else if h == 0xe1c8 {
             let shift = cpu.r[c];
             cpu.r[d] = match x & 3 {

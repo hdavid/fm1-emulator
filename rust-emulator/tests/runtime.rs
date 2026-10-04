@@ -119,6 +119,18 @@ fn signed_division_truncates_toward_zero_and_rejects_undefined_cases() {
         assert!(c.step().is_err());
     }
 }
+
+#[test]
+fn three_operand_subtraction_preserves_the_text_canvas_address() {
+    for (left, right, expected) in [(RAM + 128, 4, RAM + 124), (0, 1, u32::MAX)] {
+        let mut c = cpu(&[0xe0b4, 0x00c2]); // r0 = r12 - r0
+        c.r[12] = left;
+        c.r[0] = right;
+        c.step().unwrap();
+        assert_eq!(c.r[0], expected);
+        assert_eq!(c.r[12], left);
+    }
+}
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {
