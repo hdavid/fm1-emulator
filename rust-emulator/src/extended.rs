@@ -701,6 +701,19 @@ pub(crate) fn execute(
                 Some(address.wrapping_add(increment)),
             ));
             op = "word_postincrement_store";
+        } else if h == 0xecd8 && x & 3 == 0 {
+            let increment = (((x >> 8) & 15) << 4) | (x & 12);
+            let address = cpu.r[s];
+            mem = Some((
+                d,
+                s,
+                address,
+                4,
+                false,
+                false,
+                Some(address.wrapping_add(increment)),
+            ));
+            op = "word_postincrement_load";
         } else if matches!(h, 0xecd8 | 0xedd8 | 0xeed8) {
             let size = match h {
                 0xecd8 => 4,

@@ -312,6 +312,21 @@ fn word_postincrement_store_uses_the_old_base_and_preserves_the_gap() {
 }
 
 #[test]
+fn stock_init_calls_load_the_word_before_advancing_by_28_bytes() {
+    // Vendor 0x020347fc: r0 = [r4++=28]. r1 must not enter the address.
+    let mut c = cpu(&[0xecd8, 0x014c]);
+    c.r[4] = RAM;
+    c.r[1] = 0x100;
+    c.bus.write(RAM, XIP + 100, 4).unwrap();
+    c.bus.write(RAM + 0x100, 0xdeadbeef, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.r[0], XIP + 100);
+    assert_eq!(c.r[4], RAM + 28);
+    assert_eq!(c.r[1], 0x100);
+    assert_eq!(c.pc, XIP + 4);
+}
+
+#[test]
 fn packed_inequality_selects_the_stock_oscillator_frequency() {
     // Vendor stock disassembly: if (r7 != 0x08000000) { 24 MHz } else { 40 MHz }.
     for (value, expected) in [(0x04000000, 24_000_000), (0x08000000, 40_000_000)] {
