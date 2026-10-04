@@ -41,6 +41,7 @@ struct Emulator {
     texture: Option<egui::TextureHandle>,
     pressed: [bool; 41],
     pulse: [Instant; 41],
+    pulse_steps: [u64; 41],
 }
 impl Emulator {
     fn new(path: PathBuf) -> Self {
@@ -52,6 +53,7 @@ impl Emulator {
             texture: None,
             pressed: [false; 41],
             pulse: [Instant::now(); 41],
+            pulse_steps: [0; 41],
         };
         app.reset();
         app
@@ -59,6 +61,7 @@ impl Emulator {
     fn reset(&mut self) {
         self.pressed.fill(false);
         self.pulse.fill(Instant::now());
+        self.pulse_steps.fill(0);
         self.paused = false;
         self.texture = None;
         match Firmware::load(&self.path).and_then(|firmware| {
@@ -149,6 +152,7 @@ impl Emulator {
         let down = response.is_pointer_button_down_on();
         if down || response.clicked() {
             self.pulse[id] = Instant::now() + Duration::from_millis(100);
+            self.pulse_steps[id] = self.cpu.as_ref().map_or(0, |cpu| cpu.steps + 2_400_000);
         }
         let focused = ui.input(|i| i.focused);
         let binding = match id {
@@ -160,11 +164,20 @@ impl Emulator {
         let keyboard = binding.is_some_and(|key| ui.input(|i| i.key_down(key)));
         if binding.is_some_and(|key| ui.input(|i| i.key_pressed(key))) {
             self.pulse[id] = Instant::now() + Duration::from_millis(100);
+            self.pulse_steps[id] = self.cpu.as_ref().map_or(0, |cpu| cpu.steps + 2_400_000);
         }
         if !focused {
             self.pulse[id] = Instant::now();
+            self.pulse_steps[id] = 0;
         }
-        let pressed = focused && (down || keyboard || Instant::now() < self.pulse[id]);
+        // A slow host still gives the guest 100 ms of oscillator time to scan
+        // and debounce a click; the wall-clock pulse keeps visual feedback.
+        let guest_pulse = self
+            .cpu
+            .as_ref()
+            .is_some_and(|cpu| cpu.steps < self.pulse_steps[id]);
+        let pressed =
+            focused && (down || keyboard || Instant::now() < self.pulse[id] || guest_pulse);
         self.pressed[id] = pressed;
         let fill = if pressed {
             Color32::from_rgb(75, 65, 42)
@@ -450,7 +463,7 @@ impl eframe::App for Emulator {
                 ui.label("This firmware needs additional emulation support. The LCD retains its last guest-written pixels.");
             } else {
                 ui.label("Hold a key or button to press it · Arrow keys: octave · A W S E D R F G T H Y J K: notes");
-                ui.weak("The LCD follows the loaded firmware. Audio and rotary input are not implemented.");
+                ui.weak("The LCD follows the loaded firmware. Audio playback and rotary input are not implemented.");
             }
         });
         // Use input from the previous rendered frame, then collect this frame's
@@ -458,6 +471,7 @@ impl eframe::App for Emulator {
         if !ctx.input(|i| i.focused) {
             self.pressed.fill(false);
             self.pulse.fill(Instant::now());
+            self.pulse_steps.fill(0);
         }
         self.run_slice(ctx);
         egui::CentralPanel::default()
@@ -571,6 +585,25 @@ mod tests {
             .pixels
             .iter()
             .all(|&pixel| pixel == 0));
+    }
+    #[test]
+    fn a_short_keypress_survives_a_slow_host_until_guest_debounce_can_run() {
+        let mut app = demo();
+        let ctx = egui::Context::default();
+        let key = |pressed| egui::Event::Key {
+            key: egui::Key::ArrowLeft,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        draw(&mut app, &ctx, vec![key(true)], true);
+        app.pulse[0] = Instant::now(); // Wall-clock pulse expired on a slow host.
+        draw(&mut app, &ctx, vec![key(false)], true);
+        assert!(app.pressed[0]);
+        app.cpu.as_mut().unwrap().steps = 2_400_000;
+        draw(&mut app, &ctx, vec![], true);
+        assert!(!app.pressed[0]);
     }
     #[test]
     fn unsupported_firmware_stops_without_fabricating_a_screen() {
