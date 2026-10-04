@@ -1,0 +1,7 @@
+.deps/
+.venv/
+__pycache__/
+*.pyc
+build/*.o
+build/loader/*.o
+build/hardware.txt
