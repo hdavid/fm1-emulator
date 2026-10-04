@@ -469,6 +469,7 @@ pub(crate) fn execute(
             0x81 | 0x82
                 | 0x83
                 | 0x89
+                | 0x8a
                 | 0x8b
                 | 0x91
                 | 0x92
@@ -503,7 +504,7 @@ pub(crate) fn execute(
             };
             let test = match kind {
                 0x81..=0x83 => lhs == rhs,
-                0x89 | 0x8b => lhs != rhs,
+                0x89..=0x8b => lhs != rhs,
                 0x91..=0x93 => lhs >= rhs,
                 0x99 | 0x9b => lhs < rhs,
                 0xa1 => {

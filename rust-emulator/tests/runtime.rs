@@ -79,6 +79,21 @@ fn packed_memory_and_preserves_the_high_cache_way_bits() {
 }
 
 #[test]
+fn packed_inequality_selects_the_stock_oscillator_frequency() {
+    // Vendor stock disassembly: if (r7 != 0x08000000) { 24 MHz } else { 40 MHz }.
+    for (value, expected) in [(0x04000000, 24_000_000), (0x08000000, 40_000_000)] {
+        let mut c = cpu(&[
+            0xe8a7, 0x1600, 0xffc7, 0x3600, 0x016e, 0xffc7, 0x5a00, 0x0262, 0,
+        ]);
+        c.r[7] = value;
+        while c.pc < XIP + 16 {
+            c.step().unwrap();
+        }
+        assert_eq!(c.r[7], expected);
+    }
+}
+
+#[test]
 fn immediate_repeat_clears_twenty_words_and_copies_multiword_blocks() {
     let mut c = cpu(&[0x9300, 0x0592, 0x0000]);
     c.r[1] = RAM;
