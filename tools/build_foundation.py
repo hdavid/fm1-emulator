@@ -6,7 +6,7 @@ from build import tool, ROOT
 
 
 def main(display=False):
-    directory = "build/display" if display else "build/foundation"
+    directory = "tests/fixtures/display" if display else "build/foundation"
     out = ROOT / directory
     out.mkdir(parents=True, exist_ok=True)
     sources = [("foundation", "start"), ("probe", "probe")]

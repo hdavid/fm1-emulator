@@ -40,6 +40,8 @@ SDK_SHA256 = {
 }
 
 PRODUCT = "FM-1_900"                # package identity; release builds are FM-1_9XY
+HARDWARE_DISPLAY = False
+NAME = "fm1-diag"
 VERSION = None                      # FELUCCA_VERSION for release builds (default: firmware/src/ui.c)
 
 
@@ -143,7 +145,9 @@ def build_loader():
 # ---- app
 
 def build_app():
-    flags = [*CFLAGS, "-Ifirmware/hal", "-Ifirmware/src", "-Ibuild/gen"]
+    flags = [*CFLAGS, "-Ifirmware/hal", "-Ifirmware/src", "-I" + str(GEN.relative_to(SRC))]
+    if HARDWARE_DISPLAY:
+        flags.append("-DFM1_HARDWARE_DISPLAY")
     flags.append(f'-DFELUCCA_ID="{PRODUCT}"')
     if VERSION:
         flags.append(f'-DFELUCCA_VERSION="{VERSION}"')
@@ -152,9 +156,13 @@ def build_app():
            ("cc", "-c", FW / "hal" / "fm1_vec.S", "-o", OUT / "fm1_vec.o"),
            ("cc", "-c", FW / "hal" / "fm1_isr.S", "-o", OUT / "fm1_isr.o"),
            ("cc", *flags, "-c", FW / "src" / "diag.c", "-o", OUT / "diag.o"))
-    elf = OUT / "fm1-diag.elf"
+    extra = []
+    if HARDWARE_DISPLAY:
+        tc("cc", "-DFM1_HARDWARE_DISPLAY", "-c", FW / "display.S", "-o", OUT / "display.o")
+        extra.append(OUT / "display.o")
+    elf = OUT / f"{NAME}.elf"
     tc("pi32v2/bin/ld", "-T", FW / "app.ld", OUT / "crt0.o", OUT / "fm1_vec.o", OUT / "fm1_isr.o",
-       OUT / "diag.o", OUT / "diag_probe.o", "-o", elf)
+       OUT / "diag.o", OUT / "diag_probe.o", *extra, "-o", elf)
     for sect in ("text.bin", "data.bin", "ramtext.bin"):
         (OUT / sect).unlink(missing_ok=True)
     *_, syms, dis, rt = tc_all(("common/bin/objcopy", "-O", "binary", "-j", ".text", elf, OUT / "text.bin"),
@@ -163,7 +171,7 @@ def build_app():
                                ("common/bin/objdump", "-t", elf),
                                ("common/bin/objdump", "-d", elf),
                                ("common/bin/objdump", "-d", "-j", ".ram_text", elf))
-    (OUT / "fm1-diag.dis").write_text(dis)
+    (OUT / f"{NAME}.dis").write_text(dis)
 
     def symv(name):
         return int(re.search(r"^([0-9a-f]+) .*\s" + name + r"$", syms, re.M).group(1), 16)
@@ -180,7 +188,7 @@ def build_app():
             img += b"\xff" * (load - APP_XIP - len(img))
             img += blob
     img += b"\xff" * (-len(img) % 4)
-    (OUT / "fm1-diag.bin").write_bytes(img)
+    (OUT / f"{NAME}.bin").write_bytes(img)
     return bytes(img), syms, dis, rt
 
 
@@ -220,16 +228,21 @@ def check(img, syms, dis, rt):
     return errors, notes
 
 
-def main():
-    global PRODUCT
-    PRODUCT = "FM-1_980"
+def main(hardware_display=False):
+    global PRODUCT, OUT, GEN, LDR, NAME, HARDWARE_DISPLAY
+    HARDWARE_DISPLAY = hardware_display
+    PRODUCT = "FM-1_981" if hardware_display else "FM-1_980"
+    NAME = "firmware" if hardware_display else "fm1-diag"
+    OUT = SRC / "build/display" if hardware_display else SRC / "build"
+    GEN = OUT / "gen"
+    LDR = OUT / "loader"
     fm1pkg_make.SDK = Path(os.environ["AC79_SDK"])
     for rel, sha in SDK_SHA256.items():
         if hashlib.sha256(fm1pkg_make.sdk_file(rel)).hexdigest() != sha:
             raise SystemExit(f"SDK checksum mismatch: {rel}")
     OUT.mkdir(parents=True, exist_ok=True)
     GEN.mkdir(parents=True, exist_ok=True)
-    manifest = __import__("json").loads((OUT/"probe.json").read_text())
+    manifest = __import__("json").loads((SRC/"build/probe.json").read_text())
     (GEN/"probe_hash.h").write_text('#define PROBE_SHA256 "'+manifest["probe_sha256"]+'"\n')
     ota = build_loader()
     img, syms, dis, rt = build_app()
@@ -237,8 +250,8 @@ def main():
     for n in notes: print("ok:", n)
     if errors: raise SystemExit("\n".join(errors))
     pkg = fm1pkg_make.ufw(fm1pkg_make.flash_image(img, fm1pkg_make.KEY), ota, PRODUCT)
-    (OUT/"fm1-diag.fwsc").write_bytes(pkg)
-    (OUT/"fm1-diag.symbols").write_text(syms)
+    (OUT/f"{NAME}.fwsc").write_bytes(pkg)
+    (OUT/f"{NAME}.symbols").write_text(syms)
     record = {
         "product": PRODUCT,
         "felucca_commit": "1e838e17e170b20ff09b9660c9a7171aadfc5dca",
@@ -248,11 +261,11 @@ def main():
         "compiler_sha256": hashlib.sha256((toolchain()/"pi32v2/bin/clang").read_bytes()).hexdigest(),
         "files": {name: {"bytes": (OUT/name).stat().st_size,
                          "sha256": hashlib.sha256((OUT/name).read_bytes()).hexdigest()}
-                  for name in ("fm1-diag.bin", "fm1-diag.elf", "fm1-diag.fwsc", "loader/ota.bin")},
+                  for name in (f"{NAME}.bin", f"{NAME}.elf", f"{NAME}.fwsc", "loader/ota.bin")},
         "sources": {str(p.relative_to(SRC)): hashlib.sha256(p.read_bytes()).hexdigest()
                     for p in sorted(FW.rglob("*")) if p.is_file()},
     }
-    (OUT/"fm1-diag.json").write_text(json.dumps(record, indent=2)+"\n")
+    (OUT/f"{NAME}.json").write_text(json.dumps(record, indent=2)+"\n")
     print(f"Diagnostic package: {len(pkg)} bytes, identity {PRODUCT}")
 
 if __name__ == "__main__":

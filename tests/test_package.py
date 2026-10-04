@@ -12,16 +12,16 @@ import fm1_install as install
 import fm1pkg_make as pkg
 
 class PackageTests(unittest.TestCase):
-    def test_artifact_integrity(self):
-        manifest = json.loads((ROOT/'build/fm1-diag.json').read_text())
+    def check_artifact_integrity(self, base, name):
+        manifest = json.loads((base/f'{name}.json').read_text())
         for name, record in manifest['files'].items():
-            data = (ROOT/'build'/name).read_bytes()
+            data = (base/name).read_bytes()
             self.assertEqual(len(data), record['bytes'], name)
             self.assertEqual(hashlib.sha256(data).hexdigest(), record['sha256'], name)
 
-    def test_package_contains_built_app(self):
-        product, image = install.load_package(ROOT/'build/fm1-diag.fwsc', False)
-        self.assertEqual(product, 'FM-1_980')
+    def check_package_contains_built_app(self, base, name, identity):
+        product, image = install.load_package(base/f'{name}.fwsc', False)
+        self.assertEqual(product, identity)
         header = bytearray(image[:0x40])
         pkg.enc(header, 0, len(header))
         self.assertEqual(pkg.crc16(header[2:]), struct.unpack_from('<H', header)[0])
@@ -39,9 +39,23 @@ class PackageTests(unittest.TestCase):
         self.assertIsNotNone(flash_off)
         area = bytearray(image[flash_off+0x4000:flash_off+0x93000])
         pkg.sfc(area, 0, len(area), 0, pkg.KEY)
-        app = (ROOT/'build/fm1-diag.bin').read_bytes()
+        app = (base/f'{name}.bin').read_bytes()
         self.assertEqual(area[0x120:0x120+len(app)], app)
         self.assertEqual(area[0x120+len(app):0x120+pkg.APP_SLOT], b'\xff'*(pkg.APP_SLOT-len(app)))
+
+    def test_artifact_integrity(self):
+        self.check_artifact_integrity(ROOT/'build', 'fm1-diag')
+
+    def test_package_contains_built_app(self):
+        self.check_package_contains_built_app(ROOT/'build', 'fm1-diag', 'FM-1_980')
+
+    def test_hardware_display_artifact_integrity(self):
+        self.check_artifact_integrity(ROOT/'build/display', 'firmware')
+
+    def test_hardware_display_package_contains_built_app(self):
+        self.check_package_contains_built_app(ROOT/'build/display', 'firmware', 'FM-1_981')
+        self.assertEqual((ROOT/'build/loader/ota.bin').read_bytes(),
+                         (ROOT/'build/display/loader/ota.bin').read_bytes())
 
 if __name__ == '__main__':
     unittest.main()

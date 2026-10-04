@@ -1,10 +1,26 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
-/* Emulator-only display extension to foundation.S. Every visible pixel is
- * drawn by guest instructions through the same LCD SPI/DMA interface as
- * Felucca. No host rendering hooks, updater, or hardware recovery. */
+/* Shared display renderer. The standalone foundation build is emulator-only.
+ * FM1_HARDWARE_DISPLAY exports returning init/frame calls for the diagnostic
+ * app, which owns hardware startup, input scanning, USB, watchdog and recovery.
+ * All pixels are drawn through LCD SPI/DMA; there are no host drawing hooks. */
     .section .text,"ax",@progbits
+.macro save
+    [--sp] = {rets, r7-r4}
+    [--sp] = {r3-r0}
+.endm
+.macro restore
+    {r3-r0} = [sp++]
+    {pc, r7-r4} = [sp++]
+.endm
+#ifdef FM1_HARDWARE_DISPLAY
+    .globl display_init
+display_init:
+    save
+#else
     .globl display_main
 display_main:
+#endif
+#ifndef FM1_HARDWARE_DISPLAY
     r0 = 0x51020
     r1 = 0x10
     [r0 + 0] = r1
@@ -33,6 +49,7 @@ display_main:
     call lcd_command
     r0 = 0x13
     call lcd_command
+#endif
     r0 = 0
     r1 = 0
     r2 = 240
@@ -56,6 +73,12 @@ display_main:
     call lcd_text
     r0 = 0x29
     call lcd_command
+#ifdef FM1_HARDWARE_DISPLAY
+    restore
+    .globl display_frame
+display_frame:
+    save
+#endif
 .Lframe:
     r0 = 0x10800
     r0 = [r0 + 4]
@@ -65,6 +88,7 @@ display_main:
     r2 = 80
     call lcd_hex
 
+#ifndef FM1_HARDWARE_DISPLAY
     /* Rescan all columns. PA2 stays low: active-low display backlight. */
     r0 = 0x50000
     r5 = matrix_results
@@ -97,6 +121,7 @@ display_main:
     r7 += -1
     if (r7 != 0) goto .Lcolumn
 
+#endif
     r5 = matrix_results
     r6 = 24
     r7 = 11
@@ -128,27 +153,37 @@ display_main:
     [r0 + 0] = r1
     .globl display_frame_done
 display_frame_done:
+#ifdef FM1_HARDWARE_DISPLAY
+    restore
+#else
     goto .Lframe
+#endif
 
 /* Helpers preserve all eight working registers and the guest return address. */
-.macro save
-    [--sp] = {rets, r7-r4}
-    [--sp] = {r3-r0}
-.endm
-.macro restore
-    {r3-r0} = [sp++]
-    {pc, r7-r4} = [sp++]
-.endm
 lcd_command:
     save
     r1 = 0x50080
+#ifdef FM1_HARDWARE_DISPLAY
+    r2 = [r1 + 0]
+    r3 = 0xFFFFFE7F
+    r2 &= r3
+#else
     r2 = 0
+#endif
     [r1 + 0] = r2
     goto .Lspi_byte
 lcd_byte:
     save
     r1 = 0x50080
+#ifdef FM1_HARDWARE_DISPLAY
+    r2 = [r1 + 0]
+    r3 = 0xFFFFFF7F
+    r2 &= r3
+    r3 = 0x100
+    r2 |= r3
+#else
     r2 = 0x100
+#endif
     [r1 + 0] = r2
 .Lspi_byte:
     r1 = 0x11D00
@@ -172,7 +207,15 @@ lcd_wait:
 lcd_dma:
     save
     r2 = 0x50080
+#ifdef FM1_HARDWARE_DISPLAY
+    r3 = [r2 + 0]
+    r4 = 0xFFFFFF7F
+    r3 &= r4
+    r4 = 0x100
+    r3 |= r4
+#else
     r3 = 0x100
+#endif
     [r2 + 0] = r3
     r2 = 0x11D00
     r3 = 0x4021

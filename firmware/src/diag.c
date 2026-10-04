@@ -30,6 +30,19 @@ extern void fm1_probe(uint32_t *out);
 extern void isr_timer5(void);
 static uint8_t flash_ok;
 static uint32_t runs;
+#ifdef FM1_HARDWARE_DISPLAY
+extern void display_init(void), display_frame(void);
+extern volatile uint32_t display_frames, display_ticks;
+uint32_t matrix_results[11];
+static void display_task(void) {
+    uint32_t i, f=irq_save();
+    /* The timer ISR owns the shift register. Snapshot its raw scan instead
+     * of racing it with a second bit-banged scan in the display renderer. */
+    for(i=0;i<11;i++) matrix_results[i]=1u|((~fm1_in.raw[i]&0x1eu)<<4);
+    irq_restore(f);
+    lcd_sync(); display_frame();
+}
+#endif
 /* A tiny hex font avoids the synth's font-generation and graphics dependencies. */
 static const uint8_t hexfont[16][5] = {
  {31,17,17,17,31},{4,12,4,4,14},{30,1,14,16,31},{30,1,14,1,30},
@@ -43,9 +56,13 @@ static void screen_hex(uint32_t y, uint32_t v) {
           hexfont[(v>>(28-4*n))&15][row]&(16>>col)?0xffff:0);
 }
 static void status(void) {
+#ifdef FM1_HARDWARE_DISPLAY
+    lcd_sync(); display_init();
+#else
     lcd_fill(0,0,240,240,0);
     lcd_fill(0,0,240,12,flash_ok?0x07e0:0xffe0);
     screen_hex(32,0xD1A60001); screen_hex(72,runs);
+#endif
 }
 static void fm1_fault(const fm1_crash_t *c) {
     fm1_audio_stop();
@@ -118,6 +135,11 @@ static void cdc_task(void) {
             else if(equal(con.line,"info")) {
                 con_puts("FM-1 DIAG 1 " FELUCCA_ID "\r\nprobe_sha256 " PROBE_SHA256 "\r\nflash ");
                 con_dec(flash_ok);con_puts("\r\n");
+#ifdef FM1_HARDWARE_DISPLAY
+                con_puts("display_frames ");con_dec(display_frames);
+                con_puts("\r\ndisplay_ticks ");con_hex(display_ticks,8);
+                con_puts("\r\n");
+#endif
             } else if(equal(con.line,"uboot")) recovery();
             else if(con.len) con_puts("ERROR: use probe, info, or uboot\r\n");
             con.len=0;
@@ -125,8 +147,31 @@ static void cdc_task(void) {
         else if(c>=32 && con.len<CON_LINE-1) con.line[con.len++]=c;
     }
 }
+#ifdef FM1_HARDWARE_DISPLAY
+static void input_debug(void) {
+    static uint32_t previous_buttons, previous_notes;
+    uint32_t f=irq_save(), buttons=fm1_in.buttons, notes=fm1_in.notes;
+    irq_restore(f);
+    if(cdc.dtr) {
+        uint32_t id;
+        for(id=0;id<41;id++) {
+            uint32_t current=id<14?buttons:notes;
+            uint32_t previous=id<14?previous_buttons:previous_notes;
+            uint32_t bit=1u<<(id<14?id:id-14);
+            if((current^previous)&bit) {
+                con_puts("KEY ");con_dec(id);
+                con_puts(current&bit?" down\r\n":" up\r\n");
+            }
+        }
+    }
+    previous_buttons=buttons;previous_notes=notes;
+}
+#endif
 static void fm1_main(void) {
     uint32_t f,held=0;
+#ifdef FM1_HARDWARE_DISPLAY
+    uint32_t last_frame=0;
+#endif
     fm1_audio_stop();
     f=irq_save();flash_ok=FL_FAR(fl_jedec_ram)()==0x856014u;irq_restore(f);
     if(flash_ok) {fl_plain_window_init();ota_boot_cleanup();}
@@ -141,6 +186,12 @@ static void fm1_main(void) {
         if(usb.ota_req) {usb.ota_req=0;if(flash_ok)ota_session();status();}
         if(usb.uboot_req) recovery();
         cdc_task();
+#ifdef FM1_HARDWARE_DISPLAY
+        input_debug();
+        if((uint32_t)(fm1_ms-last_frame)>=100u) {
+            last_frame=fm1_ms;display_task();
+        }
+#endif
     }
 }
 #include "startup.c"

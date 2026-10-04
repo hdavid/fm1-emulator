@@ -1,40 +1,19 @@
-FM-1 graphical display milestone, 2026-10-04
+FM-1 shared hardware display application, 2026-10-04
 
-Guest: build/display/firmware.elf / firmware.bin
-Source: firmware/foundation.S with FM1_DISPLAY, display.S, probe.S
-Rebuild: mise run build-display (vendor compiler via Docker on macOS)
+Build: mise run build-display
 Launch: ./emulator build/display/firmware.elf
+Package: build/display/firmware.fwsc, FM-1_981
+Application size: 17056 bytes. Hashes: firmware.json.
 
-Raw application: 2,700 bytes
-ELF SHA256: 929077b8a5e30e0ea19bbc3f800ac857906265acefc10f9f7ce42a366b525cbb
-BIN SHA256: 3bc59ff7d09de123174b49ea786582a1e137b2e1609074b5189c9fb024f19ba2
-First complete frame: 84,921 instructions, 1 guest interrupt
-First observed TIMER4 value: 898728
-Original foundation BIN SHA256 remains:
-d22ba9de32a8ba3cfee7aec804468d7dea2db8a7c83d0c0707f996cbcfff8ac7
+The ELF reconstructs the exact application bytes in the flash package.
+Startup, watchdog, recovery, USB CDC, MIDI updater, and input scanning use
+Felucca-derived hardware code. The renderer is shared assembly.
+Guest button debug messages traverse USB CDC endpoint DMA to emulator stdout.
+Emulator boot/USB/display/button press/release integration test passes.
+Package checksums and embedded application comparison pass.
+Physical installation and post-flash comparison pending at this commit.
 
-Verified:
-- 24 core Rust integration tests and 3 GUI integration tests pass.
-- RGB565 colors, window wrap, split pixels, SPI completion/acknowledgment,
-  chip select, reset, sleep, display enable, and backlight gating.
-- Invalid SRAM DMA bounds and unsupported display operations fault.
-- Guest changes its timer readout and pressed/released key-matrix pixels.
-- Raw and ELF applications render identical guest LCD output.
-- GUI keyboard input reaches the guest's LCD through GPIO scanning;
-  focus loss releases input. Pause and restart affect the actual CPU.
-- Unsupported diagnostic firmware stops without inventing screen contents.
-- cargo fmt --check and Clippy with all targets/gui and -D warnings pass.
-- Native macOS window visually inspected: device illustration, guest LCD,
-  Pause/Resume and Restart. Counter is buffered in guest SRAM before DMA.
-- Native error view verified with the unchanged diagnostic ELF. Launcher
-  accepts a path containing spaces from outside the project directory.
-- Rebuilt original foundation artifacts reproduce without Git differences.
-
-Scope:
-Six of ten agreed foundations now exercised: CPU subset, memory/startup,
-timers, IRQ63, controls, and LCD. This is not 60% of musical features.
-SPI completion and execution speed are functional, not cycle-accurate.
-Only the LCD command subset used here/the inherited LCD HAL is supported.
-Knobs are decorative; no audio, USB transport, NOR flash, or full Felucca boot.
-No new physical-device comparison or flashing was performed in this step.
-The new bare guest has no updater or recovery and MUST NOT be flashed.
+CPU timing is functional, not calibrated; one 24 MHz oscillator tick per
+instruction bundle. SPI NOR reads and USB CDC host support are partial;
+NOR writes, USB MIDI host transport, audio/DMA and full Felucca boot remain.
+Historical bare LCD test fixtures are in tests/fixtures/display.
