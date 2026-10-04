@@ -1,10 +1,10 @@
 # Felucca boot investigation (2026-10-04)
 
-**Compatibility: partially functioning.** On 2026-10-05 the user reported that
-clicking FX in the local `felucca.elf` stops emulation with unsupported
-instruction `0xedd4` at PC `0x020c0516`. This path is not covered by the bounded
-boot, note and ENV checks below. The FX failure has not yet been reproduced
-with the published package.
+**Compatibility: partially functioning.** The reported FX failure was fixed on
+2026-10-05. Both the published package and local `felucca.elf` now render FX and
+continue servicing audio DMA and the watchdog. Other paths remain incomplete:
+the local presets page stopped on opcode `0xe1c8` at PC `0x0200b6f4` during the
+desktop check. This separate failure is not covered by the tests below.
 
 Full, unchanged Felucca now boots into its main screen. The published 0.9-beta
 application and the local source build both run for 100 million instructions
@@ -18,6 +18,31 @@ This is bounded boot/input validation, not full synth compatibility. Other
 engines and UI paths may encounter more instruction gaps. Flash programming,
 flash persistence, rotary input, USB MIDI host input and CDC host input remain.
 No Felucca application bytes, source, feature flags or watchdog were patched.
+
+## FX failure (resolved on 2026-10-05)
+
+The local ELF reproduced the reported fault after 111,815,666 instructions at
+PC `0x0200c516`, opcode `0xedd4`. Vendor disassembly identifies the instruction
+as `r4 = h[r6++=2](s)`: read a signed halfword, then advance the pointer by two.
+Felucca's `graph_fx` uses it to read the four effect parameters. The emulator
+already supported the unsigned form; `831c405` adds the signed form with the
+same address and increment behavior. The earlier recorded PC `0x020c0516` was
+a transcription error.
+
+A CPU regression checks negative and positive values, sign extension and
+read-before-increment behavior. The existing external firmware tests now press
+FX through the GPIO matrix, require a changed guest screen, and check continued
+LCD writes, audio DMA and watchdog feeds:
+
+| Firmware | Instructions | Continued activity |
+| --- | --- | --- |
+| Published 0.9-beta package | 133,000,000 | 1,754,804 LCD pixels, 761 audio halves, 177 watchdog feeds |
+| Local source ELF | 145,000,000 | 199 UI frames, 826 audio halves, 200 watchdog feeds; HOME and ENV also selected successfully |
+
+The published-package check runs in the existing release workflow. These are
+bounded checks of unchanged firmware, not validation of every synth feature.
+The rebuilt macOS window was also checked by clicking FX: it showed the four
+effect values and bars while execution remained Running.
 
 ## Inputs and provenance
 
@@ -149,13 +174,14 @@ functional, using one oscillator tick per completed instruction bundle.
 
 The external full-firmware test is deliberately opt-in: no Felucca application
 or assets are redistributed. It checks guest breadcrumbs, debounced note state,
-nonzero stereo output, ENV page selection, LCD/ADC/USB activity and watchdog
-service. Run it after building the local source:
+nonzero stereo output, FX rendering, HOME/ENV selection, LCD/ADC/USB activity and
+watchdog service. Run it after building the local source:
 
 ```sh
 FELUCCA_ELF="$HOME/src/Felucca/build/felucca.elf" mise exec -- cargo test \
   --manifest-path rust-emulator/Cargo.toml --release --locked --offline \
-  --test felucca -- --ignored --nocapture
+  --test felucca unchanged_felucca_boots_and_responds_to_a_matrix_note \
+  -- --ignored --nocapture
 ```
 
 On macOS, launching from a restricted automation sandbox can abort in

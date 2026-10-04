@@ -62,7 +62,7 @@ opens the emulator. On Windows, run
 Building the emulator does not require the vendor firmware compiler or Docker.
 
 [GitHub Actions](.github/workflows/emulator.yml) tests and builds all four
-platforms, including a boot and note-rendering test using the checksum-pinned
+platforms, including boot, note-rendering and FX checks using the checksum-pinned
 Felucca release. Successful push builds publish a release tagged with the commit
 SHA, with archives and SHA256 checksums. Pull requests run the same checks.
 
@@ -73,17 +73,18 @@ other firmware paths can stop emulation.
 
 | Firmware | Status | Verified behavior / blocker |
 | --- | --- | --- |
-| Felucca 0.9-beta (`FM-1_909`, `.fwsc`) | Partial | LCD, USB console, watchdog and note audio/DMA pass; full UI coverage remains incomplete |
-| Felucca source build (`1e838e1`, `.elf`) | Partial | Boot, note press/release and ENV pass; clicking FX stops emulation |
+| Felucca 0.9-beta (`FM-1_909`, `.fwsc`) | Partial | LCD, USB console, watchdog, note audio/DMA and FX pass; full UI coverage remains incomplete |
+| Felucca source build (`1e838e1`, `.elf`) | Partial | Boot, note press/release, FX, HOME and ENV pass; presets can still stop emulation |
 | Official `FM-1_015` (`FM-1.fwsc`) | Fails | Missing CPU instruction during startup; no screen yet |
 | Baud Girl `FM-1_093` (`FM-1_093.fwsc`) | Fails | Same startup blocker; no screen yet |
 
-The reported FX failure in the source build is an unsupported instruction
-`0xedd4` at PC `0x020c0516`. The existing boot/note tests do not cover this path.
+FX now opens and renders in both Felucca builds. A separate unsupported
+instruction remains on the local build's presets path; see the
+[Felucca investigation](rust-emulator/FELUCCA.md).
 
 ## Still to implement
 
-- Remaining CPU instructions and peripherals, including Felucca's FX path and official/Baud Girl startup.
+- Remaining CPU instructions and peripherals, including other Felucca paths and official/Baud Girl startup.
 - Host audio playback, rotary controls, USB MIDI and serial input.
 - Flash erase/program and persistence, plus fuller encryption, interrupt and timing behavior.
 
