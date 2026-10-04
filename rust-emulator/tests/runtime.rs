@@ -88,6 +88,23 @@ fn register_pairs_move_both_words_without_clobbering_the_source() {
         }
     }
 }
+
+#[test]
+fn signed_division_truncates_toward_zero_and_rejects_undefined_cases() {
+    for (left, right, expected) in [(128, 2, 64), (-9, 2, -4), (9, -2, -4), (-9, -2, 4)] {
+        let mut c = cpu(&[0xe1f4, 0x0101]); // r0 = r0 / r1 (s)
+        c.r[0] = left as u32;
+        c.r[1] = right as u32;
+        c.step().unwrap();
+        assert_eq!(c.r[0], expected as u32);
+    }
+    for (left, right) in [(1, 0), (i32::MIN, -1)] {
+        let mut c = cpu(&[0xe1f4, 0x0101]);
+        c.r[0] = left as u32;
+        c.r[1] = right as u32;
+        assert!(c.step().is_err());
+    }
+}
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {

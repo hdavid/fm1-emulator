@@ -200,11 +200,20 @@ pub(crate) fn execute(
         } else if h == 0xe1f0 && x & 15 == 0 {
             cpu.r[d] = cpu.r[s].wrapping_mul(cpu.r[c]);
             op = "multiply_extended";
-        } else if h == 0xe1f4 && x & 15 == 0 {
-            cpu.r[d] = cpu.r[s]
-                .checked_div(cpu.r[c])
-                .ok_or(Fault::Unsupported { pc, word: h as u16 })?;
-            op = "divide_unsigned";
+        } else if h == 0xe1f4 && x & 15 <= 1 {
+            cpu.r[d] = if x & 1 == 0 {
+                cpu.r[s].checked_div(cpu.r[c])
+            } else {
+                (cpu.r[s] as i32)
+                    .checked_div(cpu.r[c] as i32)
+                    .map(|v| v as u32)
+            }
+            .ok_or(Fault::Unsupported { pc, word: h as u16 })?;
+            op = if x & 1 == 0 {
+                "divide_unsigned"
+            } else {
+                "divide_signed"
+            };
         } else if h == 0xe435 && x & 15 == 0 {
             cpu.r[d] = cpu.r[s].min(cpu.r[c]);
             op = "minimum_unsigned";
