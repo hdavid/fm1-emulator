@@ -26,7 +26,11 @@ pub struct Bus {
     pub flash: Vec<u8>,
     pub devices: Devices,
     pub lcd: Lcd,
+    pub system: crate::system::System,
     ram: Vec<u8>,
+    guards: crate::guards::Guards,
+    nor: crate::nor::Nor,
+    pub usb: crate::usb::Usb,
 }
 
 impl Bus {
@@ -38,7 +42,11 @@ impl Bus {
             flash,
             devices: Devices::default(),
             lcd: Lcd::default(),
+            system: Default::default(),
             ram: vec![0; RAM_SIZE],
+            guards: Default::default(),
+            nor: Default::default(),
+            usb: Default::default(),
         })
     }
 
@@ -88,6 +96,18 @@ impl Bus {
         } else if let Some(offset) = Self::offset(address, size, RAM, self.ram.len()) {
             &self.ram[offset..offset + size]
         } else {
+            if let Some(value) = self.usb.read(address) {
+                return Ok(value);
+            }
+            if let Some(value) = self.nor.read(address) {
+                return Ok(value);
+            }
+            if let Some(value) = self.guards.read(address) {
+                return Ok(value);
+            }
+            if let Some(value) = self.system.read(address) {
+                return Ok(value);
+            }
             if let Some(value) = self.lcd.read(address & !3) {
                 return if size == 4 {
                     Ok(value)
@@ -128,6 +148,24 @@ impl Bus {
 
     pub fn write(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
         Self::check(address, size, "write")?;
+        if let Some(result) = self.usb.write(address, value, &mut self.ram) {
+            return result.map_err(|reason| Self::fault(address, size, "write", reason));
+        }
+        if address == 0x500c0 {
+            self.nor.chip_select(value & 1 == 0);
+        }
+        if let Some(result) = self.nor.write(address, value) {
+            return result.map_err(|reason| Self::fault(address, size, "write", reason));
+        }
+        self.guards
+            .check_write(address, size)
+            .map_err(|reason| Self::fault(address, size, "write", reason))?;
+        if let Some(result) = self.guards.write(address, value) {
+            return result.map_err(|reason| Self::fault(address, size, "write", reason));
+        }
+        if let Some(result) = self.system.write(address, value) {
+            return result.map_err(|reason| Self::fault(address, size, "write", reason));
+        }
         if self.lcd.read(address & !3).is_some() {
             if size != 4 {
                 return Err(Self::fault(
@@ -173,6 +211,12 @@ impl Bus {
         })?;
         self.ram[offset..offset + size].copy_from_slice(&value.to_le_bytes()[..size]);
         Ok(())
+    }
+
+    pub fn advance_usb(&mut self, ticks: u32) -> Result<(), AccessFault> {
+        self.usb
+            .advance(ticks, &mut self.ram)
+            .map_err(|reason| Self::fault(0x11800, 4, "USB host", reason))
     }
 
     pub fn screen_visible(&self) -> bool {

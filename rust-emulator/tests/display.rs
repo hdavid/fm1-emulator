@@ -5,7 +5,7 @@ use std::path::Path;
 fn firmware(extension: &str) -> Firmware {
     Firmware::load(
         &Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(format!("../build/display/firmware.{extension}")),
+            .join(format!("../tests/fixtures/display/firmware.{extension}")),
     )
     .unwrap()
 }

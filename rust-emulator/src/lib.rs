@@ -28,3 +28,13 @@ pub const NAMES: [&str; 12] = [
     "loop_sum",
     "stack",
 ];
+
+mod extended;
+
+pub mod system;
+
+mod guards;
+
+mod nor;
+
+pub mod usb;

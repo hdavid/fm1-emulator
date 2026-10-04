@@ -44,6 +44,8 @@ pub struct Cpu {
     pub interrupts_enabled: bool,
     pub irq_entries: u64,
     in_interrupt: bool,
+    predicate_skip: Option<(u32, u32)>,
+    irq_predicate: Option<(u32, u32)>,
 }
 
 impl Cpu {
@@ -57,16 +59,18 @@ impl Cpu {
             interrupts_enabled: false,
             irq_entries: 0,
             in_interrupt: false,
+            predicate_skip: None,
+            irq_predicate: None,
         }
     }
 
-    fn read(&self, address: u32, size: usize) -> Result<u32, Fault> {
+    pub(crate) fn read(&self, address: u32, size: usize) -> Result<u32, Fault> {
         self.bus
             .read(address, size)
             .map_err(|fault| Fault::Access { pc: self.pc, fault })
     }
 
-    fn write(&mut self, address: u32, value: u32) -> Result<(), Fault> {
+    pub(crate) fn write(&mut self, address: u32, value: u32) -> Result<(), Fault> {
         self.bus
             .write(address, value, 4)
             .map_err(|fault| Fault::Access { pc: self.pc, fault })
@@ -86,11 +90,81 @@ impl Cpu {
     }
 
     pub fn step(&mut self) -> Result<&'static str, Fault> {
+        if let Some((at, end)) = self.predicate_skip {
+            if self.pc == at {
+                self.pc = end;
+                self.predicate_skip = None;
+            }
+        }
         let pc = self.pc;
         let h = self
             .bus
             .fetch(pc)
             .map_err(|fault| Fault::Access { pc, fault })? as u32;
+        let parallel = h >> 13 == 6 || h & 0xf800 == 0xf000;
+        let op = if parallel {
+            let length = if h >> 13 == 6 { 2 } else { 4 };
+            let normalized = if length == 2 { h & 0x1fff } else { h & !0x1000 };
+            self.pc = pc + length;
+            let following = self.read(self.pc, 2)?;
+            self.execute(following)?;
+            let continuation = self.pc;
+            self.pc = pc;
+            let op = self.execute(normalized)?;
+            self.pc = continuation;
+            op
+        } else {
+            self.execute(h)?
+        };
+        self.steps += 1;
+        self.bus.devices.advance(OSC_TICKS_PER_INSTRUCTION);
+        self.bus
+            .system
+            .advance(OSC_TICKS_PER_INSTRUCTION)
+            .map_err(|reason| Fault::Access {
+                pc,
+                fault: AccessFault {
+                    address: 0x13e08,
+                    size: 4,
+                    operation: "watchdog",
+                    reason,
+                },
+            })?;
+        self.bus
+            .advance_usb(OSC_TICKS_PER_INSTRUCTION)
+            .map_err(|fault| Fault::Access { pc, fault })?;
+        self.dispatch_interrupt()?;
+        Ok(op)
+    }
+
+    pub(crate) fn conditional(&mut self, test: bool, counts: u32) -> Result<u32, Fault> {
+        let mut cursor = self.pc + 4;
+        let mut then_end = cursor;
+        let then_count = (counts >> 14) + 1;
+        let else_count = (counts >> 12) & 3;
+        for i in 0..then_count + else_count {
+            let h = self.read(cursor, 2)?;
+            cursor += if matches!(h & 0xffe0, 0xffc0 | 0xffe0) {
+                6
+            } else if h >> 13 == 7 {
+                4
+            } else {
+                2
+            };
+            if i + 1 == then_count {
+                then_end = cursor;
+            }
+        }
+        if test {
+            self.predicate_skip = Some((then_end, cursor));
+            Ok(self.pc + 4)
+        } else {
+            Ok(then_end)
+        }
+    }
+
+    fn execute(&mut self, h: u32) -> Result<&'static str, Fault> {
+        let pc = self.pc;
         let a = (h & 7) as usize;
         let b = ((h >> 4) & 7) as usize;
         let mut next = pc.wrapping_add(2);
@@ -142,7 +216,7 @@ impl Cpu {
             next = pc + 4;
             op = "mov_mask";
         } else if h & 0xfff0 == 0xe040 {
-            self.r[(h & 15) as usize] = self.read(pc + 2, 2)?;
+            self.r[(h & 15) as usize] = signed(self.read(pc + 2, 2)?, 16) as u32;
             next = pc + 4;
             op = "mov_imm16";
         } else if h & 0xe0c0 == 0x2040 {
@@ -257,6 +331,12 @@ impl Cpu {
                 self.push(self.r[n])?;
             }
             op = "push_rets_regs";
+        } else if h & 0xfff0 == 0x0430 && h & 15 >= 4 {
+            for n in 4..=(h & 15) as usize {
+                self.r[n] = self.pop()?;
+            }
+            self.sr[3] = self.pop()?;
+            op = "pop_rets_regs";
         } else if h & 0xfff0 == 0x0450 && h & 15 >= 4 {
             for n in 4..=(h & 15) as usize {
                 self.r[n] = self.pop()?;
@@ -318,6 +398,7 @@ impl Cpu {
             self.sr[13] = self.sr[14];
             self.sr[14] = self.sr[12];
             self.in_interrupt = false;
+            self.predicate_skip = self.irq_predicate.take();
             self.interrupts_enabled = true;
             op = "rti";
         } else if h == 0x0060 {
@@ -328,13 +409,13 @@ impl Cpu {
             op = "sti";
         } else if h == 0x0020 || h == 0x0000 {
             op = if h == 0x0020 { "csync" } else { "nop" };
+        } else if let Some((destination, name)) = crate::extended::execute(self, h, pc)? {
+            next = destination;
+            op = name;
         } else {
             return Err(Fault::Unsupported { pc, word: h as u16 });
         }
         self.pc = next;
-        self.steps += 1;
-        self.bus.devices.advance(OSC_TICKS_PER_INSTRUCTION);
-        self.dispatch_interrupt()?;
         Ok(op)
     }
 
@@ -352,6 +433,7 @@ impl Cpu {
             self.sr[14] = self.sr[13];
             self.pc = handler;
             self.in_interrupt = true;
+            self.irq_predicate = self.predicate_skip.take();
             self.interrupts_enabled = false;
             self.irq_entries += 1;
         }

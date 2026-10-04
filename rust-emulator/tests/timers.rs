@@ -115,7 +115,7 @@ fn an_interrupt_with_a_missing_vector_fails_visibly() {
     cpu.interrupts_enabled = true;
     cpu.bus.write(IRQ_CONFIG + 7 * 4, 0x1000_0000, 4).unwrap();
     cpu.bus.write(TIMER5 + 8, 1, 4).unwrap();
-    cpu.bus.write(TIMER5, 0x4019, 4).unwrap();
+    cpu.bus.write(TIMER5, 0x4009, 4).unwrap();
     assert!(
         matches!(cpu.step(),Err(Fault::Access { fault, .. }) if fault.operation=="fetch" && fault.address==0)
     );

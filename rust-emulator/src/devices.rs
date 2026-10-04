@@ -6,7 +6,7 @@ pub const TIMER5: u32 = 0x10900;
 pub const IRQ_CONFIG: u32 = 0x01ee_f100;
 pub const IRQ_PENDING: u32 = 0x01ee_f180;
 pub const TIMER5_IRQ: usize = 63;
-pub const OSC_TICKS_PER_INSTRUCTION: u32 = 24;
+pub const OSC_TICKS_PER_INSTRUCTION: u32 = 1;
 
 #[derive(Default)]
 pub struct Timer {

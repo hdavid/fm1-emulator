@@ -145,7 +145,7 @@ fn branch_and_instruction_limits_do_not_succeed_silently() {
         Err(Fault::Limit { pc: XIP, limit: 3 })
     );
     assert!(matches!(
-        cpu(&[0xff, 0xff]).step(),
+        cpu(&[0xff, 0x00]).step(),
         Err(Fault::Unsupported { .. })
     ));
     assert!(matches!(
@@ -174,17 +174,14 @@ fn malformed_elf_is_rejected_without_panicking() {
 }
 
 #[test]
-fn diagnostic_startup_stops_at_an_unimplemented_instruction() {
+fn diagnostic_startup_runs_past_the_original_blocker() {
     let firmware = Firmware::load(&root().join("build/fm1-diag.elf")).unwrap();
     let mut cpu = Cpu::new(Bus::new(firmware.image).unwrap(), firmware.entry);
     cpu.r[0] = 0x01c7_fe08;
-    match cpu.run(None, 100, None).unwrap_err() {
-        Fault::Unsupported { pc, word } => {
-            assert_eq!(pc, 0x0200_1db6);
-            assert_eq!(word, 0xe160);
-        }
-        fault => panic!("unexpected fault: {fault}"),
-    }
-    assert_eq!(cpu.steps, 18);
+    assert!(matches!(
+        cpu.run(None, 1000, None),
+        Err(Fault::Limit { .. })
+    ));
+    assert!(cpu.bus.system.watchdog_feeds > 0);
     assert_eq!(cpu.bus.read(0x01c0_7f28, 4).unwrap(), 0x01c7_fe08);
 }
