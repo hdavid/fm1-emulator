@@ -134,6 +134,14 @@ impl Nor {
             let len = self.command.len();
             value = 255;
             match self.command[0] {
+                0x4b => {
+                    // Puya P25Q80H: four dummy bytes then a 128-bit ID.
+                    // Stable emulator chip identity, not the physical unit's ID.
+                    const UID: [u8; 16] = *b"FM1-EMU-NOR-0001";
+                    if len > 5 {
+                        value = UID.get(len - 6).copied().unwrap_or(255) as u32;
+                    }
+                }
                 0x9f => {
                     if len > 1 {
                         value = [0x85, 0x60, 0x14].get(len - 2).copied().unwrap_or(255);
@@ -165,6 +173,23 @@ impl Nor {
 #[cfg(test)]
 mod tests {
     use super::Nor;
+
+    #[test]
+    fn unique_id_consumes_four_dummy_bytes_and_restarts_on_chip_select() {
+        let mut nor = Nor::default();
+        for _ in 0..2 {
+            nor.chip_select(true);
+            for byte in [0x4b, 0, 0, 0, 0] {
+                nor.write(0x11c08, byte).unwrap().unwrap();
+                assert_eq!(nor.read(0x11c08), Some(255));
+            }
+            for &byte in b"FM1-EMU-NOR-0001" {
+                nor.write(0x11c08, 255).unwrap().unwrap();
+                assert_eq!(nor.read(0x11c08), Some(byte as u32));
+            }
+            nor.chip_select(false);
+        }
+    }
 
     #[test]
     fn spi_and_plain_xip_read_the_same_physical_bytes() {
