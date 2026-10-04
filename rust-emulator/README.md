@@ -4,6 +4,10 @@ Rust 1.91.1 is managed by the root `mise.toml`. The interpreter executes vendor-
 Rust dependencies. The optional `gui` feature uses eframe/egui 0.31.1 for a
 native OpenGL window; the version and transitive dependencies are locked.
 
+The [full Felucca boot investigation](FELUCCA.md) records the verified firmware
+inputs, startup failures, decoder fixes, and current user-flash blocker. It also
+documents the bounded `diagnose` runner for symbol and peripheral reports.
+
 On a fresh checkout, fetch the locked dependency metadata before offline tests:
 
 ```sh
