@@ -239,6 +239,9 @@ pub(crate) fn execute(
         } else if h == 0xe070 && x & 255 == 0 {
             cpu.r[d] = cpu.r[c].swap_bytes();
             op = "reverse_bytes";
+        } else if h & 0xfff0 == 0xe0f0 {
+            cpu.r[n] = cpu.r[d].wrapping_sub(packed(x));
+            op = "subtract_packed_immediate";
         } else if h & 0xfff0 == 0xe0a0 {
             cpu.r[n] = packed(x).wrapping_sub(cpu.r[d]);
             op = "reverse_subtract";

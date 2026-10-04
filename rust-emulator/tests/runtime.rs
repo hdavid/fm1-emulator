@@ -316,6 +316,16 @@ fn signed_immediate_conditional_adds_a_minus_only_for_negative_numbers() {
     }
 }
 
+#[test]
+fn packed_subtraction_centers_the_oscillator_waveform() {
+    for (value, expected) in [(32768, 0), (0, 0xffff8000), (65535, 32767)] {
+        let mut c = cpu(&[0xe0f4, 0x4c00]); // r4 = r4 - 0x8000
+        c.r[4] = value;
+        c.step().unwrap();
+        assert_eq!(c.r[4], expected);
+    }
+}
+
 fn p33(c: &mut Bus, command: u8, address: u8, value: u8) {
     c.write(0x13e08, 1, 4).unwrap();
     for byte in [command, address, value] {
