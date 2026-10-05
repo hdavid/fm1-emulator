@@ -3,6 +3,7 @@ use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Rect, Sense, Strok
 use fm1_emu::encoders::knob;
 #[cfg(test)]
 use fm1_emu::{bus::Bus, cpu::Cpu, firmware::Firmware};
+mod host_audio;
 mod worker;
 use std::{
     path::PathBuf,
@@ -78,6 +79,15 @@ const KNOB_KEYS: [(egui::Key, egui::Key); 8] = [
 const DETENT_PX: f32 = 12.;
 /// Encoder clicks per turn as drawn (the pointer moves 15 degrees a click).
 const DETENT_ANGLE: f32 = std::f32::consts::TAU / 24.;
+/// Instruction clock choices: None follows the firmware's system clock (the
+/// accurate default); a lower rate gives the guest fewer instructions per
+/// second of guest time, so a light firmware can play in real time.
+const CLOCKS: [(Option<u32>, &str); 4] = [
+    (None, "Firmware clock"),
+    (Some(24), "24 MHz"),
+    (Some(48), "48 MHz"),
+    (Some(96), "96 MHz"),
+];
 /// The ADC model's MASTER reading at reset.
 const MASTER_DEFAULT: u16 = 512;
 /// MASTER pointer: -135..+135 degrees over the ADC range 0..=1023.
@@ -106,6 +116,14 @@ struct Emulator {
     knob_angle: [f32; 8],
     knob_accum: [f32; 8],
     knob_centre: [egui::Pos2; 8],
+    /// Instruction clock in MHz; None follows the firmware.
+    clock_mhz: Option<u32>,
+    /// Host playback; None in tests or when no device opens (`audio_error`).
+    audio: Option<host_audio::HostAudio>,
+    audio_error: Option<String>,
+    /// Guest audio against real time, sampled about once a second.
+    speed: Option<f64>,
+    speed_mark: (Instant, u64),
 }
 impl Emulator {
     fn new(path: PathBuf) -> Self {
@@ -125,6 +143,11 @@ impl Emulator {
             knob_angle: [0.; 8],
             knob_accum: [0.; 8],
             knob_centre: [pos2(0., 0.); 8],
+            clock_mhz: None,
+            audio: None,
+            audio_error: None,
+            speed: None,
+            speed_mark: (Instant::now(), 0),
         };
         app.knob_angle[0] = master_angle(app.master);
         app.reset();
@@ -153,6 +176,16 @@ impl Emulator {
         }
         self.loaded = snapshot.loaded;
         self.steps = snapshot.steps;
+        let (since, frames) = self.speed_mark;
+        let elapsed = since.elapsed().as_secs_f64();
+        if snapshot.frames < frames || self.paused {
+            self.speed = None;
+            self.speed_mark = (Instant::now(), snapshot.frames);
+        } else if elapsed >= 1.0 {
+            let guest = (snapshot.frames - frames) as f64 / fm1_emu::audio::SAMPLE_RATE as f64;
+            self.speed = (snapshot.frames > 0).then_some(guest / elapsed);
+            self.speed_mark = (Instant::now(), snapshot.frames);
+        }
         self.fault = snapshot.fault;
         let Some(pixels) = snapshot.pixels else {
             return;
@@ -526,6 +559,23 @@ impl eframe::App for Emulator {
                         if ui.button("Restart").clicked() {
                             self.reset();
                         }
+                        let before = self.clock_mhz;
+                        let selected = CLOCKS
+                            .iter()
+                            .find(|(mhz, _)| *mhz == self.clock_mhz)
+                            .map_or("Custom clock".into(), |(_, label)| label.to_string());
+                        egui::ComboBox::from_id_salt("clock")
+                            .selected_text(selected)
+                            .show_ui(ui, |ui| {
+                                for (mhz, label) in CLOCKS {
+                                    ui.selectable_value(&mut self.clock_mhz, mhz, label);
+                                }
+                            })
+                            .response
+                            .on_hover_text("Instructions per second of guest time. Lower rates let light firmware play in real time; timers, audio and USB keep their own clocks.");
+                        if self.clock_mhz != before {
+                            self.worker.clock(self.clock_mhz.map(|mhz| mhz * 1_000_000));
+                        }
                         if ui
                             .add_enabled(
                                 self.loaded && self.fault.is_none(),
@@ -552,7 +602,21 @@ impl eframe::App for Emulator {
                 ui.label("This firmware needs additional emulation support. The LCD retains its last guest-written pixels.");
             } else {
                 ui.label("Hold a key or button to press it · Arrow keys: octave · A W S E D R F G T H Y J K: notes · Knobs: drag around, scroll, or 1–0 - = [ ] (MASTER: N / M)");
-                ui.weak("The LCD follows the loaded firmware. Audio playback is not implemented.");
+                let speed = self
+                    .speed
+                    .map_or(String::from("no guest audio yet"), |s| {
+                        format!("guest audio at {:.0}% of real time", s * 100.)
+                    });
+                let audio = match (&self.audio, &self.audio_error) {
+                    (Some(audio), _) => format!(
+                        "output {} Hz, {} dropouts",
+                        audio.device_rate,
+                        audio.underruns()
+                    ),
+                    (None, Some(error)) => format!("no audio output: {error}"),
+                    (None, None) => String::from("no audio output"),
+                };
+                ui.weak(format!("{speed} · {audio} · below 100% the sound breaks up"));
             }
         });
         // Receive worker snapshots, then send this frame's input below.
@@ -574,16 +638,36 @@ impl eframe::App for Emulator {
         ctx.request_repaint_after(Duration::from_millis(16));
     }
 }
-fn main() -> eframe::Result {
-    let mut args = std::env::args_os().skip(1);
-    let Some(path) = args.next() else {
-        eprintln!("usage: emulator <application.elf|application.bin>");
-        std::process::exit(2);
-    };
-    if args.next().is_some() {
-        eprintln!("expected one firmware path");
-        std::process::exit(2);
+/// `[--cpu-mhz N] FIRMWARE`: the firmware path and an instruction clock.
+fn parse_args(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<(PathBuf, Option<u32>), String> {
+    let mut path = None;
+    let mut clock = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "--cpu-mhz" {
+            let value = args.next().ok_or("--cpu-mhz needs a value")?;
+            let mhz = value
+                .to_str()
+                .and_then(|value| value.parse::<u32>().ok())
+                .filter(|mhz| (1..=1000).contains(mhz))
+                .ok_or("--cpu-mhz takes 1..1000")?;
+            clock = Some(mhz);
+        } else if path.replace(PathBuf::from(arg)).is_some() {
+            return Err("expected one firmware path".into());
+        }
     }
+    Ok((
+        path.ok_or("usage: emulator [--cpu-mhz N] <firmware>")?,
+        clock,
+    ))
+}
+fn main() -> eframe::Result {
+    let (path, clock_mhz) = parse_args(std::env::args_os().skip(1)).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180., 830.])
@@ -596,7 +680,17 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            let app = Emulator::new(PathBuf::from(path));
+            let mut app = Emulator::new(path);
+            app.clock_mhz = clock_mhz;
+            app.worker.clock(clock_mhz.map(|mhz| mhz * 1_000_000));
+            match host_audio::HostAudio::open() {
+                Ok(audio) => {
+                    app.worker.audio(Some(audio.queue.clone()));
+                    app.audio = Some(audio);
+                }
+                Err(error) => app.audio_error = Some(error),
+            }
+            app.reset(); // Apply the clock and audio from the first instruction.
             app.worker.read_stdin();
             Ok(Box::new(app))
         }),
@@ -804,6 +898,44 @@ mod tests {
             .worker
             .inspect(|machine| machine.cpu.as_ref().unwrap().bus.devices.adc.master);
         assert_eq!(master, 1023);
+    }
+    #[test]
+    fn the_command_line_takes_a_firmware_and_an_instruction_clock() {
+        let parse = |args: &[&str]| parse_args(args.iter().map(std::ffi::OsString::from));
+        assert_eq!(parse(&["a.fwsc"]), Ok((PathBuf::from("a.fwsc"), None)));
+        assert_eq!(
+            parse(&["--cpu-mhz", "24", "a.fwsc"]),
+            Ok((PathBuf::from("a.fwsc"), Some(24)))
+        );
+        assert!(parse(&["--cpu-mhz", "0", "a.fwsc"]).is_err());
+        assert!(parse(&["a.fwsc", "b.fwsc"]).is_err());
+        assert!(parse(&[]).is_err());
+    }
+    #[test]
+    fn the_worker_paces_the_guest_by_the_audio_queue() {
+        let mut app = demo();
+        let queue = host_audio::AudioQueue::default();
+        app.worker.audio(Some(queue.clone()));
+        app.reset();
+        app.worker.inspect(|machine| {
+            let cpu = machine.cpu.as_mut().unwrap();
+            cpu.bus.audio.frames = 1; // The guest has started streaming.
+        });
+        queue.push(std::iter::repeat_n([0, 0], host_audio::TARGET_FRAMES));
+        let steps = app
+            .worker
+            .inspect(|machine| machine.cpu.as_ref().unwrap().steps);
+        std::thread::sleep(Duration::from_millis(30));
+        let paced = app
+            .worker
+            .inspect(|machine| machine.cpu.as_ref().unwrap().steps);
+        assert_eq!(paced, steps, "a full queue holds the guest");
+        queue.clear();
+        std::thread::sleep(Duration::from_millis(30));
+        let resumed = app
+            .worker
+            .inspect(|machine| machine.cpu.as_ref().unwrap().steps);
+        assert!(resumed > paced, "an emptied queue lets it run");
     }
     #[test]
     fn the_lcd_is_never_downscaled_and_sits_on_the_pixel_grid() {
