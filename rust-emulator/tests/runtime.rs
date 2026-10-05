@@ -8,6 +8,45 @@ fn cpu(words: &[u16]) -> Cpu {
     )
 }
 #[test]
+fn unsigned_conditional_literals_do_not_expand_into_byte_masks() {
+    // Vendor r3 disassembly distinguishes ECB0 0208 (literal 520) from
+    // ECA0 0F02 (packed 520), and confirms the four literal relations.
+    for (opcode, threshold) in [
+        (0xecb0, 520),
+        (0xecb0, 1099),
+        (0xecb0, 4095),
+        (0xec30, 4095),
+        (0xe930, 4095),
+        (0xe9b0, 4095),
+        (0xeca0, 520),
+    ] {
+        for value in [0, threshold - 1, threshold, threshold + 1, u32::MAX] {
+            let constant = if opcode == 0xeca0 {
+                0x0f02
+            } else {
+                threshold as u16
+            };
+            let mut c = cpu(&[opcode, 0x1000 | constant, 0x2b42, 0x3642, 0]);
+            c.r[0] = value;
+            c.sr[5] = 15;
+            for _ in 0..3 {
+                c.step().unwrap();
+            }
+            let selected = match opcode {
+                0xec30 => value > threshold,
+                0xe930 => value >= threshold,
+                0xe9b0 => value < threshold,
+                _ => value <= threshold,
+            };
+            assert_eq!(c.r[2], if selected { 11 } else { 22 });
+            assert_eq!(c.r[0], value);
+            assert_eq!(c.sr[5], 15);
+            assert_eq!(c.pc, XIP + 10);
+        }
+    }
+}
+
+#[test]
 fn replicated_immediates_fill_both_pixels_and_keep_byte_lanes() {
     // Vendor r3 assembly: r0=r2*0x10001, then the other replicated forms.
     for (word, input, expected) in [
