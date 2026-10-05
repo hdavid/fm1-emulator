@@ -11,13 +11,14 @@
 //         trs   the same note-on as 3 bytes on the TRS MIDI IN (UART1, 31250 baud);
 //               the time runs from the end of the last byte (when it is received)
 //   Firmware with MIDI clock (SLOOP clock_sync.c; GLO > SYSTEM SYNC, global 13, set to --sync):
-//   a closed hat on every beat (every 2nd above 150 BPM), the transport run by
+//   a closed hat on every beat (every 2nd above 145 BPM), the transport run by
 //         ext-usb / ext-trs  an external clock: F8 at --bpm (+- --jitter ms uniform), 2 beats of
 //               pre-roll, FA (--fa ms before the downbeat F8; default: just after the F8 before it,
 //               a tick ahead, as hosts send it), --trials beats; --to B2 over --ramp beats from the
 //               downbeat (--ramp 0: a jump); --drop K: F8 K lost; --spike K --spike-ms M: F8 K late.
 //               Onset of each hit - the F8 of its beat (ideal time, and as it arrived)
-//         transport  START a tick ahead, STOP after a bar, SPP 16th 136 + CONTINUE a tick ahead
+//         transport / transport-trs  START a tick ahead, STOP after a bar, SPP 16th 136 + CONTINUE a
+//               tick ahead (USB / TRS)
 //   NEST=0: interrupts do not nest (the emulator's default; the firmware assumes they do).
 //
 // The DAC itself (codec digital filter, analog path) is not modelled: these
@@ -139,7 +140,7 @@ fn main() {
     let mut rig = Rig::boot(&args[1], mhz);
     // interrupts nest (TIMER5 above ALNK0), as the firmware is written for; NEST=0: they wait
     rig.cpu.nested_irqs = env::var("NEST").map(|v| v != "0").unwrap_or(true);
-    if mode.starts_with("ext") || mode == "transport" {
+    if mode.starts_with("ext") || mode.starts_with("transport") {
         let f = |name: &str, def: f64| {
             args.iter()
                 .position(|a| a == name)
@@ -148,7 +149,7 @@ fn main() {
                 .unwrap_or(def)
         };
         let c = Clock {
-            usb: mode != "ext-trs",
+            usb: mode != "ext-trs" && mode != "transport-trs",
             sync: f("--sync", 2.0) as i32,
             beats: trials,
             bpm: f("--bpm", 120.0),
@@ -160,7 +161,7 @@ fn main() {
             spike: f("--spike", 0.0) as usize,
             spike_ms: f("--spike-ms", 3.0),
         };
-        if mode == "transport" {
+        if mode.starts_with("transport") {
             transport(&mut rig, &c);
         } else {
             clock(&mut rig, &c);
@@ -239,7 +240,7 @@ pub struct Clock {
     spike_ms: f64,
 }
 
-/// A closed hat (lane 4) on steps 0, 4, 8, 12 (`every` 2: on 0 and 8), no reverb.
+/// A closed hat (lane 4) on steps 0, 4, 8, 12 (`every` 2: on 0 and 8; above 145 BPM), no reverb.
 fn hats(rig: &mut Rig, every: u8) {
     rig.set_global(26, 0);
     for i in 0..16u8 {
@@ -290,7 +291,7 @@ fn send(rig: &mut Rig, usb: bool, b: &[u8]) {
 
 fn clock(rig: &mut Rig, c: &Clock) {
     let mhz = rig.cpu.instructions_per_tick * 24;
-    let every = if c.bpm > 150.0 { 2usize } else { 1 };
+    let every = if c.bpm > 145.0 || c.to > 145.0 { 2usize } else { 1 }; // (the hat rings ~0.4 s)
     hats(rig, every as u8);
     rig.set_global(13, c.sync);
     rig.cpu.bus.audio.probe.arm(2048, 220); // the hits: |x| >= 2048 (Q15 16) after 5 ms below 256
@@ -416,6 +417,8 @@ fn clock(rig: &mut Rig, c: &Clock) {
             .map(|o| format!("{:.2}", (*o as f64 - ideal[down]) / TICKS_PER_MS))
             .collect();
         println!("onsets from the downbeat F8 (ms): {}", rel.join(" "));
+        let fr: Vec<String> = rig.onsets()[start..].iter().take(8).map(|(f, _)| format!("{}", f % 32)).collect();
+        println!("their frame in the 32-sample block: {}", fr.join(" "));
     }
     let (mut e_ideal, mut e_arr, mut first) = (vec![], vec![], None);
     let mut worst_after_bar: f64 = 0.0;
@@ -480,6 +483,7 @@ fn transport(rig: &mut Rig, c: &Clock) {
     let start = rig.onsets().len();
     let (mut t_down, mut t_cont, mut t_stop) = (0.0, 0.0, 0.0);
     let mut after_stop = 0;
+    let lag = if c.usb { 0.0 } else { fm1_emu::uart1::BYTE_TICKS as f64 }; // TRS: the F8 lands a byte later
     for k in 0..(k_fb + 24 * 8) {
         if k == k_fa || k == k_fb {
             rig.run_until((t - p + 0.1 * TICKS_PER_MS) as u64);
@@ -496,10 +500,10 @@ fn transport(rig: &mut Rig, c: &Clock) {
         rig.run_until(t as u64);
         send(rig, c.usb, &[0xF8]);
         if k == k_fa {
-            t_down = rig.now() as f64;
+            t_down = rig.now() as f64 + lag;
         }
         if k == k_fb {
-            t_cont = rig.now() as f64;
+            t_cont = rig.now() as f64 + lag;
         }
         if k == k_fc + 24 {
             after_stop = rig.onsets().len();

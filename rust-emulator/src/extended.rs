@@ -358,7 +358,12 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
             name = "reverse_bytes";
         }
         Op::SubtractPackedImmediate => {
-            cpu.r[n] = cpu.r[d].wrapping_sub(packed(x));
+            // The compiler's signed 64-bit compare with a constant subtracts the low word with
+            // this (`r1 = r12 - 0x0`), then the high word with subc: it sets the carry out
+            // (no borrow) like the register subtract forms.
+            let (lhs, rhs) = (cpu.r[d], packed(x));
+            cpu.r[n] = lhs.wrapping_sub(rhs);
+            cpu.set_carry(lhs >= rhs);
             name = "subtract_packed_immediate";
         }
         Op::ReverseSubtract => {
