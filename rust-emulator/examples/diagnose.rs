@@ -75,6 +75,9 @@ fn run() -> Result<(), String> {
         .map(|value| value.parse().map_err(|_| "invalid FM1_MMIO"))
         .transpose()?
         .unwrap_or(0);
+    // Optional: FM1_OP=NAME counts executions per PC of one operation name.
+    let op_filter = env::var("FM1_OP").ok();
+    let mut op_pcs = BTreeMap::<u32, u64>::new();
     for step in 0..limit {
         let pc = cpu.pc;
         if watch.contains(&pc) && watch_hits < 400 {
@@ -96,6 +99,9 @@ fn run() -> Result<(), String> {
         }
         match cpu.step() {
             Ok(op) => {
+                if op_filter.as_deref() == Some(op) {
+                    *op_pcs.entry(pc).or_default() += 1;
+                }
                 if recent.len() == recent_count {
                     recent.pop_front();
                 }
@@ -152,6 +158,12 @@ fn run() -> Result<(), String> {
                 "Felucca: {} UI frames, {} rendered audio halves, {} timer IRQs; stage={}, page={}, home={}",
                 read(28), read(4), read(24), read(44), read(48), read(52)
             );
+        }
+    }
+    if let Some(name) = &op_filter {
+        eprintln!("{name}: {} distinct PCs", op_pcs.len());
+        for (pc, count) in &op_pcs {
+            eprintln!("  {count:>9} {}", location(&firmware.symbols, *pc));
         }
     }
     if !hot.is_empty() {

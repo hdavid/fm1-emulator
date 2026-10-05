@@ -449,14 +449,24 @@ impl Cpu {
                 next = pc + 6;
             }
             Op::RepeatRegister => {
-                // Register-count repeat: one block per dispatch, with the remaining
-                // count tested by the compiler's following backward branch.
+                // Register-count repeat: the block runs r times with the count
+                // latched, and the register reads zero afterwards. Inferred from
+                // the stock binaries: memcpy (0x02044596) reuses the count
+                // register as its byte temporary with no branch after the
+                // block, while startup's `rep r2 {..}; if (r2 != 0) goto rep`
+                // must then fall through. Neither pattern is satisfied by
+                // one block per dispatch.
+                if self.repeat.is_some() {
+                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                }
                 let register = (h & 15) as usize;
                 let length = (((h >> 4) & 15) + 1) * 2;
-                if self.r[register] == 0 {
+                let count = self.r[register];
+                if count == 0 {
                     next = pc + 2 + length;
                 } else {
-                    self.r[register] -= 1;
+                    self.r[register] = 0;
+                    self.repeat = Some((pc + 2, pc + 2 + length, count));
                 }
                 name = "repeat_register";
             }

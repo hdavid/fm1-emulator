@@ -164,3 +164,39 @@ fn equality_compare_branches_sign_extend_their_immediate() {
     c.step().unwrap();
     assert_eq!(c.pc, XIP + 4 + 8);
 }
+
+#[test]
+fn register_repeat_runs_its_block_count_times_even_when_the_body_reuses_the_register() {
+    // FM-1_093 memcpy tail at 0x02044596: 0312 0712 07b2 0456 =
+    // rep 4 bytes, r2 { r2 = b[r1++]; b[r3++] = r2 }; pop pc. The count
+    // register is the byte temporary inside the body and no branch follows,
+    // so the count must be latched: sdfile copying "btif" (4 bytes) got only
+    // "b" and the BTIF directory lookup failed.
+    let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);
+    c.r[1] = RAM;
+    c.r[2] = 4;
+    c.r[3] = RAM + 0x40;
+    for (i, byte) in b"btif".iter().enumerate() {
+        c.bus.write(RAM + i as u32, *byte as u32, 1).unwrap();
+    }
+    while c.pc != XIP + 6 {
+        c.step().unwrap();
+        assert!(c.steps <= 10);
+    }
+    for (i, byte) in b"btif".iter().enumerate() {
+        assert_eq!(c.bus.read(RAM + 0x40 + i as u32, 1).unwrap(), *byte as u32);
+    }
+    assert_eq!(c.bus.read(RAM + 0x44, 1).unwrap(), 0);
+    assert_eq!(c.r[1], RAM + 4);
+    assert_eq!(c.r[3], RAM + 0x44);
+}
+
+#[test]
+fn register_repeat_with_a_zero_count_skips_its_block() {
+    let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);
+    c.r[1] = RAM;
+    c.r[3] = RAM + 0x40;
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 6);
+    assert_eq!(c.r[1], RAM);
+}
