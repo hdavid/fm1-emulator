@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Private GUI worker: one owner of the CPU, and one replaceable UI snapshot.
 use super::host_audio::{AudioQueue, TARGET_FRAMES};
-use fm1_emu::{cpu::Cpu, encoders::Encoders, firmware::Firmware};
+use fm1_emu::{
+    cpu::Cpu,
+    encoders::Encoders,
+    firmware::Firmware,
+    usb_midi::Decoder,
+    web::{self, Hub},
+};
 use std::{
     io::{self, Read, Write},
     path::PathBuf,
@@ -31,6 +37,9 @@ enum Command {
     Clock(Option<u32>),
     /// Where guest audio goes; the worker then paces the guest by it.
     Audio(Option<AudioQueue>),
+    /// A web editor's hub: the USB host also becomes a USB-MIDI host and
+    /// MIDI moves between the hub and the device (applies at restart).
+    Web(Option<Arc<Hub>>),
     Pause(bool),
     Stop,
     #[cfg(test)]
@@ -52,6 +61,7 @@ pub(super) struct Machine {
     master: u16,
     clock: Option<u32>,
     audio: Option<AudioQueue>,
+    web: Option<(Arc<Hub>, Decoder)>,
     generation: u64,
     last_lcd: Option<(u64, bool)>,
 }
@@ -66,6 +76,7 @@ impl Machine {
             master: super::MASTER_DEFAULT,
             clock: None,
             audio: None,
+            web: None,
             generation: 0,
             last_lcd: None,
         }
@@ -81,11 +92,18 @@ impl Machine {
                     audio.clear();
                 }
                 let (master, clock) = (self.master, self.clock);
+                let midi = self.web.is_some();
+                if let Some((_, decoder)) = &mut self.web {
+                    *decoder = Decoder::default(); // Forget a half-received message.
+                }
                 match Firmware::load(&path).and_then(|firmware| {
                     let mut cpu = Cpu::new(firmware.bus()?, firmware.entry);
                     cpu.r[0] = 0x01c7fe08;
                     cpu.bus.devices.adc.master = master;
                     cpu.bus.set_instruction_clock(clock);
+                    if midi {
+                        cpu.bus.usb.enable_midi_host();
+                    }
                     Ok(cpu)
                 }) {
                     Ok(cpu) => {
@@ -127,6 +145,7 @@ impl Machine {
                 }
             }
             Command::Audio(queue) => self.audio = queue,
+            Command::Web(hub) => self.web = hub.map(|hub| (hub, Decoder::default())),
             Command::Pause(paused) => self.paused = paused,
             Command::Stop => return false,
             #[cfg(test)]
@@ -161,6 +180,9 @@ impl Machine {
         }
         if let Some(audio) = &self.audio {
             audio.push(cpu.bus.audio.samples.drain(..));
+        }
+        if let Some((hub, decoder)) = &mut self.web {
+            web::pump(hub, &mut cpu.bus, decoder);
         }
         if !cpu.bus.usb.serial.is_empty() {
             let bytes: Vec<_> = cpu.bus.usb.serial.drain(..).collect();
@@ -284,6 +306,9 @@ impl Worker {
     }
     pub fn clock(&self, hz: Option<u32>) {
         let _ = self.commands.send(Command::Clock(hz));
+    }
+    pub fn web(&self, hub: Option<Arc<Hub>>) {
+        let _ = self.commands.send(Command::Web(hub));
     }
     pub fn audio(&self, queue: Option<AudioQueue>) {
         let _ = self.commands.send(Command::Audio(queue));

@@ -51,6 +51,37 @@ slow guest scan can observe and debounce them.
 Losing window focus releases contacts. Pause stops guest execution; Restart
 reloads the selected image and resets CPU, RAM, peripherals, and input state.
 
+### Web editor (USB-MIDI over a local WebSocket)
+
+When the firmware has a web editor, the window serves it on
+`http://127.0.0.1:8765/` (loopback only) and connects it to the emulated
+device: `FIRMWARE-ui.zip` next to `FIRMWARE.fwsc`, or `--ui DIR` (a folder with
+`index.html` or `editor.html`, such as a Felucca-family `web/`). "Open editor"
+opens the default browser; the status line shows the URL, connected pages, MIDI
+message counts and the port name. Without an editor the button is disabled.
+
+```sh
+./emulator --ui ~/src/Felucca/web felucca-0.9-beta.fwsc
+rust-emulator/scripts/make-ui-sidecar.sh ~/src/Felucca v0.9-beta felucca-0.9-beta.fwsc
+```
+
+- The USB host model then also acts as a USB-MIDI host, and the GUI worker
+  moves MIDI between the server and the device between instruction batches.
+- Every served HTML page gets a Web MIDI shim (`src/web/shim.js`):
+  `navigator.requestMIDIAccess` returns one input and one output named
+  `"<USB product> (FM-1 Emulator)"` ("Felucca (FM-1 Emulator)" for Felucca,
+  Jangada and SLOOP, whose editors look for /felucca/i), so editors run
+  unchanged in any browser.
+- `/midi` is a WebSocket of binary frames of raw MIDI bytes: from the browser
+  any split (running status allowed), to the browser one complete message per
+  frame.
+- Requests with a Host other than 127.0.0.1, localhost or [::1] on that port,
+  and WebSocket Origins other than those, are refused (DNS rebinding).
+
+The bridge is the `web` feature (tungstenite for the WebSocket handshake and
+framing, zip for the sidecar); `gui` includes it, and the core library keeps
+no dependencies.
+
 The UI reads only the panel's 240×240 framebuffer, gated by display enable,
 sleep, and active-low PA2 backlight. There are no symbol-specific drawing hooks
 or substituted application functions. SPI1 commands and SRAM DMA implement
@@ -110,7 +141,14 @@ host queues, SRAM DMA, RX packet/count registers and the receive interrupt latch
 An unread packet stays intact until the guest acknowledges it. Type commands and
 press Enter; EOF stops the input reader while guest execution continues.
 The unchanged local and published Felucca builds answer `help` through this path.
-USB MIDI host transport is not implemented.
+`Usb::enable_midi_host` (off by default, so the CDC enumeration is unchanged)
+also makes the host a USB-MIDI host: it finds the MIDI streaming interface and
+its bulk endpoints, skips the CDC line state when a device has no console,
+reads the product string, delivers queued `Bus::usb_midi_send` packets (up to
+16 events per bulk packet) into the OUT endpoint's RX buffer with the same
+NAK rules as the console, and collects the device's MIDI IN packets in
+`usb.midi_received`. Felucca 0.9-beta, Jangada 0.1-alpha and SLOOP 2.2 play
+a note from a host note-on and answer their editors' INFO SysEx this way.
 The hardware firmware retains both its serial console and MIDI updater.
 
 P33 accesses model watchdog arming/feeding and stop with an expiry fault if
@@ -247,7 +285,7 @@ not a percentage of complete instruction-set or musical-feature coverage.
 | Flash | Startup JEDEC/status/NOR reads; plain XIP shares physical NOR storage | Erase/program, persistence, XIP busy behavior |
 | LCD | Display guest initializes SPI/DMA, draws RGB565 pixels and live timer/key data | Other controller modes, SPI timing, pixel-exact physical comparison |
 | USB serial | Hardware guest enumerates and sends CDC debug bytes through DMA | Host OUT packets, broader controller/USB behavior |
-| USB MIDI | Not implemented | USB transport and MIDI packet handling |
+| USB MIDI | Host note-on renders audio; an editor SysEx request gets its reply (Felucca family) | Timing of host USB frames |
 | Audio/DMA | Unchanged Felucca renders stereo SRAM, alternates ALNK halves, services audio IRQs; note samples are nonzero; the window plays them | Other clocks/formats, codec analog behavior, cycle timing |
 
 Original foundation evidence: seventeen Rust integration tests passed; a native boot executes
