@@ -35,6 +35,10 @@ impl Usb {
             _ => None,
         }
     }
+    /// Where the host model writes SETUP packets (the endpoint 0 buffer).
+    pub(crate) fn setup_address(&self) -> u32 {
+        self.regs[6]
+    }
     fn dma(ram: &mut [u8], a: u32, n: usize) -> Result<&mut [u8], &'static str> {
         let start = a.checked_sub(RAM).ok_or("USB DMA must address SRAM")? as usize;
         ram.get_mut(start..start + n).ok_or("USB DMA exceeds SRAM")

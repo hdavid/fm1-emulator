@@ -48,10 +48,13 @@ impl TickTimer {
         }
         let period = self.period as u64 + 1;
         let next = self.counter as u64 + ticks as u64 * 15;
-        if next >= period {
+        // Runs every instruction: divide only when the counter wraps.
+        self.counter = if next >= period {
             self.pending = true;
-        }
-        self.counter = (next % period) as u32;
+            (next % period) as u32
+        } else {
+            next as u32
+        };
     }
 }
 
@@ -113,10 +116,13 @@ impl Timer {
             self.period.max(1) as u64
         };
         let next = self.counter as u64 + ticks;
-        if next >= period {
+        // Runs every instruction: divide only when the counter wraps.
+        self.counter = if next >= period {
             self.pending = true;
-        }
-        self.counter = (next % period) as u32;
+            (next % period) as u32
+        } else {
+            next as u32
+        };
     }
 }
 
@@ -263,24 +269,39 @@ impl Devices {
         } else {
             &self.tick_secondary
         };
-        [
-            (TICK_IRQ, tick.pending),
-            (62, self.timer4.pending),
-            (TIMER5_IRQ, self.timer5.pending),
-        ]
-        .into_iter()
-        .chain(
-            self.startup_timers
-                .iter()
-                .enumerate()
-                .map(|(i, timer)| (4 + i, timer.pending)),
-        )
-        .chain((0..8).map(|bit| (120 + bit, self.software & (1 << bit) != 0)))
-        .filter(|(source, pending)| {
-            *pending && self.irq_priority_for(*source, icfg, core).is_some()
-        })
-        .max_by_key(|(source, _)| self.irq_priority_for(*source, icfg, core).unwrap())
-        .map(|(source, _)| source)
+        // Called before every instruction while interrupts are enabled: skip
+        // the source scan when nothing is pending or the controller is off.
+        let any_pending = tick.pending
+            || self.timer4.pending
+            || self.timer5.pending
+            || self.software != 0
+            || self.startup_timers.iter().any(|timer| timer.pending);
+        if !any_pending || icfg & 0x100 == 0 {
+            return None;
+        }
+        // The highest-priority deliverable source; on equal priority the
+        // later source in this order wins.
+        let mut best: Option<(usize, u32)> = None;
+        let mut consider = |source: usize, pending: bool| {
+            if !pending {
+                return;
+            }
+            if let Some(priority) = self.irq_priority_for(source, icfg, core) {
+                if best.is_none_or(|(_, highest)| priority >= highest) {
+                    best = Some((source, priority));
+                }
+            }
+        };
+        consider(TICK_IRQ, tick.pending);
+        consider(62, self.timer4.pending);
+        consider(TIMER5_IRQ, self.timer5.pending);
+        for (i, timer) in self.startup_timers.iter().enumerate() {
+            consider(4 + i, timer.pending);
+        }
+        for bit in 0..8 {
+            consider(120 + bit, self.software & (1 << bit) != 0);
+        }
+        best.map(|(source, _)| source)
     }
     pub fn irq_priority(&self, source: usize, icfg: u32) -> Option<u32> {
         self.irq_priority_for(source, icfg, 0)

@@ -31,7 +31,7 @@ fn registers(values: &[(u32, u32)]) -> [u32; NREG] {
 }
 /// XIP settings decoded from the registers (`Nor::refresh`), read on every
 /// instruction fetch from flash.
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
 struct XipConfig {
     active: bool,
     base: usize,
@@ -51,6 +51,9 @@ pub struct Nor {
     /// Completed sector/block erases and page programs (diagnostics).
     pub erases: u64,
     pub programs: u64,
+    /// Changes whenever what an XIP read returns may change (contents or
+    /// configuration); the bus uses it to invalidate cached code.
+    generation: u64,
 }
 
 impl Default for Nor {
@@ -67,6 +70,7 @@ impl Default for Nor {
             write_enabled: false,
             erases: 0,
             programs: 0,
+            generation: 0,
         };
         nor.refresh();
         nor
@@ -80,6 +84,7 @@ impl Nor {
         crate::package::sfc(&mut decoded, key);
         self.decoded = Some(decoded);
         self.key = key;
+        self.generation += 1;
         for (a, v) in [(0x40200, 0x809803b5), (0x40204, 1), (0x40208, 0x8e17)] {
             self.regs[slot(a).unwrap()] = v;
         }
@@ -89,12 +94,19 @@ impl Nor {
     fn refresh(&mut self) {
         let reg = |a| self.regs[slot(a).unwrap()];
         let control = reg(0x40300);
-        self.xip = XipConfig {
+        let xip = XipConfig {
             active: reg(0x40200) & 1 != 0 && reg(0x5101c) & 32 != 0,
             base: reg(0x4020c) as usize,
             encrypted: control & 1 != 0,
             window: (control & 2 != 0).then(|| (reg(0x4030c), reg(0x40308))),
         };
+        if xip != self.xip {
+            self.xip = xip;
+            self.generation += 1;
+        }
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
     pub fn packaged(&self) -> bool {
         self.decoded.is_some()
@@ -187,6 +199,7 @@ impl Nor {
                 let start = (address() & !(size - 1)) % self.bytes.len();
                 self.bytes[start..start + size].fill(0xff);
                 self.redecode(start, size);
+                self.generation += 1;
                 self.write_enabled = false;
                 self.erases += 1;
             }
@@ -198,6 +211,7 @@ impl Nor {
                     self.bytes[page | ((base + i) & 0xff)] &= data;
                 }
                 self.redecode(page, 0x100);
+                self.generation += 1;
                 self.write_enabled = false;
                 self.programs += 1;
             }
