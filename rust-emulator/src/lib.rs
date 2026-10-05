@@ -12,6 +12,7 @@ mod float;
 pub mod gpio;
 pub mod lcd;
 mod package;
+mod perf;
 mod shift_spi;
 mod uart;
 mod wireless;
