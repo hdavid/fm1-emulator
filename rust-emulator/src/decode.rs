@@ -39,6 +39,7 @@ pub(crate) enum Op {
     MoveStackPointer,
     PushIrqFrame,
     PopIrqFrame,
+    PopSpecial,
     CallRel32,
     Rel22,
     CallRel9,
@@ -207,6 +208,8 @@ pub(crate) fn decode(h: u32) -> Op {
         PushIrqFrame
     } else if matches!(h, 0x04a8 | 0x04a9) {
         PopIrqFrame
+    } else if h & 0xfff0 == 0x0480 && h & 15 != 0 {
+        PopSpecial
     } else if h == 0xff80 {
         CallRel32
     } else if matches!(h & 0xffc0, 0xea80 | 0xeac0) {
@@ -447,6 +450,9 @@ fn conditional_kind(kind: u32) -> bool {
             | 0xda
             | 0xdb
             | 0xe9
+            // ifs (rA <= #packed): SLOOP's fx.c gain_next and punch.c sweeps
+            // (eea3 0d80 = <= 0x1000; eea2 0d08 / 0cb0 = <= 0x2200 / 0x5800).
+            | 0xea
             | 0xeb
     )
 }
