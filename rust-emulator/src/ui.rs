@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Rect, Sense, Stroke, StrokeKind};
+use fm1_emu::encoders::knob;
 #[cfg(test)]
 use fm1_emu::{bus::Bus, cpu::Cpu, firmware::Firmware};
 mod worker;
@@ -51,6 +52,38 @@ fn lcd_rect(area: Rect, pixels_per_point: f32) -> Rect {
         ((area.center() - vec2(size, size) / 2.) * pixels_per_point).round() / pixels_per_point;
     Rect::from_min_size(min, vec2(size, size))
 }
+/// Drawn knobs: position, label, matrix encoder (None: the MASTER pot) and
+/// the keys that turn them (counter-clockwise / clockwise).
+const KNOBS: [(f32, f32, &str, Option<usize>, &str); 8] = [
+    (91., 106., "MASTER", None, "N / M"),
+    (208., 106., "SELECT", Some(knob::SELECT), "[ / ]"),
+    (91., 224., "PRESETS", Some(knob::PRESETS), "9 / 0"),
+    (208., 224., "ALGORITHM", Some(knob::ALGORITHM), "- / ="),
+    (632., 106., "KNOB1", Some(knob::KNOB1), "1 / 2"),
+    (758., 106., "KNOB2", Some(knob::KNOB1 + 1), "3 / 4"),
+    (884., 106., "KNOB3", Some(knob::KNOB1 + 2), "5 / 6"),
+    (1010., 106., "KNOB4", Some(knob::KNOB1 + 3), "7 / 8"),
+];
+const KNOB_KEYS: [(egui::Key, egui::Key); 8] = [
+    (egui::Key::N, egui::Key::M),
+    (egui::Key::OpenBracket, egui::Key::CloseBracket),
+    (egui::Key::Num9, egui::Key::Num0),
+    (egui::Key::Minus, egui::Key::Equals),
+    (egui::Key::Num1, egui::Key::Num2),
+    (egui::Key::Num3, egui::Key::Num4),
+    (egui::Key::Num5, egui::Key::Num6),
+    (egui::Key::Num7, egui::Key::Num8),
+];
+/// Pointer travel (points of drag, or half-points of scroll) per encoder click.
+const DETENT_PX: f32 = 12.;
+/// Encoder clicks per turn as drawn (the pointer moves 15 degrees a click).
+const DETENT_ANGLE: f32 = std::f32::consts::TAU / 24.;
+/// The ADC model's MASTER reading at reset.
+const MASTER_DEFAULT: u16 = 512;
+/// MASTER pointer: -135..+135 degrees over the ADC range 0..=1023.
+fn master_angle(master: u16) -> f32 {
+    (master as f32 / 1023. - 0.5) * 1.5 * std::f32::consts::PI
+}
 const INK: Color32 = Color32::from_rgb(190, 194, 193);
 const ACCENT: Color32 = Color32::from_rgb(231, 193, 91);
 
@@ -66,6 +99,13 @@ struct Emulator {
     pressed: [bool; 41],
     pulse: [Instant; 41],
     pulse_steps: [u64; 41],
+    /// MASTER potentiometer as the ADC reads it (0..=1023).
+    master: u16,
+    /// Pointer angle per drawn knob (radians, 0 = up), unspent drag/scroll
+    /// and the knob centres of the last drawn frame.
+    knob_angle: [f32; 8],
+    knob_accum: [f32; 8],
+    knob_centre: [egui::Pos2; 8],
 }
 impl Emulator {
     fn new(path: PathBuf) -> Self {
@@ -81,7 +121,12 @@ impl Emulator {
             pressed: [false; 41],
             pulse: [Instant::now(); 41],
             pulse_steps: [0; 41],
+            master: MASTER_DEFAULT,
+            knob_angle: [0.; 8],
+            knob_accum: [0.; 8],
+            knob_centre: [pos2(0., 0.); 8],
         };
+        app.knob_angle[0] = master_angle(app.master);
         app.reset();
         app
     }
@@ -226,6 +271,36 @@ impl Emulator {
             format!("{label} · hold to press")
         });
     }
+    /// Pointer movement on drawn knob `index`: whole encoder clicks are queued
+    /// for the guest and the rest is kept; MASTER moves the ADC value.
+    fn turn_knob(&mut self, index: usize, encoder: Option<usize>, amount: f32) {
+        if amount == 0. {
+            return;
+        }
+        match encoder {
+            None => {
+                // A pot: the pointer follows the turn and stops at both ends.
+                let turn = amount / DETENT_PX * DETENT_ANGLE;
+                let value = self.master as f32
+                    + self.knob_accum[index]
+                    + turn / (1.5 * std::f32::consts::PI) * 1023.;
+                let value = value.clamp(0., 1023.);
+                self.master = value as u16;
+                self.knob_accum[index] = value - self.master as f32; // keep slow drags
+                self.knob_angle[index] = master_angle(self.master);
+                self.worker.master(self.master);
+            }
+            Some(e) => {
+                self.knob_accum[index] += amount;
+                let detents = (self.knob_accum[index] / DETENT_PX).trunc();
+                if detents != 0. {
+                    self.knob_accum[index] -= detents * DETENT_PX;
+                    self.worker.turn(e, detents as i32);
+                    self.knob_angle[index] += detents * DETENT_ANGLE;
+                }
+            }
+        }
+    }
     fn panel(&mut self, ui: &mut egui::Ui) {
         let available = ui.available_size();
         let scale = (available.x / 1160.).min(available.y / 700.).max(0.1);
@@ -250,17 +325,40 @@ impl Emulator {
             Stroke::new(scale, Color32::from_gray(48)),
             StrokeKind::Inside,
         );
-        for (x, y, name) in [
-            (91., 106., "MASTER"),
-            (208., 106., "SELECT"),
-            (91., 224., "PRESETS"),
-            (208., 224., "ALGORITHM"),
-            (632., 106., "KNOB1"),
-            (758., 106., "KNOB2"),
-            (884., 106., "KNOB3"),
-            (1010., 106., "KNOB4"),
-        ] {
-            c.knob(ui, x, y, name);
+        for (index, (x, y, name, encoder, keys)) in KNOBS.iter().enumerate() {
+            let hint = match encoder {
+                Some(_) => format!("{name} · drag around or scroll to turn · keys {keys}"),
+                None => format!("{name} volume · drag around or scroll · keys {keys}"),
+            };
+            let response = c.knob(ui, *x, *y, name, self.knob_angle[index], &hint);
+            // Circling the knob turns it by the pointer's angle around its
+            // centre (clockwise +); scroll up or the right-hand key: clockwise.
+            let mut amount = 0.;
+            let centre = c.origin + vec2(*x, *y) * c.scale;
+            self.knob_centre[index] = centre;
+            if let Some(now) = response
+                .interact_pointer_pos()
+                .filter(|_| response.dragged())
+            {
+                let (from, to) = (now - response.drag_delta() - centre, now - centre);
+                if from.length() > 6. * c.scale && to.length() > 6. * c.scale {
+                    let mut turn = to.x.atan2(-to.y) - from.x.atan2(-from.y);
+                    if turn > std::f32::consts::PI {
+                        turn -= std::f32::consts::TAU;
+                    } else if turn < -std::f32::consts::PI {
+                        turn += std::f32::consts::TAU;
+                    }
+                    amount += turn / DETENT_ANGLE * DETENT_PX;
+                }
+            }
+            if response.hovered() {
+                amount += ui.input(|i| i.raw_scroll_delta.y) * 0.5;
+            }
+            let (down, up) = KNOB_KEYS[index];
+            amount += ui.input(|i| {
+                (i.key_pressed(up) as i32 - i.key_pressed(down) as i32) as f32 * DETENT_PX
+            });
+            self.turn_knob(index, *encoder, amount);
         }
         c.box_at([290., 52., 270., 272.], 34., Color32::from_gray(8));
         c.box_at([310., 72., 230., 230.], 3., Color32::BLACK);
@@ -355,7 +453,15 @@ impl Canvas {
         self.painter
             .rect_filled(self.rect(rect), radius * self.scale, color);
     }
-    fn knob(&self, ui: &mut egui::Ui, x: f32, y: f32, name: &str) {
+    fn knob(
+        &self,
+        ui: &mut egui::Ui,
+        x: f32,
+        y: f32,
+        name: &str,
+        angle: f32,
+        hint: &str,
+    ) -> egui::Response {
         let p = self.origin + vec2(x, y) * self.scale;
         self.painter.text(
             p - vec2(0., 53.) * self.scale,
@@ -383,19 +489,17 @@ impl Canvas {
         }
         self.painter
             .circle_filled(p, 19. * self.scale, Color32::from_gray(35));
+        let pointer = vec2(angle.sin(), -angle.cos()) * self.scale;
         self.painter.line_segment(
-            [
-                p + vec2(-5., -11.) * self.scale,
-                p + vec2(-8., -18.) * self.scale,
-            ],
+            [p + pointer * 11., p + pointer * 18.],
             Stroke::new(3. * self.scale, INK),
         );
         ui.interact(
             Rect::from_center_size(p, vec2(56., 56.) * self.scale),
             egui::Id::new(name),
-            Sense::hover(),
+            Sense::drag(),
         )
-        .on_hover_text("Rotary input is not implemented yet");
+        .on_hover_text(hint)
     }
 }
 
@@ -447,8 +551,8 @@ impl eframe::App for Emulator {
                 ui.colored_label(Color32::LIGHT_RED, error);
                 ui.label("This firmware needs additional emulation support. The LCD retains its last guest-written pixels.");
             } else {
-                ui.label("Hold a key or button to press it · Arrow keys: octave · A W S E D R F G T H Y J K: notes");
-                ui.weak("The LCD follows the loaded firmware. Audio playback and rotary input are not implemented.");
+                ui.label("Hold a key or button to press it · Arrow keys: octave · A W S E D R F G T H Y J K: notes · Knobs: drag around, scroll, or 1–0 - = [ ] (MASTER: N / M)");
+                ui.weak("The LCD follows the loaded firmware. Audio playback is not implemented.");
             }
         });
         // Receive worker snapshots, then send this frame's input below.
@@ -645,6 +749,61 @@ mod tests {
                 .inspect(|machine| machine.cpu.as_ref().unwrap().steps),
             steps
         );
+    }
+    #[test]
+    fn circling_a_knob_clicks_its_encoder_and_master_stops_at_its_ends() {
+        let mut app = demo();
+        let ctx = egui::Context::default();
+        // Paused, the guest cannot play the queued clicks out before the check.
+        app.paused = true;
+        app.refresh(&ctx);
+        draw(&mut app, &ctx, vec![], true);
+        let drag = |app: &mut Emulator, index: usize, degrees: i32| {
+            let centre = app.knob_centre[index];
+            let at = |d: i32| {
+                let a = (d as f32).to_radians();
+                centre + vec2(a.sin(), -a.cos()) * 22.
+            };
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            draw(app, &ctx, vec![egui::Event::PointerMoved(at(0))], true);
+            draw(app, &ctx, vec![button(at(0), true)], true);
+            let step = degrees.signum() * 5;
+            for d in (step..=degrees)
+                .step_by(5)
+                .chain((degrees..=step).rev().step_by(5))
+            {
+                draw(app, &ctx, vec![egui::Event::PointerMoved(at(d))], true);
+            }
+            draw(app, &ctx, vec![button(at(degrees), false)], true);
+        };
+        // A quarter turn clockwise around KNOB1 is six 15-degree clicks.
+        drag(&mut app, 4, 90);
+        assert!(
+            (app.knob_angle[4] - 6. * DETENT_ANGLE).abs() < 1e-4,
+            "{}",
+            app.knob_angle[4]
+        );
+        // Endless: two full turns back keep counting.
+        drag(&mut app, 4, -720);
+        assert!(
+            (app.knob_angle[4] + 42. * DETENT_ANGLE).abs() < 1e-4,
+            "{}",
+            app.knob_angle[4]
+        );
+        let pending = app.worker.inspect(|machine| machine.encoders.clone());
+        assert!(pending.busy(), "the worker received the clicks");
+        // MASTER is a pot: a big clockwise turn pins it at full scale.
+        drag(&mut app, 0, 300);
+        assert_eq!(app.master, 1023);
+        let master = app
+            .worker
+            .inspect(|machine| machine.cpu.as_ref().unwrap().bus.devices.adc.master);
+        assert_eq!(master, 1023);
     }
     #[test]
     fn the_lcd_is_never_downscaled_and_sits_on_the_pixel_grid() {
