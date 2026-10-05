@@ -655,7 +655,7 @@ pub(crate) fn execute(
                 // unlike the neighboring packed-immediate encodings. Stock's
                 // battery clamp uses ECB0 0208 to compare against 520.
                 x & 4095
-            } else if matches!(kind, 0x83 | 0xd3 | 0xdb | 0xe3 | 0xeb) {
+            } else if matches!(kind, 0x83 | 0x8b | 0xd3 | 0xdb | 0xe3 | 0xeb) {
                 signed(x & 4095, 12) as u32
             } else {
                 packed(x)

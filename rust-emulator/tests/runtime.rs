@@ -47,6 +47,44 @@ fn unsigned_conditional_literals_do_not_expand_into_byte_masks() {
 }
 
 #[test]
+fn signed_not_equal_literals_preserve_negative_sentinels() {
+    // Vendor r3: E8B0 0B95 is if (r0 != -1131), not a packed bit mask.
+    // Stock also uses this form to check SDK returns against -1 and -97.
+    for threshold in [-2048i32, -1131, -97, -1, 0, 2047] {
+        for value in [threshold - 1, threshold, threshold + 1] {
+            let mut c = cpu(&[
+                0xe8b0,
+                0x1000 | (threshold as u16 & 4095),
+                0x2b42,
+                0x3642,
+                0,
+            ]);
+            c.r[0] = value as u32;
+            c.sr[5] = 15;
+            for _ in 0..3 {
+                c.step().unwrap();
+            }
+            assert_eq!(c.r[2], if value != threshold { 11 } else { 22 });
+            assert_eq!(c.r[0], value as u32);
+            assert_eq!(c.sr[5], 15);
+            assert_eq!(c.pc, XIP + 10);
+        }
+    }
+}
+
+#[test]
+fn mask_moves_use_the_same_replicated_byte_lanes_as_arithmetic() {
+    // Vendor r3: r0=0xff00ff, r1=0xff00ff00, r2=0x01010101.
+    let mut c = cpu(&[0xe060, 0x01ff, 0xe060, 0x12ff, 0xe060, 0x2301]);
+    c.sr[5] = 15;
+    for _ in 0..3 {
+        c.step().unwrap();
+    }
+    assert_eq!(&c.r[..3], &[0x00ff00ff, 0xff00ff00, 0x01010101]);
+    assert_eq!(c.sr[5], 15);
+}
+
+#[test]
 fn replicated_immediates_fill_both_pixels_and_keep_byte_lanes() {
     // Vendor r3 assembly: r0=r2*0x10001, then the other replicated forms.
     for (word, input, expected) in [

@@ -552,20 +552,11 @@ impl Cpu {
             op = "mov_special";
         } else if h == 0xe060 {
             let extra = self.read(pc + 2, 2)?;
-            let byte = extra & 255;
             let mode = (extra >> 10) & 3;
-            let value = if mode != 0 {
-                ((0x80 | (extra & 127)) << (32 - mode * 8)) >> ((extra >> 7) & 7)
-            } else if extra & 0x0f00 == 0x0300 {
-                byte * 0x0101_0101
-            } else if extra & 0x0f00 == 0x0100 {
-                (byte << 24) | (byte << 8)
-            } else if extra & 0x0f00 == 0 {
-                byte
-            } else {
+            if mode == 0 && extra & 0x0f00 > 0x0300 {
                 return Err(Fault::Unsupported { pc, word: h as u16 });
-            };
-            self.r[((extra >> 12) & 15) as usize] = value;
+            }
+            self.r[((extra >> 12) & 15) as usize] = crate::extended::packed(extra);
             next = pc + 4;
             op = "mov_mask";
         } else if h & 0xfff0 == 0xe040 {
