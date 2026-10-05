@@ -55,6 +55,29 @@ fn leading_zero_count_selects_the_highest_ready_task_priority() {
 }
 
 #[test]
+fn stock_uart_pin_routing_preserves_the_lcd_and_other_map_bits() {
+    // Original startup at 0x02023b6a: clear/select UT1 RX input channel,
+    // then route input channel 1 from PH8, using high base register r8.
+    let mut c = cpu(&[
+        0xefc2, 0x8080, 0xefc2, 0x8070, 0xef02, 0x8050,
+        0xefc1, 0x8d7c, 0xef01, 0x8d44,
+    ]);
+    c.r[8] = 0x51020;
+    c.bus.write(0x51020, 0x10, 4).unwrap();
+    c.bus.write(0x51024, 0xabcdfeff, 4).unwrap();
+    c.bus.write(0x51028, 0x1234ffff, 4).unwrap();
+    for _ in 0..5 {
+        c.step().unwrap();
+    }
+    assert_eq!(c.bus.read(0x51024, 4).unwrap(), 0xabcdf1ff);
+    assert_eq!(c.bus.read(0x51028, 4).unwrap(), 0x1234ff5f);
+    assert_eq!(c.bus.read(0x51020, 4).unwrap(), 0x10);
+    assert_eq!(c.r[8], 0x51020);
+    assert!(c.bus.write(0x51024, 0, 2).is_err());
+    assert!(c.bus.read(0x5102c, 4).is_err());
+}
+
+#[test]
 fn stock_can_disable_the_unused_high_speed_usb_controller() {
     let mut c = cpu(&[0]);
     c.bus.write(0x16800, 0, 4).unwrap();

@@ -216,6 +216,8 @@ pub struct Devices {
     tick_secondary: TickTimer,
     rc_measurement: RcMeasurement,
     random: Random,
+    // WL82.h JL_IOMAP CON2/CON3, used by fm1_uart.h for UART1 RX routing.
+    uart_iomap: [u32; 2],
     irq_config: [[u32; 32]; 2],
     priority_mask: [u32; 2],
     software: u8,
@@ -236,7 +238,9 @@ impl Devices {
         } else {
             &self.tick_secondary
         };
-        let value = if (0x10400..0x10800).contains(&a) {
+        let value = if matches!(a, 0x51024 | 0x51028) {
+            Some(self.uart_iomap[((a - 0x51024) / 4) as usize])
+        } else if (0x10400..0x10800).contains(&a) {
             self.startup_timers[((a - 0x10400) / 256) as usize].read(a & 255)
         } else if (TIMER4..TIMER4 + 12).contains(&a) {
             self.timer4.read(a - TIMER4)
@@ -299,7 +303,10 @@ impl Devices {
         if size != 4 && !(a == TICK_TIMER && size == 1) && self.read(address & !3, 4).is_some() {
             return Some(Err("device registers require word accesses"));
         }
-        if (0x10400..0x10800).contains(&a) {
+        if matches!(a, 0x51024 | 0x51028) {
+            self.uart_iomap[((a - 0x51024) / 4) as usize] = value;
+            Some(Ok(()))
+        } else if (0x10400..0x10800).contains(&a) {
             self.startup_timers[((a - 0x10400) / 256) as usize].write(a & 255, value)
         } else if (TIMER4..TIMER4 + 12).contains(&a) {
             self.timer4.write(a - TIMER4, value)
