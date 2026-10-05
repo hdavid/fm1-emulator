@@ -60,8 +60,16 @@ addresses fault visibly. Completion is synchronous, not cycle-accurate; INVON
 is treated as the FM-1 panel's normal electrical drive mode, not an RGB invert.
 The CPU runs continuously on a worker thread. The window sends matrix contacts
 and receives the latest LCD snapshot; unchanged pixels do not require texture
-uploads. Guest time still follows the emulated clock, so execution speed depends
-on the host and is not yet calibrated to real time.
+uploads. Guest time follows the emulated clock, so execution speed depends on
+the host. When the guest streams audio and a host output device opens (cpal,
+part of the `gui` feature), the guest's ALNK0 frames play through it and the
+worker paces execution by the playback queue, about 70 ms ahead: real time
+when the host keeps up. The instruction clock defaults to the firmware's
+system clock; `--cpu-mhz N` or the toolbar selector issues one instruction per
+N MHz of guest time instead (timers, DMA, USB and the watchdog keep their own
+clocks), so light firmware can play in real time. On an Apple-silicon Mac,
+Felucca, Jangada and SLOOP run at about 80% of real time at 24 MHz, so the
+sound still breaks up until the interpreter is faster.
 
 Instruction dispatch uses a shared first-word decode table and a bounded cache
 of wide instruction words. A bounded basic-block cache also prepares common
@@ -115,8 +123,8 @@ FX rendering and continued execution now pass with both the published package
 and local source ELF. Support remains partial: the local presets path can stop
 on an unsupported instruction. See the [Felucca investigation](FELUCCA.md) for
 the verified scope and remaining failure.
-Additional engines, CPU forms and peripheral behavior remain incomplete;
-host audio playback is absent. See [the measured full-firmware checks](FELUCCA.md).
+Additional engines, CPU forms and peripheral behavior remain incomplete. See
+[the measured full-firmware checks](FELUCCA.md).
 
 The loader accepts an FM-1 `.fwsc` package, an application `.bin` mapped at
 `0x02000120`, or an executable ELF32-pi32v2. Package loading checks the outer
@@ -216,7 +224,7 @@ not a percentage of complete instruction-set or musical-feature coverage.
 | LCD | Display guest initializes SPI/DMA, draws RGB565 pixels and live timer/key data | Other controller modes, SPI timing, pixel-exact physical comparison |
 | USB serial | Hardware guest enumerates and sends CDC debug bytes through DMA | Host OUT packets, broader controller/USB behavior |
 | USB MIDI | Not implemented | USB transport and MIDI packet handling |
-| Audio/DMA | Unchanged Felucca renders stereo SRAM, alternates ALNK halves, services audio IRQs; note samples are nonzero | Host playback, other clocks/formats, codec analog behavior, cycle timing |
+| Audio/DMA | Unchanged Felucca renders stereo SRAM, alternates ALNK halves, services audio IRQs; note samples are nonzero; the window plays them | Other clocks/formats, codec analog behavior, cycle timing |
 
 Original foundation evidence: seventeen Rust integration tests passed; a native boot executes
 2,371 instructions, services one guest interrupt, and reaches `foundation_done`.
