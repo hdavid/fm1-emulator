@@ -51,6 +51,37 @@ slow guest scan can observe and debounce them.
 Losing window focus releases contacts. Pause stops guest execution; Restart
 reloads the selected image and resets CPU, RAM, peripherals, and input state.
 
+### Web editor (USB-MIDI over a local WebSocket)
+
+When the firmware has a web editor, the window serves it on
+`http://127.0.0.1:8765/` (loopback only) and connects it to the emulated
+device: `FIRMWARE-ui.zip` next to `FIRMWARE.fwsc`, or `--ui DIR` (a folder with
+`index.html` or `editor.html`, such as a Felucca-family `web/`). "Open editor"
+opens the default browser; the status line shows the URL, connected pages, MIDI
+message counts and the port name. Without an editor the button is disabled.
+
+```sh
+./emulator --ui ~/src/Felucca/web felucca-0.9-beta.fwsc
+rust-emulator/scripts/make-ui-sidecar.sh ~/src/Felucca v0.9-beta felucca-0.9-beta.fwsc
+```
+
+- The USB host model then also acts as a USB-MIDI host, and the GUI worker
+  moves MIDI between the server and the device between instruction batches.
+- Every served HTML page gets a Web MIDI shim (`src/web/shim.js`):
+  `navigator.requestMIDIAccess` returns one input and one output named
+  `"<USB product> (FM-1 Emulator)"` ("Felucca (FM-1 Emulator)" for Felucca,
+  Jangada and SLOOP, whose editors look for /felucca/i), so editors run
+  unchanged in any browser.
+- `/midi` is a WebSocket of binary frames of raw MIDI bytes: from the browser
+  any split (running status allowed), to the browser one complete message per
+  frame.
+- Requests with a Host other than 127.0.0.1, localhost or [::1] on that port,
+  and WebSocket Origins other than those, are refused (DNS rebinding).
+
+The bridge is the `web` feature (tungstenite for the WebSocket handshake and
+framing, zip for the sidecar); `gui` includes it, and the core library keeps
+no dependencies.
+
 The UI reads only the panel's 240×240 framebuffer, gated by display enable,
 sleep, and active-low PA2 backlight. There are no symbol-specific drawing hooks
 or substituted application functions. SPI1 commands and SRAM DMA implement

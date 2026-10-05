@@ -6,6 +6,7 @@ use fm1_emu::{bus::Bus, cpu::Cpu, firmware::Firmware};
 mod host_audio;
 mod ui_leds;
 mod ui_theme;
+mod web_editor;
 mod worker;
 use std::{
     path::PathBuf,
@@ -130,6 +131,8 @@ struct Emulator {
     leds: ui_leds::LedView,
     /// The panel's colours (an index into `ui_theme::THEMES`).
     theme: usize,
+    /// The firmware's web editor and its MIDI bridge (off without one).
+    web: web_editor::WebEditor,
 }
 impl Emulator {
     fn new(path: PathBuf) -> Self {
@@ -156,6 +159,7 @@ impl Emulator {
             speed_mark: (Instant::now(), 0),
             leds: ui_leds::LedView::new(),
             theme: 0,
+            web: web_editor::WebEditor::disabled("No web editor"),
         };
         app.knob_angle[0] = master_angle(app.master);
         app.reset();
@@ -587,6 +591,20 @@ impl eframe::App for Emulator {
                         if ui.button("Restart").clicked() {
                             self.reset();
                         }
+                        let editor =
+                            ui.add_enabled(self.web.active(), egui::Button::new("Open editor"));
+                        let editor = match (self.web.url(), self.web.unavailable()) {
+                            (Some(url), _) => editor
+                                .on_hover_text(format!("Open {url} in the default browser")),
+                            (None, reason) => {
+                                editor.on_disabled_hover_text(reason.unwrap_or_default())
+                            }
+                        };
+                        if editor.clicked() {
+                            if let Err(error) = self.web.open_in_browser() {
+                                eprintln!("{error}");
+                            }
+                        }
                         let before = self.clock_mhz;
                         let selected = CLOCKS
                             .iter()
@@ -657,6 +675,18 @@ impl eframe::App for Emulator {
                     (None, None) => String::from("no audio output"),
                 };
                 ui.weak(format!("{speed} · {audio} · below 100% the sound breaks up"));
+                self.web.refresh();
+                ui.horizontal(|ui| {
+                    if self.web.active() {
+                        let lit = if self.web.busy() {
+                            ACCENT
+                        } else {
+                            Color32::from_gray(70)
+                        };
+                        ui.colored_label(lit, "●").on_hover_text("MIDI traffic");
+                    }
+                    ui.weak(self.web.status());
+                });
             }
         });
         // Receive worker snapshots, then send this frame's input below.
@@ -683,23 +713,28 @@ impl eframe::App for Emulator {
 struct Args {
     path: PathBuf,
     clock_mhz: Option<u32>,
+    /// Web editor files to serve instead of FIRMWARE-ui.zip.
+    ui: Option<PathBuf>,
     /// Panel colours (an index into `ui_theme::THEMES`); None: FM1_THEME or Classic.
     theme: Option<usize>,
 }
-const USAGE: &str = "usage: emulator [--cpu-mhz N] [--theme NAME] <firmware>";
+const USAGE: &str = "usage: emulator [--cpu-mhz N] [--ui DIR] [--theme NAME] <firmware>";
 /// The theme called `name`, or an error listing them.
 fn theme_named(name: &str) -> Result<usize, String> {
     ui_theme::find(name)
         .ok_or_else(|| format!("unknown theme {name:?}; themes: {}", ui_theme::names()))
 }
-/// `[--cpu-mhz N] [--theme NAME] FIRMWARE`.
+/// `[--cpu-mhz N] [--ui DIR] [--theme NAME] FIRMWARE`.
 fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Args, String> {
     let mut path = None;
     let mut clock = None;
+    let mut ui = None;
     let mut theme = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
-        if arg == "--theme" {
+        if arg == "--ui" {
+            ui = Some(PathBuf::from(args.next().ok_or("--ui needs a directory")?));
+        } else if arg == "--theme" {
             let name = args.next().ok_or("--theme needs a name")?;
             theme = Some(theme_named(&name.to_string_lossy())?);
         } else if arg == "--cpu-mhz" {
@@ -717,6 +752,7 @@ fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Args
     Ok(Args {
         path: path.ok_or(USAGE)?,
         clock_mhz: clock,
+        ui,
         theme,
     })
 }
@@ -743,10 +779,17 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            let mut app = Emulator::new(args.path);
+            let mut app = Emulator::new(args.path.clone());
             app.clock_mhz = args.clock_mhz;
             app.theme = theme;
             app.worker.clock(args.clock_mhz.map(|mhz| mhz * 1_000_000));
+            app.web =
+                web_editor::WebEditor::new(&args.path, args.ui.as_deref(), fm1_emu::web::ADDRESS);
+            match app.web.url() {
+                Some(url) => eprintln!("web editor at {url}"),
+                None => eprintln!("{}", app.web.unavailable().unwrap_or_default()),
+            }
+            app.worker.web(app.web.hub());
             match host_audio::HostAudio::open() {
                 Ok(audio) => {
                     app.worker.audio(Some(audio.queue.clone()));
@@ -754,7 +797,7 @@ fn main() -> eframe::Result {
                 }
                 Err(error) => app.audio_error = Some(error),
             }
-            app.reset(); // Apply the clock and audio from the first instruction.
+            app.reset(); // Apply the clock, audio and editor from the first instruction.
             app.worker.read_stdin();
             Ok(Box::new(app))
         }),
@@ -967,17 +1010,29 @@ mod tests {
         Args {
             path: PathBuf::from(path),
             clock_mhz,
+            ui: None,
             theme,
         }
     }
     #[test]
     fn the_command_line_takes_a_firmware_and_an_instruction_clock() {
         let parse = |args: &[&str]| parse_args(args.iter().map(std::ffi::OsString::from));
-        assert_eq!(parse(&["a.fwsc"]), Ok(args("a.fwsc", None, None)));
+        let args = |clock_mhz, ui: Option<&str>| Args {
+            path: PathBuf::from("a.fwsc"),
+            clock_mhz,
+            ui: ui.map(PathBuf::from),
+            theme: None,
+        };
+        assert_eq!(parse(&["a.fwsc"]), Ok(args(None, None)));
         assert_eq!(
             parse(&["--cpu-mhz", "24", "a.fwsc"]),
-            Ok(args("a.fwsc", Some(24), None))
+            Ok(args(Some(24), None))
         );
+        assert_eq!(
+            parse(&["a.fwsc", "--ui", "web"]),
+            Ok(args(None, Some("web")))
+        );
+        assert!(parse(&["a.fwsc", "--ui"]).is_err());
         assert!(parse(&["--cpu-mhz", "0", "a.fwsc"]).is_err());
         assert!(parse(&["a.fwsc", "b.fwsc"]).is_err());
         assert!(parse(&[]).is_err());
