@@ -174,3 +174,17 @@ fn an_interrupt_with_a_missing_vector_fails_visibly() {
         matches!(cpu.step(),Err(Fault::Access { fault, .. }) if fault.operation=="fetch" && fault.address==0)
     );
 }
+
+#[test]
+fn an_instruction_clock_override_sets_guest_time_per_instruction() {
+    for (hz, expected) in [(24_000_000, 2400), (240_000_000, 240)] {
+        let mut cpu = Cpu::new(Bus::new(vec![0; 8192]).unwrap(), fm1_emu::XIP);
+        cpu.bus.set_instruction_clock(Some(hz));
+        cpu.bus.write(TIMER4 + 8, u32::MAX, 4).unwrap();
+        cpu.bus.write(TIMER4, 0x4009, 4).unwrap();
+        for _ in 0..2400 {
+            cpu.step().unwrap(); // nop
+        }
+        assert_eq!(cpu.bus.read(TIMER4 + 4, 4).unwrap(), expected, "{hz} Hz");
+    }
+}
