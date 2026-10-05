@@ -693,6 +693,16 @@ impl Cpu {
                 self.sr[5] = self.pop()?;
                 name = "pop_irq_frame";
             }
+            Op::PopSpecial => {
+                // pop {reti, rete, retx, rets}: bit n restores sr[n], lowest
+                // first (SLOOP's tail calls: pop {rets}; goto f).
+                for n in 0..4 {
+                    if h & (1 << n) != 0 {
+                        self.sr[n] = self.pop()?;
+                    }
+                }
+                name = "pop_special";
+            }
             Op::CallRel32 => {
                 // Vendor startup uses a signed byte displacement after a 6-byte call.
                 let displacement =

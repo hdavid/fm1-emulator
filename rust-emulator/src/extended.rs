@@ -537,7 +537,9 @@ fn execute_wide(
                 0 => cpu.r[s] | cpu.r[c],
                 1 => cpu.r[s] ^ cpu.r[c],
                 2 => cpu.r[s] & cpu.r[c],
-                _ => !cpu.r[c],
+                // and-not, as in memory_logic and logic_immediate mode 7:
+                // stock `r1 = 1; r0 = r1 & ~r0` negates a 0/1 flag.
+                _ => cpu.r[s] & !cpu.r[c],
             };
             name = "logic_three";
         }
@@ -644,6 +646,10 @@ fn execute_wide(
                 cpu.r[c]
             } else if matches!(kind, 0x83 | 0x93 | 0x9b | 0xd3 | 0xdb | 0xeb) {
                 signed(x & 4095, 12) as u32
+            } else if kind == 0xcb {
+                // Plain imm12, not packed as Quarkslab lists it: SLOOP's
+                // reverb wraps `++line_i[3] >= 2791` with ecb1 0ae6 (<= 2790).
+                x & 4095
             } else {
                 packed(x)
             };
