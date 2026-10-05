@@ -24,6 +24,15 @@ pub(crate) fn packed(x: u32) -> u32 {
     }
 }
 
+/// The word offset of the read-modify-write memory forms (e866 bit set/flip/
+/// clear, e868 add/sub, e86c/e86d shift): x bits 2-7 as a signed byte,
+/// -128..124. JieLi's objdump: e868 12fc = [r1+-4] += r2, e86c 16fc =
+/// [r1+-4] <<= 6, e866 12fc = [r1+-4] |= 1 << r2 (ANALOG 2's hard sync
+/// writes b[i - 1] this way; read as +252 it overwrote the caller's frame).
+fn mem_offset(x: u32) -> u32 {
+    signed(x & 0xfc, 8) as u32
+}
+
 fn unsupported(pc: u32, h: u32) -> Box<Fault> {
     Box::new(Fault::Unsupported { pc, word: h as u16 })
 }
@@ -219,7 +228,7 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
             // (btctrler 0x0205d304: e86d 1607 = [r1+4] >>= 22, arithmetic,
             // sign-extending a 10-bit field built at bits 22-31). Mode in x
             // bits 0-1: 0 left, 2 logical right, 3 arithmetic right.
-            let address = cpu.r[d].wrapping_add(x & 252);
+            let address = cpu.r[d].wrapping_add(mem_offset(x));
             let shift = ((h & 1) << 4) | c as u32;
             let value = cpu.read(address, 4)?;
             cpu.write(
@@ -244,7 +253,7 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
             name = "rotate_right_immediate";
         }
         Op::MemoryAddRegister => {
-            let addr = cpu.r[d] + (x & 252);
+            let addr = cpu.r[d].wrapping_add(mem_offset(x));
             // x bits 0-1: 0 add, 2 sub (Quarkslab pi32v2; stock cbuf_read
             // does data_len -= n with e868 6c1a).
             let old = cpu.read(addr, 4)?;
@@ -603,7 +612,7 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
             name = "decrement_branch";
         }
         Op::MemoryBit => {
-            let addr = cpu.r[d] + (x & 252);
+            let addr = cpu.r[d].wrapping_add(mem_offset(x));
             let old = cpu.read(addr, 4)?;
             let mask = 1u32 << (cpu.r[c] & 31);
             cpu.write(
