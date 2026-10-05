@@ -26,6 +26,81 @@ fn u32_at(data: &[u8], offset: usize) -> Result<u32, String> {
     ))
 }
 
+/// A defined, named ELF symbol (section index != 0).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Symbol {
+    pub name: String,
+    pub address: u32,
+    pub size: u32,
+    /// `st_info & 0xf`: 2 = STT_FUNC.
+    pub kind: u8,
+}
+
+impl Symbol {
+    pub fn is_function(&self) -> bool {
+        self.kind == 2
+    }
+}
+
+/// Every defined, named symbol of an ELF32 image's symbol tables.
+pub fn elf_symbols(data: &[u8]) -> Result<Vec<Symbol>, String> {
+    if bytes(data, 0, 52)?[..4] != *b"\x7fELF" {
+        return Err("invalid ELF magic".into());
+    }
+    let shoff = u32_at(data, 32)? as usize;
+    let shsize = u16_at(data, 46)? as usize;
+    let shcount = u16_at(data, 48)? as usize;
+    let mut symbols = Vec::new();
+    if shcount > 0 && shsize != 40 {
+        return Err("invalid ELF section headers".into());
+    }
+    for index in 0..shcount {
+        let sh = bytes(data, shoff + index * shsize, shsize)?;
+        if u32_at(sh, 4)? != 2 {
+            continue;
+        }
+        let stride = u32_at(sh, 36)? as usize;
+        let size = u32_at(sh, 20)? as usize;
+        let link = u32_at(sh, 24)? as usize;
+        if stride != 16 || !size.is_multiple_of(stride) || link >= shcount {
+            return Err("invalid ELF symbol table".into());
+        }
+        let table = bytes(data, u32_at(sh, 16)? as usize, size)?;
+        let str_sh = bytes(data, shoff + link * shsize, shsize)?;
+        if u32_at(str_sh, 4)? != 3 {
+            return Err("invalid ELF string table".into());
+        }
+        let strings = bytes(
+            data,
+            u32_at(str_sh, 16)? as usize,
+            u32_at(str_sh, 20)? as usize,
+        )?;
+        for sym in table.chunks_exact(stride) {
+            if u16_at(sym, 14)? == 0 {
+                continue;
+            }
+            let name = strings
+                .get(u32_at(sym, 0)? as usize..)
+                .ok_or("invalid ELF symbol name")?;
+            let end = name
+                .iter()
+                .position(|&byte| byte == 0)
+                .ok_or("unterminated ELF symbol name")?;
+            let name = std::str::from_utf8(&name[..end])
+                .map_err(|_| "invalid UTF-8 ELF symbol name")?;
+            if !name.is_empty() {
+                symbols.push(Symbol {
+                    name: name.to_owned(),
+                    address: u32_at(sym, 4)?,
+                    size: u32_at(sym, 8)?,
+                    kind: sym[12] & 0xf,
+                });
+            }
+        }
+    }
+    Ok(symbols)
+}
+
 impl Firmware {
     pub fn load(path: &Path) -> Result<Self, String> {
         if path
@@ -125,52 +200,10 @@ impl Firmware {
         {
             return Err("ELF entry is outside the loaded application".into());
         }
-        let shoff = u32_at(data, 32)? as usize;
-        let shsize = u16_at(data, 46)? as usize;
-        let shcount = u16_at(data, 48)? as usize;
-        let mut symbols = BTreeMap::new();
-        if shcount > 0 && shsize != 40 {
-            return Err("invalid ELF section headers".into());
-        }
-        for index in 0..shcount {
-            let sh = bytes(data, shoff + index * shsize, shsize)?;
-            if u32_at(sh, 4)? != 2 {
-                continue;
-            }
-            let stride = u32_at(sh, 36)? as usize;
-            let size = u32_at(sh, 20)? as usize;
-            let link = u32_at(sh, 24)? as usize;
-            if stride != 16 || !size.is_multiple_of(stride) || link >= shcount {
-                return Err("invalid ELF symbol table".into());
-            }
-            let table = bytes(data, u32_at(sh, 16)? as usize, size)?;
-            let str_sh = bytes(data, shoff + link * shsize, shsize)?;
-            if u32_at(str_sh, 4)? != 3 {
-                return Err("invalid ELF string table".into());
-            }
-            let strings = bytes(
-                data,
-                u32_at(str_sh, 16)? as usize,
-                u32_at(str_sh, 20)? as usize,
-            )?;
-            for sym in table.chunks_exact(stride) {
-                if u16_at(sym, 14)? == 0 {
-                    continue;
-                }
-                let name = strings
-                    .get(u32_at(sym, 0)? as usize..)
-                    .ok_or("invalid ELF symbol name")?;
-                let end = name
-                    .iter()
-                    .position(|&byte| byte == 0)
-                    .ok_or("unterminated ELF symbol name")?;
-                let name = std::str::from_utf8(&name[..end])
-                    .map_err(|_| "invalid UTF-8 ELF symbol name")?;
-                if !name.is_empty() {
-                    symbols.insert(name.to_owned(), u32_at(sym, 4)?);
-                }
-            }
-        }
+        let symbols = elf_symbols(data)?
+            .into_iter()
+            .map(|symbol| (symbol.name, symbol.address))
+            .collect();
         Ok(Self {
             image,
             entry,

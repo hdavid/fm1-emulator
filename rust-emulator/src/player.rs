@@ -2,7 +2,7 @@
 // Headless "user at the panel" for play_check and preset_sweep: boots a
 // firmware, holds matrix keys, turns encoders (the fm1-ui knob model) and
 // keeps the last instructions for a fault report.
-use crate::{cpu::Cpu, firmware::Firmware, ui_knobs};
+use crate::{cpu::Cpu, firmware::Firmware, profile::Profile, ui_knobs};
 use std::{collections::VecDeque, path::Path};
 
 /// Guest instructions per second of guest time.
@@ -20,6 +20,8 @@ pub struct Player {
     pub cpu: Cpu,
     pub encoders: ui_knobs::Encoders,
     pub held: [bool; 41],
+    /// When set, every primary-core instruction run by `run` is counted.
+    pub profile: Option<Profile>,
     recent: VecDeque<(u32, &'static str, [u32; 16])>,
     trace: usize,
 }
@@ -61,6 +63,7 @@ impl Player {
             cpu,
             encoders: ui_knobs::Encoders::default(),
             held: [false; 41],
+            profile: None,
             recent: VecDeque::new(),
             trace,
         })
@@ -75,6 +78,9 @@ impl Player {
                 self.scan_panel()?;
             }
             let pc = self.cpu.pc;
+            if let Some(profile) = self.profile.as_mut() {
+                profile.record(pc, self.cpu.in_interrupt());
+            }
             match self.cpu.step() {
                 Ok(op) => {
                     if self.recent.len() >= self.trace {
