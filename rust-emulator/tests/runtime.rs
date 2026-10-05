@@ -1559,6 +1559,55 @@ fn extended_halfword_load_separates_sign_extension_from_the_offset() {
 }
 
 #[test]
+fn halfword_loads_sign_extend_addresses_independently_of_pixel_values() {
+    // Vendor assembler encodings include both ends of the signed ten-bit
+    // displacement and the stock LVGL renderer's negative preincrements.
+    for (h, x, offset) in [
+        (0xed52, 0x5080, -512),
+        (0xed52, 0x5d84, -300),
+        (0xed53, 0x5f8c, -4),
+        (0xed53, 0x5f8e, -2),
+        (0xed50, 0x5080, 0),
+        (0xed50, 0x5082, 2),
+        (0xed51, 0x528c, 300),
+        (0xed51, 0x5f8e, 510),
+    ] {
+        for (sign, expected) in [(0, 0xfedc), (4, 0xfffffedc)] {
+            for update in [0, 8] {
+                let mut c = cpu(&[h | sign | update, x]);
+                let base = RAM + 1024;
+                let address = base.wrapping_add(offset as u32);
+                c.r[8] = base;
+                c.bus.write(address, 0xfedc, 2).unwrap();
+                c.step().unwrap();
+                assert_eq!(c.r[5], expected);
+                assert_eq!(c.r[8], if update == 0 { base } else { address });
+                assert_eq!(c.bus.read(address, 2).unwrap(), 0xfedc);
+                assert_eq!(c.pc, XIP + 4);
+            }
+        }
+    }
+}
+
+#[test]
+fn stock_pixel_blending_keeps_writes_inside_the_frame_buffer() {
+    // 0x0201282C loads the previous pixel and updates its pointer; the
+    // final store at 0x020128B4 must use that same address, not r8+508.
+    let mut c = cpu(&[0xed5b, 0x5f8c, 0xed50, 0x1081]);
+    let pixel = RAM + 1024;
+    c.r[8] = pixel + 4;
+    c.r[1] = 0xe000;
+    c.bus.write(pixel, 0xffff, 2).unwrap();
+    c.bus.write(pixel + 512, 1, 2).unwrap(); // Audio run flag in stock.
+    c.step().unwrap();
+    assert_eq!(c.r[5], 0xffff);
+    assert_eq!(c.r[8], pixel);
+    c.step().unwrap();
+    assert_eq!(c.bus.read(pixel, 2).unwrap(), 0xe000);
+    assert_eq!(c.bus.read(pixel + 512, 2).unwrap(), 1);
+}
+
+#[test]
 fn stock_name_comparison_loads_a_byte_from_a_negative_offset() {
     // Vendor stock instruction at 0x020035c4: r3 = b[r3+-18] (u).
     let mut c = cpu(&[0xee51, 0x3e3e]);

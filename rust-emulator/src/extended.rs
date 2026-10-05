@@ -223,7 +223,10 @@ pub(crate) fn execute(
             let high = if store {
                 signed(h & 7, 3)
             } else {
-                (h & 1) as i32
+                // Loads have a signed ten-bit displacement. Bit 2 selects
+                // value sign extension; bit 1 belongs to the address sign.
+                // Stock LVGL uses ED5B to load at r8-4 and write back r8.
+                signed(h & 3, 2)
             };
             let offset = (high << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 14) as i32;
             let addr = cpu.r[s].wrapping_add(offset as u32);
