@@ -472,7 +472,7 @@ fn prepare(bus: &Bus, decode: &mut Decode, pc: u32, word: u16) -> Option<Instruc
         ),
         First::Extended(Extended::StackWord) => (
             Op::Memory(
-                a,
+                n,
                 Reg(30),
                 (((h >> 8) & 31) | (h & 32)) * 4,
                 4,
