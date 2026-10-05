@@ -498,6 +498,20 @@ fn execute_wide(
             };
             name = "shift_extended";
         }
+        Op::ShiftPair => {
+            // rD+1:rD shifted as one 64-bit value; modes as in e1c0.
+            let pair = d & 14;
+            let shift = ((x >> 8) & 3) * 16 + (x & 15);
+            let value = (cpu.r[pair + 1] as u64) << 32 | cpu.r[pair] as u64;
+            let value = match (x >> 10) & 3 {
+                0 => value << shift,
+                2 => value >> shift,
+                _ => ((value as i64) >> shift) as u64,
+            };
+            cpu.r[pair] = value as u32;
+            cpu.r[pair + 1] = (value >> 32) as u32;
+            name = "shift_pair";
+        }
         Op::BranchLong => {
             let value = match h & 0x60 {
                 0 => x & 4095,
@@ -598,6 +612,10 @@ fn execute_wide(
             } else {
                 cpu.r[reg] = cpu.read(addr, 4)?;
                 cpu.r[reg + 1] = cpu.read(addr + 4, 4)?;
+            }
+            if x & 3 == 3 {
+                // x & 3 == 3: a store that writes the address back to the base.
+                cpu.r[s] = addr;
             }
             name = "memory_pair";
         }

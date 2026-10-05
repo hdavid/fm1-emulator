@@ -102,6 +102,7 @@ pub(crate) enum Op {
     ShiftRegisterExtended,
     BytePreincrement,
     ShiftExtended,
+    ShiftPair,
     BranchLong,
     LogicThree,
     StoreRegisterList,
@@ -348,6 +349,8 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         BytePreincrement
     } else if h == 0xe1c0 && (x >> 10) & 3 != 1 {
         ShiftExtended
+    } else if h == 0xe1d0 && x & 0x10f0 == 0 && (x >> 10) & 3 != 1 {
+        ShiftPair
     } else if h & 0xff80 == 0xff00 && matches!(h & 15, 0 | 1 | 2 | 3 | 8 | 9 | 10 | 11 | 12 | 13) {
         BranchLong
     } else if h == 0xe190 && x & 15 <= 3 {
@@ -360,7 +363,7 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         StackSubword
     } else if h == 0xe9d4 {
         StackExtended
-    } else if h & 0xfff8 == 0xec50 && x & 3 <= 1 {
+    } else if h & 0xfff8 == 0xec50 && x & 3 != 2 {
         MemoryPair
     } else if matches!(h & 0xfff0, 0xe1a0 | 0xe1b0) {
         BitField

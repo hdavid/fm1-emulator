@@ -251,3 +251,50 @@ fn halfword_postincrement_with_low_bit_set_stores() {
     assert_eq!(c.r[1], 0xffff_9271);
     assert_eq!(c.pc, XIP + 4);
 }
+
+#[test]
+fn pair_shift_by_immediate_shifts_the_64_bit_register_pair() {
+    // Felucca 0.9-beta 0x02010462 (VOICE, eng_formant.c: f0 >> 4 with
+    // f0 = ((uint64_t)inc * 705600) >> 32): e1d0 2a04 = r3:r2 >>= 36
+    // (logical). Mode (x >> 10) & 3 as in e1c0: 0 lsl, 2 lsr, 3 asr; the
+    // pair is x >> 12 (even), the count ((x >> 8) & 3) * 16 + (x & 15).
+    let mut c = cpu(&[0xe1d0, 0x2a04]);
+    c.r[2] = 0xa2dd_ec80;
+    c.r[3] = 0x0000_125a;
+    c.step().unwrap();
+    assert_eq!((c.r[2], c.r[3]), (0x125, 0));
+    assert_eq!(c.pc, XIP + 4);
+    let mut c = cpu(&[0xe1d0, 0x4e00]); // r5:r4 >>>= 32 (Felucca 0x020102a4)
+    c.r[4] = 0x1234_5678;
+    c.r[5] = 0x8000_0001;
+    c.step().unwrap();
+    assert_eq!((c.r[4], c.r[5]), (0x8000_0001, 0xffff_ffff));
+    let mut c = cpu(&[0xe1d0, 0x2002]); // r3:r2 <<= 2 (Felucca 0x02010294)
+    c.r[2] = 0xc000_0001;
+    c.r[3] = 1;
+    c.step().unwrap();
+    assert_eq!((c.r[2], c.r[3]), (4, 7));
+}
+
+#[test]
+fn pair_store_with_low_bits_three_writes_the_base_back() {
+    // Felucca 0.9-beta 0x02010ac0 (TRIO trio_note_on): ec50 2213 stores
+    // v->ph[0], v->ph[1] = r2:r3 at [r1 + 0x20] and leaves r1 = v + 0x20;
+    // the following stores (ec50 2019 at +8 = ph[2], 6490 at +16 = s[1])
+    // and loads (6512 s[2], 6b12 age) only hit their fields from there.
+    let mut c = cpu(&[0xec50, 0x2213, 0xec50, 0x2019]);
+    c.r[1] = RAM + 0x100;
+    c.r[2] = 0;
+    c.r[3] = 0x1c00_0000;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x120, 4).unwrap(), 0);
+    assert_eq!(c.bus.read(RAM + 0x124, 4).unwrap(), 0x1c00_0000);
+    assert_eq!(c.r[1], RAM + 0x120);
+    c.r[2] = 0x3800_0000;
+    c.r[3] = 0;
+    c.bus.write(RAM + 0x12c, 0xffff_ffff, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x128, 4).unwrap(), 0x3800_0000);
+    assert_eq!(c.bus.read(RAM + 0x12c, 4).unwrap(), 0);
+    assert_eq!(c.r[1], RAM + 0x120);
+}
