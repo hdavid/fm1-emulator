@@ -56,3 +56,4 @@ mod nor;
 
 pub mod usb;
 pub mod usb_midi;
+pub mod web;
