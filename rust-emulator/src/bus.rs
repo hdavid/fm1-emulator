@@ -45,6 +45,10 @@ pub struct Bus {
     pub spi2: crate::spi2::Spi2,
     pub uart1: crate::uart1::Uart1,
     pub husb: crate::husb::Husb,
+    perf: crate::perf::Perf,
+    /// CPU clock cycles per oscillator tick (the CPU's clock multiple), for
+    /// the cycle counters.
+    cycles_per_tick: u32,
     code: crate::code_cache::CodeCache,
     /// NOR generation the code cache was last synchronized with.
     nor_generation: u64,
@@ -98,6 +102,8 @@ impl Bus {
             spi2: Default::default(),
             uart1: Default::default(),
             husb: Default::default(),
+            perf: Default::default(),
+            cycles_per_tick: 1,
             code: Default::default(),
             nor_generation: 0,
             mmio_stats: Default::default(),
@@ -156,6 +162,12 @@ impl Bus {
     pub(crate) fn core_control(&self, core: usize) -> u32 {
         self.count_mmio(0x1eee000 + 4 * core as u32, 0);
         self.cache.cores[core]
+    }
+
+    /// The CPU clock is `per_tick` times the 24 MHz oscillator.
+    pub(crate) fn set_cycles_per_tick(&mut self, per_tick: u32) {
+        self.perf.clock_change(self.now, self.cycles_per_tick);
+        self.cycles_per_tick = per_tick;
     }
 
     /// EMU_CON of `core` (exception enables: bit 2 divide by zero).
@@ -315,6 +327,11 @@ impl Bus {
             }
             if let Some(value) = self.nor.read(address) {
                 return Ok(value);
+            }
+            if size == 4 {
+                if let Some(value) = self.perf.read(address, self.now, self.cycles_per_tick) {
+                    return Ok(value);
+                }
             }
             if let Some(value) = self.guards.read(address) {
                 return Ok(value);
@@ -588,6 +605,17 @@ impl Bus {
             .map_err(|reason| Self::fault(address, size, "write", reason))?;
         if self.cache.write(address, size, value).is_some() {
             return Ok(());
+        }
+        if size == 4
+            && self
+                .perf
+                .write(address, value, self.now, self.cycles_per_tick)
+                .is_some()
+        {
+            return Ok(());
+        }
+        if address == crate::perf::DBG_CON {
+            self.perf.control(value, self.now, self.cycles_per_tick);
         }
         if let Some(result) = self.guards.write(address, value) {
             return result.map_err(|reason| Self::fault(address, size, "write", reason));

@@ -15,6 +15,7 @@ pub mod gpio;
 pub mod husb;
 pub mod lcd;
 mod package;
+mod perf;
 pub mod player;
 pub mod png;
 pub mod profile;

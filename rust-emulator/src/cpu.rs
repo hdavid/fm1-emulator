@@ -784,6 +784,7 @@ impl Cpu {
             ));
         }
         self.instructions_per_tick = mhz / 24;
+        self.bus.set_cycles_per_tick(mhz / 24);
         self.subtick = 0;
         Ok(())
     }
