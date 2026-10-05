@@ -10,7 +10,7 @@
 const BT_CONFIGURATION: &[u32] = &[
     0x28000, 0x28008, 0x2800c, 0x28010, 0x28014, 0x28018, 0x28028, 0x2802c, 0x28034, 0x2804c,
     0x20000, 0x2000c, 0x20018,
-    0x2002c, 0x20058, 0x2005c, 0x2007c, 0x20080, 0x20084, 0x200f0, 0x200f4, 0x20120, 0x20124,
+    0x2002c, 0x20058, 0x2005c, 0x2007c, 0x20080, 0x20084, 0x200c0, 0x200f0, 0x200f4, 0x20120, 0x20124,
     0x20128, 0x2012c, 0x20130, 0x20134, 0x20138, 0x20150, 0x20154, 0x20158, 0x2015c, 0x20160,
     0x20164, 0x20168, 0x2fc00, 0x2fc04, 0x2fc08, 0x2fc0c, 0x2fc10, 0x2fc14, 0x2fc18, 0x2fc1c,
     0x2fc20, 0x2fc24, 0x2fc28, 0x2fc40, 0x2fc44, 0x2fc48, 0x2fc70, 0x2fc78, 0x2fc7c, 0x2fc80,
@@ -87,6 +87,12 @@ impl Wireless {
         }
     }
     pub(crate) fn read(&self, address: u32, size: usize) -> Option<Result<u32, &'static str>> {
+        if address & !3 == 0x200c0 {
+            // Vendor bredr_frame.c __write_reg_txericntl packs a descriptor
+            // offset and two control fields here. Configuration only: neither
+            // transmit execution nor this register's readback is modeled.
+            return Some(Err("Bluetooth TX descriptor readback is not implemented"));
+        }
         if address & !3 == 0x28038 {
             return Some(if size != 4 {
                 Err("wireless registers require word accesses")

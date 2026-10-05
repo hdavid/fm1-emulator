@@ -135,6 +135,24 @@ fn stock_uart_midi_receive_setup_stays_empty_without_input() {
 }
 
 #[test]
+fn stock_bluetooth_can_set_a_tx_descriptor_without_starting_dma() {
+    // Stock 0x0206fb8e, vendor __write_reg_txericntl: [r2] = r1.
+    let mut c = cpu(&[0x60a1]);
+    c.r[2] = 0x200c0;
+    c.r[1] = 0x019a10c4;
+    c.bus.write(RAM, 0x12345678, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 2);
+    assert_eq!(c.r[1], 0x019a10c4);
+    assert_eq!(c.r[2], 0x200c0);
+    assert_eq!(c.bus.read(RAM, 4).unwrap(), 0x12345678);
+    assert_eq!(c.irq_entries, 0);
+    assert!(c.bus.read(0x200c0, 4).is_err());
+    assert!(c.bus.write(0x200c0, 1, 2).is_err());
+    assert!(c.bus.write(0x200c4, 1, 4).is_err());
+}
+
+#[test]
 fn stock_uart_pin_routing_preserves_the_lcd_and_other_map_bits() {
     // Original startup at 0x02023b6a: clear/select UT1 RX input channel,
     // then route input channel 1 from PH8, using high base register r8.
