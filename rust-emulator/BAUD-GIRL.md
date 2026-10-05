@@ -82,7 +82,7 @@ New diagnose options: `FM1_CALLERS=PC` (rets histogram in the hot window),
    per oscillator tick is a hypothesis. It has not been measured on hardware.
    Changing the instruction/oscillator ratio would shift every regression
    baseline (Felucca, Jangada and SLOOP frame counts), so it was not done.
-2. **`e86d 1602` at 0x0205d304 (experiment, ~206.6M).** Five e86d ops on
+2. (Resolved by fix 11; the analysis below was superseded.) **`e86d 1602` at 0x0205d304 (experiment, ~206.6M).** Five e86d ops on
    [r1+0..16] (low bits 2, 3, 2, 3, 3) follow BT RF register reads. The
    family is memory-operand ops (e864 logic, e866 bit, e868 add, e86c shift
    by immediate). e86d is probably a shift by register r6, but r6 = 0 here,
