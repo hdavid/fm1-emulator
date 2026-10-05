@@ -405,6 +405,43 @@ pub(crate) fn execute(
                     }
                     op = "stack_pair";
                 }
+                Wide::SaturateSigned16 => {
+                    cpu.r[d] = (cpu.r[c] as i32).clamp(-32768, 32767) as u32;
+                    op = "saturate_signed16";
+                }
+                Wide::PushSpecialMask => {
+                    // [--sp] = {sp, ssp, usp, icfg, psr, rets, retx, rete, reti}
+                    // for x = 782F (the fatal-exception frame of Felucca-derived
+                    // fm1_vec.S, read back by fm1_fault_c from reti upwards):
+                    // bit n is sr[n], pushed highest first. The saved sp is its
+                    // value before the push; nothing reads it back as a pointer.
+                    let sp = cpu.sr[14];
+                    for index in (0..15).rev() {
+                        if x & (1 << index) != 0 {
+                            let value = if index == 14 { sp } else { cpu.sr[index] };
+                            cpu.push(value)?;
+                        }
+                    }
+                    op = "push_special_mask";
+                }
+                Wide::PopSpecialMask => {
+                    // The same set popped lowest first; bit 15 pops pc (stock
+                    // FM-1 0x02043854: E950 8000 is {pc} = [sp++]).
+                    for index in 0..14 {
+                        if x & (1 << index) != 0 {
+                            cpu.sr[index] = cpu.pop()?;
+                        }
+                    }
+                    if x & 0x8000 != 0 {
+                        next = cpu.pop()?;
+                    }
+                    op = "pop_special_mask";
+                }
+                Wide::Trigger => {
+                    // Debug trigger event (SDK ___trig, followed by a printf in
+                    // jl_fft.c): nothing happens without an attached debugger.
+                    op = "trigger";
+                }
                 Wide::ReverseBytes => {
                     cpu.r[d] = cpu.r[c].swap_bytes();
                     op = "reverse_bytes";
@@ -444,7 +481,8 @@ pub(crate) fn execute(
                 }
                 Wide::DivideWide => {
                     let dividend = cpu.r[s] as u64 | ((cpu.r[s + 1] as u64) << 32);
-                    let quotient = if x & 1 == 0 {
+                    let d = d & 14;
+                    let quotient = if x & 0x1000 == 0 {
                         dividend.checked_div(cpu.r[c] as u64)
                     } else {
                         (dividend as i64)
@@ -582,11 +620,12 @@ pub(crate) fn execute(
                 }
                 Wide::ShiftRegisterExtended => {
                     let shift = cpu.r[c];
+                    // Quarkslab pi32v2 imm1619: 0 and 1 shift left, 2 logical
+                    // and 3 arithmetic right.
                     cpu.r[d] = match x & 3 {
-                        0 => cpu.r[s].checked_shl(shift).unwrap_or(0),
+                        0 | 1 => cpu.r[s].checked_shl(shift).unwrap_or(0),
                         2 => cpu.r[s].checked_shr(shift).unwrap_or(0),
-                        3 => ((cpu.r[s] as i32) >> shift.min(31)) as u32,
-                        _ => return Ok(None),
+                        _ => ((cpu.r[s] as i32) >> shift.min(31)) as u32,
                     };
                     op = "shift_register_extended";
                 }

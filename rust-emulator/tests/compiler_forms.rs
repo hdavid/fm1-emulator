@@ -602,3 +602,229 @@ fn register_conditional_blocks_with_x_bits_7_and_6_are_unsupported() {
     let mut c = cpu(&[0xe813, 0x00c0, 0x2141, 0x2140]);
     assert!(c.step().is_err());
 }
+
+// Arithmetic, conversions and system forms.
+
+#[test]
+fn long_divide_with_bit_12_set_is_signed() {
+    // Felucca 0.9-beta 0x02010524 / Jangada 0x020127be (eng_formant.c:
+    // b = ((int64_t)b * (int32_t)(f0 + (f0 >> 4))) / f): e1f6 3620 =
+    // r3:r2 = r3:r2 / r6, signed (bit 12, as for e1f8 and e1fc).
+    let mut c = cpu(&[0xe1f6, 0x3620]);
+    c.r[2] = 0xffff_ff00; // -256
+    c.r[3] = 0xffff_ffff;
+    c.r[6] = 16;
+    c.step().unwrap();
+    assert_eq!((c.r[2], c.r[3]), (0xffff_fff0, 0xffff_ffff)); // -16
+    let mut c = cpu(&[0xe1f6, 0x3620]);
+    c.r[2] = 0x0016_0434;
+    c.r[3] = 0;
+    c.r[6] = 0xffff_fffe; // -2
+    c.step().unwrap();
+    assert_eq!((c.r[2], c.r[3]), (0xfff4_fde6, 0xffff_ffff));
+}
+
+#[test]
+fn register_shift_covers_both_left_forms_and_arithmetic_right() {
+    // Felucca 0.9-beta 0x02011b36 (a synth engine's DSP): e1c8 2253 =
+    // r2 = r5 >>> r2 (arithmetic). Quarkslab pi32v2: imm1619 0 and 1 lsl,
+    // 2 lsr, 3 asr.
+    let mut c = cpu(&[0xe1c8, 0x2253]);
+    c.r[5] = 0xffff_f000; // -4096
+    c.r[2] = 4;
+    c.step().unwrap();
+    assert_eq!(c.r[2], 0xffff_ff00); // -256
+    let mut c = cpu(&[0xe1c8, 0x2251]); // r2 = r5 << r2
+    c.r[5] = 3;
+    c.r[2] = 4;
+    c.step().unwrap();
+    assert_eq!(c.r[2], 48);
+    let mut c = cpu(&[0xe1c8, 0x2253]); // shifts past 31 keep the sign
+    c.r[5] = 0x8000_0000;
+    c.r[2] = 40;
+    c.step().unwrap();
+    assert_eq!(c.r[2], 0xffff_ffff);
+}
+
+#[test]
+fn signed_field_extract_sign_extends() {
+    // JieLi objdump: e1b0 b041 = r0 = sextra(r11, p:0, l:16) (Baud Girl
+    // text renderer 0x02012c5e); e1b1 0d0c = r1 = uextra(r0, p:26, l:3),
+    // e1b1 0d0d = r1 = sextra(r0, p:26, l:3).
+    let mut c = cpu(&[0xe1b0, 0xb041, 0xe1b1, 0x0d0c, 0xe1b1, 0x0d0d]);
+    c.r[11] = 0x1234_fff4;
+    c.step().unwrap();
+    assert_eq!(c.r[0], 0xffff_fff4);
+    c.r[0] = 0b101 << 26;
+    c.step().unwrap();
+    assert_eq!(c.r[1], 5);
+    c.step().unwrap();
+    assert_eq!(c.r[1], 0xffff_fffd);
+}
+
+#[test]
+fn signed_sixteen_bit_saturation() {
+    // Stock 0x0203f82c: e078 2201, r2 = sat16(r2) (s); e078 2101 reads r1.
+    for (value, expected) in [(40000, 32767), (-40000, -32768), (-5, -5), (32767, 32767)] {
+        let mut c = cpu(&[0xe078, 0x2101]);
+        c.r[1] = value as u32;
+        c.step().unwrap();
+        assert_eq!(c.r[2], expected as u32);
+        assert_eq!(c.r[1], value as u32);
+    }
+}
+
+#[test]
+fn float_to_integer_conversions_follow_the_vendor_rounding_modes() {
+    // JieLi objdump --mattr=+fprev1: e53f 0f12..3f12 = r1 = ftoi(r2)
+    // (even/trunc/ceil/floor), 4f..7f = ftou(...), cf..ff = r1 = ftof(r2)
+    // (even/trunc/ceil/floor). FM-1_093 0x0201e4a4: e53f 5f22 =
+    // r2 = ftou(r2) (trunc) after r2 = r2 + 0.5f.
+    let cases: [(u16, f32, u32); 12] = [
+        (0x120f, 2.5, 2),
+        (0x121f, -2.7, (-2i32) as u32),
+        (0x122f, -2.3, (-2i32) as u32),
+        (0x123f, -2.3, (-3i32) as u32),
+        (0x124f, 3.5, 4),
+        (0x125f, 7.9, 7),
+        (0x126f, 7.1, 8),
+        (0x127f, 7.9, 7),
+        (0x12cf, 2.5, 2.0f32.to_bits()),
+        (0x12df, -2.7, (-2.0f32).to_bits()),
+        (0x12ef, 2.1, 3.0f32.to_bits()),
+        (0x12ff, -2.1, (-3.0f32).to_bits()),
+    ];
+    for (x, input, expected) in cases {
+        let mut c = cpu(&[0xe53f, x]);
+        c.r[2] = input.to_bits();
+        c.step().unwrap();
+        assert_eq!(c.r[1], expected, "e53f {x:04x} on {input}");
+    }
+}
+
+#[test]
+fn half_precision_conversions_use_the_low_halfword() {
+    // objdump: e53f af12 = r1.l = ftof(r2); e53f bf12 = r1 = ftof(r2.l).
+    let mut c = cpu(&[0xe53f, 0x12af, 0xe53f, 0x31bf]);
+    c.r[1] = 0xabcd_0000;
+    c.r[2] = 1.5f32.to_bits();
+    c.step().unwrap();
+    assert_eq!(c.r[1], 0xabcd_3e00); // 1.5 as binary16 in the low half
+    c.step().unwrap(); // r3 = ftof(r1.l)
+    assert_eq!(c.r[3], 1.5f32.to_bits());
+}
+
+#[test]
+fn special_register_push_and_pop_cover_every_mask() {
+    // Vendor objdump 0x04c0-0x04ff: [--sp] = {psr, sr4, rets, retx, rete,
+    // reti} for bits 5..0; 0x0480-0x04bf pop the same sets. Every interrupt
+    // stub of fm1_vec.S (Felucca/Jangada/SLOOP) starts with 04c8,
+    // [--sp] = {rets}. The lowest register is at the lowest address, as the
+    // irq frame pushes (04e9) and pops (04a9) the firmware relies on.
+    for mask in 0..64u16 {
+        let mut c = cpu(&[0x04c0 | mask, 0x0480 | mask]);
+        c.sr[14] = RAM + 0x100;
+        for i in 0..6 {
+            c.sr[i] = 0x1000 + i as u32;
+        }
+        c.step().unwrap();
+        let count = mask.count_ones();
+        assert_eq!(c.sr[14], RAM + 0x100 - 4 * count, "mask {mask:#x}");
+        let mut address = c.sr[14];
+        for i in 0..6 {
+            if mask & (1 << i) != 0 {
+                assert_eq!(c.bus.read(address, 4).unwrap(), 0x1000 + i as u32);
+                address += 4;
+            }
+        }
+        for i in 0..6 {
+            c.sr[i] = 0;
+        }
+        c.step().unwrap();
+        assert_eq!(c.sr[14], RAM + 0x100);
+        for i in 0..6 {
+            let expected = if mask & (1 << i) != 0 {
+                0x1000 + i as u32
+            } else {
+                0
+            };
+            assert_eq!(c.sr[i], expected, "mask {mask:#x} sr{i}");
+        }
+        assert_eq!(c.pc, XIP + 4);
+    }
+}
+
+#[test]
+fn special_register_mask_push_saves_the_fatal_frame() {
+    // fm1_vec.S fm1_fatal_common: e958 782f is
+    // [--sp] = {sp, ssp, usp, icfg, psr, rets, retx, rete, reti}; fm1_fault_c
+    // reads it back as f[16] reti .. f[24] sp, so the lowest special register
+    // is at the lowest address. e950 382f pops the same set without sp.
+    let mut c = cpu(&[0xe958, 0x782f, 0xe950, 0x382f]);
+    c.sr = std::array::from_fn(|i| 0x100 + i as u32);
+    c.sr[14] = RAM + 0x100;
+    c.step().unwrap();
+    assert_eq!(c.sr[14], RAM + 0x100 - 36);
+    let saved: Vec<u32> = (0..9)
+        .map(|i| c.bus.read(RAM + 0x100 - 36 + 4 * i, 4).unwrap())
+        .collect();
+    // sp is saved as it was before the push (UNCERTAIN: objdump cannot say).
+    assert_eq!(
+        saved,
+        [
+            0x100,
+            0x101,
+            0x102,
+            0x103,
+            0x105,
+            0x10b,
+            0x10c,
+            0x10d,
+            RAM + 0x100
+        ]
+    );
+    for i in [0, 1, 2, 3, 5, 11, 12, 13] {
+        c.sr[i] = 0;
+    }
+    c.step().unwrap();
+    assert_eq!(c.sr[14], RAM + 0x100 - 4);
+    for i in [0, 1, 2, 3, 5, 11, 12, 13] {
+        assert_eq!(c.sr[i], 0x100 + i as u32, "sr{i}");
+    }
+    assert_eq!(c.pc, XIP + 8);
+}
+
+#[test]
+fn special_register_mask_pop_of_pc_returns() {
+    // Stock FM-1 0x02043854: e950 8000, {pc} = [sp++].
+    let mut c = cpu(&[0xe950, 0x8000]);
+    c.sr[14] = RAM + 0x100;
+    c.bus.write(RAM + 0x100, XIP + 0x40, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 0x40);
+    assert_eq!(c.sr[14], RAM + 0x104);
+}
+
+#[test]
+fn trigger_is_a_debug_event_that_continues() {
+    // e870 0000 `trigger`: the SDK's ___trig (jl_fft.c) is followed by a
+    // printf, so execution continues; fm1_fatal_common starts with it.
+    let mut c = cpu(&[0xe870, 0x0000]);
+    c.r = std::array::from_fn(|i| i as u32);
+    let (r, sr) = (c.r, c.sr);
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 4);
+    assert_eq!((c.r, c.sr), (r, sr));
+}
+
+#[test]
+fn data_cache_flush_of_a_line_changes_nothing() {
+    // Stock 0x01c00e1e: csync; 0225 flush [r5]; csync, over every line
+    // (memory is not cached here, as flushinv [rN]).
+    let mut c = cpu(&[0x0225, 0x022f]);
+    c.r = std::array::from_fn(|i| RAM + 32 * i as u32);
+    let (r, sr) = (c.r, c.sr);
+    c.step().unwrap();
+    c.step().unwrap();
+    assert_eq!((c.r, c.sr, c.pc), (r, sr, XIP + 4));
+}

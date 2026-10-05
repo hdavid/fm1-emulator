@@ -292,14 +292,14 @@ impl Cpu {
             .map_err(|fault| Fault::Access { pc: self.pc, fault })
     }
 
-    fn push(&mut self, value: u32) -> Result<(), Fault> {
+    pub(crate) fn push(&mut self, value: u32) -> Result<(), Fault> {
         let address = self.sr[14].wrapping_sub(4);
         self.write(address, value)?;
         self.sr[14] = address;
         Ok(())
     }
 
-    fn pop(&mut self) -> Result<u32, Fault> {
+    pub(crate) fn pop(&mut self) -> Result<u32, Fault> {
         let value = self.read(self.sr[14], 4)?;
         self.sr[14] = self.sr[14].wrapping_add(4);
         Ok(value)
@@ -730,13 +730,24 @@ impl Cpu {
                 self.push(self.sr[3])?;
                 op = "push_rets";
             }
-            First::PushReti => {
-                self.push(self.sr[0])?;
-                op = "push_reti";
+            First::PushSpecial => {
+                // Mask bit n is sr[n] (reti, rete, retx, rets, sr4, psr); the
+                // lowest register ends at the lowest address, as the measured
+                // 04e1/04e8/04e9 interrupt frames.
+                for n in (0..6).rev() {
+                    if h & (1 << n) != 0 {
+                        self.push(self.sr[n])?;
+                    }
+                }
+                op = "push_special";
             }
-            First::PopReturnRegister => {
-                self.sr[if h == 0x0481 { 0 } else { 3 }] = self.pop()?;
-                op = "pop_return_register";
+            First::PopSpecial => {
+                for n in 0..6 {
+                    if h & (1 << n) != 0 {
+                        self.sr[n] = self.pop()?;
+                    }
+                }
+                op = "pop_special";
             }
             First::PopRegs => {
                 let boundary = (h & 15) as usize;
@@ -779,26 +790,6 @@ impl Cpu {
                     _ => self.sr[13] = self.sr[14],
                 }
                 op = "move_stack_pointer";
-            }
-            First::PushIrqFrame => {
-                self.push(self.sr[5])?;
-                if h != 0x04e1 {
-                    self.push(self.sr[3])?;
-                }
-                if h != 0x04e8 {
-                    self.push(self.sr[0])?;
-                }
-                op = "push_irq_frame";
-            }
-            First::PopIrqFrame => {
-                if h != 0x04a8 {
-                    self.sr[0] = self.pop()?;
-                }
-                if h != 0x04a1 {
-                    self.sr[3] = self.pop()?;
-                }
-                self.sr[5] = self.pop()?;
-                op = "pop_irq_frame";
             }
             First::CallRel32 => {
                 // Vendor startup uses a signed byte displacement after a 6-byte call.
