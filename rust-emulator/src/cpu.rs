@@ -305,6 +305,16 @@ impl Cpu {
         Ok(value)
     }
 
+    /// Whether the primary core is halted in `idle`, waiting for an interrupt.
+    pub fn halted(&self) -> bool {
+        self.idle
+    }
+
+    /// Whether the primary core is running an interrupt handler.
+    pub fn in_interrupt(&self) -> bool {
+        self.in_interrupt
+    }
+
     pub fn step(&mut self) -> Result<&'static str, Fault> {
         let control = self.bus.core_control(1);
         if control & 2 != 0 {
