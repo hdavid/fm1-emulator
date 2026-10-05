@@ -65,6 +65,7 @@ pub struct Timer {
     period: u32,
     divider_phase: u64,
     pub pending: bool,
+    pub lsb_stub_used: bool,
 }
 
 impl Timer {
@@ -80,14 +81,23 @@ impl Timer {
     fn write(&mut self, offset: u32, value: u32) -> Option<Result<(), &'static str>> {
         match offset {
             0 => {
-                // Only the source and dividers actually used by the FM-1 HAL.
-                if value & 3 > 1 || (value & 3 == 1 && (value & 12 != 8 || (value >> 4) & 15 > 1)) {
+                // Only the sources and dividers actually used: source 2 (OSC,
+                // FM-1 HAL) and source 0 (lsb_clk, SDK clk_get("timer"); the
+                // stock app writes CON = 1 at 0x0200573a). STUB: lsb_clk is
+                // not modelled, so source 0 counts at the oscillator rate and
+                // sets lsb_stub_used; its real rate is unverified.
+                if value & 3 > 1
+                    || (value & 3 == 1 && (!matches!(value & 12, 0 | 8) || (value >> 4) & 15 > 1))
+                {
                     return Some(Err("unsupported timer clock source, mode, or divider"));
                 }
                 if value & (1 << 14) != 0 {
                     self.pending = false;
                 }
                 self.control = value & 0x3fff;
+                if value & 15 == 1 {
+                    self.lsb_stub_used = true;
+                }
                 if value & 3 == 0 {
                     self.divider_phase = 0;
                 }

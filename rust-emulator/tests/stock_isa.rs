@@ -370,6 +370,27 @@ fn memory_shift_high_form_sign_extends_ten_bit_rf_fields() {
 }
 
 #[test]
+fn signed_greater_than_immediate_conditional_keeps_non_negative_bytes() {
+    // FM-1_093 0x02004872: ee37 5fff 4cbf 21c5 4cb9 =
+    // if (r7 > -1) { b[r3+12] = r7; r5 += 1 } else { b[r3+12] = r1 }
+    // after r7 = b[r3+1] (signed). Kind 0xe3: signed >, signed imm12.
+    for (r7, stored, count) in [(5u32, 5u32, 1u32), (0, 0, 1), (0xffff_ff80, 0xff, 0)] {
+        let mut c = cpu(&[0xee37, 0x5fff, 0x4cbf, 0x21c5, 0x4cb9, 0x0000]);
+        c.r[1] = 0xff;
+        c.r[3] = RAM;
+        c.r[7] = r7;
+        // Taken: the skip over the else slot happens on the next step, which
+        // then also runs the trailing nop.
+        while c.pc < XIP + 10 {
+            c.step().unwrap();
+            assert!(c.steps <= 4);
+        }
+        assert_eq!(c.bus.read(RAM + 12, 1).unwrap(), stored, "r7 = {r7:#x}");
+        assert_eq!(c.r[5], count, "r7 = {r7:#x}");
+    }
+}
+
+#[test]
 fn register_repeat_with_a_zero_count_skips_its_block() {
     let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);
     c.r[1] = RAM;

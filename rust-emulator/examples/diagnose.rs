@@ -168,6 +168,9 @@ fn run() -> Result<(), String> {
     if watchdog_off {
         eprintln!("EXPERIMENT: watchdog expiry disabled (FM1_WATCHDOG_OFF=1)");
     }
+    if cpu.bus.devices.timer4.lsb_stub_used || cpu.bus.devices.timer5.lsb_stub_used {
+        eprintln!("STUB timer: lsb_clk source counted at the oscillator rate");
+    }
     let radio = cpu.bus.radio.accesses.get();
     if radio > 0 {
         eprintln!("STUB radio (JL_WL, no RF emulated): {radio} register accesses");
