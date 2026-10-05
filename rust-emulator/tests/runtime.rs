@@ -811,7 +811,11 @@ fn special_register_push_and_pop_cover_every_mask() {
         c.step().unwrap();
         assert_eq!(c.sr[14], RAM + 0x100);
         for i in 0..6 {
-            let expected = if mask & (1 << i) != 0 { 0x1000 + i as u32 } else { 0 };
+            let expected = if mask & (1 << i) != 0 {
+                0x1000 + i as u32
+            } else {
+                0
+            };
             assert_eq!(c.sr[i], expected, "mask {mask:#x} sr{i}");
         }
         assert_eq!(c.pc, XIP + 4);
@@ -835,7 +839,17 @@ fn special_register_mask_push_saves_the_fatal_frame() {
     // sp is saved as it was before the push (UNCERTAIN: objdump cannot say).
     assert_eq!(
         saved,
-        [0x100, 0x101, 0x102, 0x103, 0x105, 0x10b, 0x10c, 0x10d, RAM + 0x100]
+        [
+            0x100,
+            0x101,
+            0x102,
+            0x103,
+            0x105,
+            0x10b,
+            0x10c,
+            0x10d,
+            RAM + 0x100
+        ]
     );
     for i in [0, 1, 2, 3, 5, 11, 12, 13] {
         c.sr[i] = 0;
@@ -905,7 +919,9 @@ fn unsigned_conditional_immediates_are_not_sign_extended() {
     // 3000 is 0xbb8: bit 11 set, still an unsigned 3000 (objdump agrees for
     // e93X and e9bX alike).
     for (x, expected) in [(100, 16), (2999, 16), (3000, 5), (4000, 5)] {
-        let mut c = cpu(&[0xe1e2, 0x1003, 0x21c2, 0xe930, 0x0bb8, 0x1612, 0x1620, 0x0080]);
+        let mut c = cpu(&[
+            0xe1e2, 0x1003, 0x21c2, 0xe930, 0x0bb8, 0x1612, 0x1620, 0x0080,
+        ]);
         c.r[0] = x;
         c.r[1] = 5;
         c.sr[3] = XIP + 0x40;
@@ -945,4 +961,211 @@ fn conditional_blocks_skip_six_byte_compare_branches_whole() {
     assert_eq!(c.pc, XIP + 10);
     c.step().unwrap();
     assert_eq!(c.r[1], 1);
+}
+
+// Forms op-scan found in reachable stock FM-1 / FM-1_093 (Baud Girl) code.
+
+#[test]
+fn mask_move_uses_the_packed_immediate_forms() {
+    // Stock 0x020259ac: e060 3264, r3 = 0x64006400 (was rejected); e060
+    // 3164 is r3 = 0x640064 in objdump (was 0x64006400).
+    for (x, expected) in [
+        (0x3264, 0x6400_6400),
+        (0x3164, 0x0064_0064),
+        (0x3364, 0x6464_6464),
+        (0x3064, 0x64),
+    ] {
+        let mut c = cpu(&[0xe060, x]);
+        c.step().unwrap();
+        assert_eq!(c.r[3], expected, "x {x:04x}");
+        assert_eq!(c.pc, XIP + 4);
+    }
+}
+
+#[test]
+fn word_postincrement_immediates_are_signed_eleven_bit() {
+    // ecd8-ecdf: offset (h & 7) : x[11:8] : x[3:2], signed; x bit 0 store.
+    // Stock 0x02071dae: ecdf 4f00 r4 = [r0++=-16]; 0x020407fc: ecdf 3f29
+    // [r2++=-8] = r3; ecda 1238 r1 = [r3++=552].
+    let mut c = cpu(&[0xecdf, 0x4f00, 0xecdf, 0x3f29, 0xecda, 0x1238]);
+    c.r[0] = RAM + 0x100;
+    c.bus.write(RAM + 0x100, 0x1111_2222, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!((c.r[4], c.r[0]), (0x1111_2222, RAM + 0x100 - 16));
+    c.r[2] = RAM + 0x200;
+    c.r[3] = 0xabcd_0123;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x200, 4).unwrap(), 0xabcd_0123);
+    assert_eq!(c.r[2], RAM + 0x200 - 8);
+    c.r[3] = RAM + 0x300;
+    c.bus.write(RAM + 0x300, 77, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!((c.r[1], c.r[3]), (77, RAM + 0x300 + 552));
+}
+
+#[test]
+fn halfword_postincrement_immediates_are_signed_ten_bit() {
+    // edd0-edd7: offset (h & 3) : x[11:8] : x[3:1], signed; h bit 2 is a
+    // signed load or a store of the high half. Stock 0x0204068c: edd3 3f0d
+    // h[r0++=-4] = r3; edd4 1231 h[r3++=32] = r1.h; edd6 1232
+    // r1 = h[r3++=-478] (s).
+    let mut c = cpu(&[0xedd3, 0x3f0d, 0xedd4, 0x1231, 0xedd6, 0x1232]);
+    c.r[0] = RAM + 0x100;
+    c.r[3] = 0x1234_5678;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x100, 2).unwrap(), 0x5678);
+    assert_eq!(c.r[0], RAM + 0x100 - 4);
+    c.r[1] = 0xbeef_cafe;
+    c.r[3] = RAM + 0x200;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x200, 2).unwrap(), 0xbeef);
+    assert_eq!(c.r[3], RAM + 0x200 + 32);
+    c.r[3] = RAM + 0x400;
+    c.bus.write(RAM + 0x400, 0xfedc, 2).unwrap();
+    c.step().unwrap();
+    assert_eq!((c.r[1], c.r[3]), (0xffff_fedc, RAM + 0x400 - 478));
+}
+
+#[test]
+fn byte_postincrement_immediates_are_signed_nine_bit() {
+    // eed0-eed5: offset (h & 1) : x[11:8] : x[3:0], signed. FM-1_093
+    // 0x020a7de6: eed1 3f28 r3 = b[r2++=-8] (u); eed3 1230 b[r3++=-224] = r1;
+    // eed5 3f28 r3 = b[r2++=-8] (s).
+    let mut c = cpu(&[0xeed1, 0x3f28, 0xeed3, 0x1230, 0xeed5, 0x3f28]);
+    c.r[2] = RAM + 0x100;
+    c.bus.write(RAM + 0x100, 0xf0, 1).unwrap();
+    c.step().unwrap();
+    assert_eq!((c.r[3], c.r[2]), (0xf0, RAM + 0x100 - 8));
+    c.r[1] = 0x1234_5678;
+    c.r[3] = RAM + 0x200;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x200, 1).unwrap(), 0x78);
+    assert_eq!(c.r[3], RAM + 0x200 - 224);
+    c.r[2] = RAM + 0x100;
+    c.step().unwrap();
+    assert_eq!((c.r[3], c.r[2]), (0xffff_fff0, RAM + 0x100 - 8));
+}
+
+#[test]
+fn register_postincrement_accesses_advance_by_a_register() {
+    // x bits 0-1 of ecde/edde/eede: word 2 load, 3 store; halfword 0 load,
+    // 1 store, 2 signed load, 3 store of the high half; byte 0 load,
+    // 1 store, 2 signed load. Stock 0x0204335a: edde 6120
+    // r6 = h[r2++=r1] (u); 0x0200f442: edde 0251 h[r5++=r2] = r0;
+    // 0x02021508: eede 2731 b[r3++=r7] = r2.
+    let mut c = cpu(&[0xecde, 0x1232, 0xecde, 0x1233]);
+    c.r[2] = 12;
+    c.r[3] = RAM + 0x100;
+    c.bus.write(RAM + 0x100, 0x5555_aaaa, 4).unwrap();
+    c.step().unwrap(); // r1 = [r3++=r2]
+    assert_eq!((c.r[1], c.r[3]), (0x5555_aaaa, RAM + 0x10c));
+    c.r[1] = 99;
+    c.step().unwrap(); // [r3++=r2] = r1
+    assert_eq!(c.bus.read(RAM + 0x10c, 4).unwrap(), 99);
+    assert_eq!(c.r[3], RAM + 0x118);
+
+    let mut c = cpu(&[
+        0xedde, 0x6120, 0xedde, 0x0251, 0xedde, 0x1232, 0xedde, 0x1233,
+    ]);
+    c.r[1] = 6;
+    c.r[2] = RAM + 0x100;
+    c.bus.write(RAM + 0x100, 0x8001, 2).unwrap();
+    c.step().unwrap(); // r6 = h[r2++=r1] (u)
+    assert_eq!((c.r[6], c.r[2]), (0x8001, RAM + 0x106));
+    c.r[0] = 0x1234_5678;
+    c.r[2] = 2;
+    c.r[5] = RAM + 0x200;
+    c.step().unwrap(); // h[r5++=r2] = r0
+    assert_eq!(c.bus.read(RAM + 0x200, 2).unwrap(), 0x5678);
+    assert_eq!(c.r[5], RAM + 0x202);
+    c.r[3] = RAM + 0x100;
+    c.r[2] = 4;
+    c.step().unwrap(); // r1 = h[r3++=r2] (s)
+    assert_eq!((c.r[1], c.r[3]), (0xffff_8001, RAM + 0x104));
+    c.r[1] = 0xbeef_cafe;
+    c.step().unwrap(); // h[r3++=r2] = r1.h
+    assert_eq!(c.bus.read(RAM + 0x104, 2).unwrap(), 0xbeef);
+    assert_eq!(c.r[3], RAM + 0x108);
+
+    let mut c = cpu(&[0xeede, 0x2731, 0xeede, 0x1232]);
+    c.r[2] = 0x1234_56f0;
+    c.r[3] = RAM + 0x100;
+    c.r[7] = 3;
+    c.step().unwrap(); // b[r3++=r7] = r2
+    assert_eq!(c.bus.read(RAM + 0x100, 1).unwrap(), 0xf0);
+    assert_eq!(c.r[3], RAM + 0x103);
+    c.r[3] = RAM + 0x100;
+    c.r[2] = 1;
+    c.step().unwrap(); // r1 = b[r3++=r2] (s)
+    assert_eq!((c.r[1], c.r[3]), (0xffff_fff0, RAM + 0x101));
+}
+
+#[test]
+fn signed_byte_preincrement_immediate_writes_the_address_back() {
+    // Stock 0x020015ee: ee5c 2051, r2 = b[++r5=1] (s); ee5d 2051 is
+    // r2 = b[++r5=-255] (s).
+    let mut c = cpu(&[0xee5c, 0x2051, 0xee5d, 0x2051]);
+    c.r[5] = RAM + 0x100;
+    c.bus.write(RAM + 0x101, 0x80, 1).unwrap();
+    c.bus.write(RAM + 0x2, 0x7f, 1).unwrap();
+    c.step().unwrap();
+    assert_eq!((c.r[2], c.r[5]), (0xffff_ff80, RAM + 0x101));
+    c.step().unwrap();
+    assert_eq!((c.r[2], c.r[5]), (0x7f, RAM + 2));
+}
+
+#[test]
+fn register_pair_preincrement_by_a_register() {
+    // Stock 0x0200940e: ec5c 8012, r9_r8 = d[++r1=r0]; ec5c 8013 stores.
+    let mut c = cpu(&[0xec5c, 0x8012, 0xec5c, 0x8013]);
+    c.r[0] = 8;
+    c.r[1] = RAM + 0x100;
+    c.bus.write(RAM + 0x108, 0x1111_1111, 4).unwrap();
+    c.bus.write(RAM + 0x10c, 0x2222_2222, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(
+        (c.r[8], c.r[9], c.r[1]),
+        (0x1111_1111, 0x2222_2222, RAM + 0x108)
+    );
+    c.r[8] = 3;
+    c.r[9] = 4;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x110, 4).unwrap(), 3);
+    assert_eq!(c.bus.read(RAM + 0x114, 4).unwrap(), 4);
+    assert_eq!(c.r[1], RAM + 0x110);
+}
+
+#[test]
+fn memory_mask_offsets_are_signed_and_xor_is_an_operation() {
+    // ef00-efff: bits 7-6 or / xor / and / and-not, bits 5-0 a signed word
+    // offset. Stock 0x0208110e: ef3f 0400, [r0+-4] |= 0x80000000.
+    for (h, expected) in [
+        (0xef3f, 0x8000_1234u32),
+        (0xef7f, 0x8000_1234),
+        (0xefbf, 0),
+        (0xefff, 0x1234),
+    ] {
+        let mut c = cpu(&[h, 0x0400]);
+        c.r[0] = RAM + 0x100;
+        c.bus.write(RAM + 0xfc, 0x1234, 4).unwrap();
+        c.step().unwrap();
+        assert_eq!(c.bus.read(RAM + 0xfc, 4).unwrap(), expected, "{h:04x}");
+    }
+    let mut c = cpu(&[0xef60, 0x0c41]); // [r0+-128] ^= 0xC100
+    c.r[0] = RAM + 0x100;
+    c.bus.write(RAM + 0x80, 0xff00, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x80, 4).unwrap(), 0x3e00);
+}
+
+#[test]
+fn signed_sixteen_bit_saturation() {
+    // Stock 0x0203f82c: e078 2201, r2 = sat16(r2) (s); e078 2101 reads r1.
+    for (value, expected) in [(40000, 32767), (-40000, -32768), (-5, -5), (32767, 32767)] {
+        let mut c = cpu(&[0xe078, 0x2101]);
+        c.r[1] = value as u32;
+        c.step().unwrap();
+        assert_eq!(c.r[2], expected as u32);
+        assert_eq!(c.r[1], value as u32);
+    }
 }

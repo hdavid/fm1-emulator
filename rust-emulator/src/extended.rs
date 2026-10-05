@@ -285,22 +285,33 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
         Op::HalfwordPostincrement => {
             // x bit 0 selects the store (as in the edd8 register forms); the
             // increment is even.
+            // edd0-edd7: a signed 10-bit increment (h & 3 its top bits);
+            // h bit 2 is a signed load, or a store of the high half
+            // (objdump: edd4 1231 is h[r3++=32] = r1.h).
             let store = x & 1 != 0;
-            let increment = ((x >> 8) & 15) * 16 + (x & 14);
+            let increment = signed((h & 3) << 8 | ((x >> 8) & 15) << 4 | (x & 14), 10) as u32;
             let address = cpu.r[s];
-            mem = Some((
-                d,
-                s,
-                address,
-                2,
-                store,
-                !store && h & 4 != 0,
-                Some(address.wrapping_add(increment)),
-            ));
+            if store && h & 4 != 0 {
+                cpu.bus
+                    .write(address, cpu.r[d] >> 16, 2)
+                    .map_err(|fault| Fault::Access { pc, fault })?;
+                cpu.r[s] = address.wrapping_add(increment);
+            } else {
+                mem = Some((
+                    d,
+                    s,
+                    address,
+                    2,
+                    store,
+                    !store && h & 4 != 0,
+                    Some(address.wrapping_add(increment)),
+                ));
+            }
             name = "halfword_postincrement";
         }
         Op::BytePostincrementStore => {
-            let increment = ((x >> 8) & 15) * 16 + (x & 15);
+            // eed2/eed3: a signed 9-bit increment, h bit 0 its sign.
+            let increment = signed((h & 1) << 8 | ((x >> 8) & 15) << 4 | (x & 15), 9) as u32;
             let address = cpu.r[s];
             mem = Some((
                 d,
@@ -314,7 +325,7 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
             name = "byte_postincrement_store";
         }
         Op::BytePostincrementLoad => {
-            let off = ((x >> 8) & 15) * 16 + (x & 15);
+            let off = signed((h & 1) << 8 | ((x >> 8) & 15) << 4 | (x & 15), 9) as u32;
             let addr = cpu.r[s];
             mem = Some((
                 d,
@@ -383,6 +394,63 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
                 next = cpu.pop()?;
             }
             name = "pop_special_mask";
+        }
+        Op::PairRegisterPreincrement => {
+            // ec5c: r9_r8 = d[++r1=r0] / d[++r1=r0] = r9_r8 (x bit 0), the
+            // even register at the lower address as the other pair forms.
+            let addr = cpu.r[s].wrapping_add(cpu.r[c]);
+            let reg = d & 14;
+            if x & 1 != 0 {
+                cpu.write(addr, cpu.r[reg])?;
+                cpu.write(addr + 4, cpu.r[reg + 1])?;
+            } else {
+                let (low, high) = (cpu.read(addr, 4)?, cpu.read(addr + 4, 4)?);
+                cpu.r[reg] = low;
+                cpu.r[reg + 1] = high;
+            }
+            cpu.r[s] = addr;
+            name = "pair_register_preincrement";
+        }
+        Op::RegisterPostincrement => {
+            // ecde/edde/eede [rS++=rC]: access at rS, then rS += rC. x bits
+            // 0-1 (objdump): word 2 load, 3 store; halfword 0 load, 1 store,
+            // 2 signed load, 3 store of the high half; byte 0 load, 1 store,
+            // 2 signed load.
+            let size = match h {
+                0xecde => 4,
+                0xedde => 2,
+                _ => 1,
+            };
+            let address = cpu.r[s];
+            let updated = address.wrapping_add(cpu.r[c]);
+            let store = x & 1 != 0;
+            if store {
+                // As `access` stores: the low bytes of the value.
+                let value = if size == 2 && x & 2 != 0 {
+                    cpu.r[d] >> 16
+                } else {
+                    cpu.r[d]
+                };
+                cpu.bus
+                    .write(address, value, size)
+                    .map_err(|fault| Fault::Access { pc, fault })?;
+                cpu.r[s] = updated;
+            } else {
+                let value = cpu.read(address, size)?;
+                cpu.r[s] = updated;
+                cpu.r[d] = if size != 4 && x & 2 != 0 {
+                    signed(value, (size * 8) as u32) as u32
+                } else {
+                    value
+                };
+            }
+            name = "register_postincrement";
+        }
+        Op::SaturateSigned16 => {
+            // e078: rD = sat16(rS) (s), rD = x[15:12], rS = x[11:8].
+            let value = cpu.r[((x >> 8) & 15) as usize] as i32;
+            cpu.r[d] = value.clamp(-32768, 32767) as u32;
+            name = "saturate_signed16";
         }
         Op::Trigger => {
             // Debug trigger event (SDK ___trig, followed by a printf in
@@ -762,8 +830,9 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
                 cpu.r[reg] = cpu.read(addr, 4)?;
                 cpu.r[reg + 1] = cpu.read(addr + 4, 4)?;
             }
-            if x & 3 == 3 {
-                // x & 3 == 3: a store that writes the address back to the base.
+            if x & 2 != 0 {
+                // x bit 1: pre-increment, the address written back to the
+                // base (objdump: ec50 8012 is r9_r8 = d[++r1=0]).
                 cpu.r[s] = addr;
             }
             name = "memory_pair";
@@ -798,13 +867,16 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
             name = "branch_bit";
         }
         Op::MemoryMask => {
-            let addr = cpu.r[d].wrapping_add((h & 31) * 4);
+            // ef00-efff: bits 7-6 select or / xor / and / and-not, bits 5-0
+            // a signed word offset (objdump: ef3f 0400 is [r0+-4] |= ...).
+            let addr = cpu.r[d].wrapping_add((signed(h & 63, 6) * 4) as u32);
             let old = cpu.read(addr, 4)?;
             let value = packed(x);
             cpu.write(
                 addr,
                 match h & 0xc0 {
                     0 => old | value,
+                    0x40 => old ^ value,
                     0x80 => old & value,
                     _ => old & !value,
                 },
@@ -1051,7 +1123,7 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
             name = "halfword_register_preincrement";
         }
         Op::WordPostincrementStore => {
-            let increment = (((x >> 8) & 15) << 4) | (x & 12);
+            let increment = signed((h & 7) << 8 | ((x >> 8) & 15) << 4 | (x & 12), 11) as u32;
             let address = cpu.r[s];
             mem = Some((
                 d,
@@ -1069,7 +1141,7 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
             // "lw eregA, [eregB++=imm8]"). Word accesses have no signed
             // indexed form, so x&3==0 is not [rS+rC]; the stock device table
             // walk at 0x020347fc advances by 28 bytes this way.
-            let increment = (((x >> 8) & 15) << 4) | (x & 12);
+            let increment = signed((h & 7) << 8 | ((x >> 8) & 15) << 4 | (x & 12), 11) as u32;
             let address = cpu.r[s];
             mem = Some((
                 d,

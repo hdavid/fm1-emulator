@@ -139,6 +139,9 @@ pub(crate) enum Op {
     PushSpecialMask,
     PopSpecialMask,
     Trigger,
+    PairRegisterPreincrement,
+    RegisterPostincrement,
+    SaturateSigned16,
     Unsupported,
 }
 
@@ -309,11 +312,11 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         MemoryAddRegister
     } else if h & 0xfff8 == 0xed50 || h & 0xfff8 == 0xed58 {
         HalfwordExtended
-    } else if matches!(h, 0xedd0 | 0xedd4) {
+    } else if h & 0xfff8 == 0xedd0 {
         HalfwordPostincrement
-    } else if h == 0xeed2 {
+    } else if matches!(h, 0xeed2 | 0xeed3) {
         BytePostincrementStore
-    } else if matches!(h, 0xeed0 | 0xeed4) {
+    } else if matches!(h, 0xeed0 | 0xeed1 | 0xeed4 | 0xeed5) {
         BytePostincrementLoad
     } else if h & 0xfff0 == 0xe1e0 {
         MultiplyImmediate
@@ -321,6 +324,9 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         BitMask
     } else if h == 0xe9d0 {
         StackPair
+    } else if h == 0xe078 && x & 0xff == 1 {
+        // rD = sat16(rS) (s); the (u) form (x & 0xff == 0) is not decided.
+        SaturateSigned16
     } else if h == 0xe958 && x & 0x8000 == 0 {
         // [--sp] = {sp, ssp, ..., reti}: x bit n is sr[n]. Pushing pc is
         // not decided (no firmware uses it).
@@ -398,8 +404,11 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         StackSubword
     } else if h == 0xe9d4 {
         StackExtended
-    } else if h & 0xfff8 == 0xec50 && x & 3 != 2 {
+    } else if h & 0xfff8 == 0xec50 {
         MemoryPair
+    } else if h == 0xec5c && x & 2 != 0 {
+        // r9_r8 = d[++r1=r0] (stock 0x0200940e), x bit 0 the store.
+        PairRegisterPreincrement
     } else if (h & 0xfff0 == 0xe1a0 && x & 3 == 0) || (h & 0xfff0 == 0xe1b0 && x & 2 == 0) {
         // JieLi objdump: e1aX insert (x bits 0-1 = 0), e1bX uextra (0) or
         // sextra (1); other low bits are not these forms.
@@ -408,7 +417,7 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         BranchEqualFlag
     } else if h & 0xfff0 == 0xe850 {
         BranchBit
-    } else if matches!(h & 0xffe0, 0xef00 | 0xef80 | 0xefc0) {
+    } else if h & 0xff00 == 0xef00 {
         MemoryMask
     } else if conditional_kind((h >> 4) & 255) && h & 0xf000 == 0xe000 {
         ConditionalBlock
@@ -441,7 +450,18 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         BranchCompareRegister
     } else if matches!(
         h,
-        0xee50 | 0xee51 | 0xee52 | 0xee53 | 0xee54 | 0xee55 | 0xee58 | 0xee59 | 0xee5a | 0xee5b
+        0xee50
+            | 0xee51
+            | 0xee52
+            | 0xee53
+            | 0xee54
+            | 0xee55
+            | 0xee58
+            | 0xee59
+            | 0xee5a
+            | 0xee5b
+            | 0xee5c
+            | 0xee5d
     ) {
         ByteExtended
     } else if h & 0xfff8 == 0xecd0 {
@@ -454,10 +474,14 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         HalfwordRegisterPreincrement
     } else if h == 0xeddc && matches!(x & 15, 1 | 3) {
         HalfwordRegisterPreincrementStore
-    } else if h == 0xecd8 && x & 3 == 1 {
+    } else if h & 0xfff8 == 0xecd8 && x & 3 == 1 {
+        // ecd8-ecdf: rS advances by a signed 11-bit immediate.
         WordPostincrementStore
-    } else if h == 0xecd8 && x & 3 == 0 {
+    } else if h & 0xfff8 == 0xecd8 && x & 3 == 0 {
         WordPostincrementLoad
+    } else if (h == 0xecde && x & 2 != 0) || h == 0xedde || (h == 0xeede && x & 3 != 3) {
+        // [rS++=rC]: the access at rS, then rS += rC.
+        RegisterPostincrement
     } else if matches!(h, 0xecd8 | 0xedd8 | 0xeed8) {
         MemoryIndexed
     } else {
@@ -538,7 +562,10 @@ pub(crate) fn length(op: Op) -> Option<u32> {
         | MemoryIndexed
         | PushSpecialMask
         | PopSpecialMask
-        | Trigger => Some(4),
+        | Trigger
+        | PairRegisterPreincrement
+        | RegisterPostincrement
+        | SaturateSigned16 => Some(4),
         _ => Some(2),
     }
 }
