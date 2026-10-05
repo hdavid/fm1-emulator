@@ -158,6 +158,16 @@ impl Bus {
         self.cache.cores[core]
     }
 
+    /// EMU_CON of `core` (exception enables: bit 2 divide by zero).
+    pub(crate) fn emu_con(&self, core: usize) -> u32 {
+        self.guards.emu_con(core)
+    }
+
+    /// Latch exception causes in EMU_MSG of `core`.
+    pub(crate) fn raise_emu_msg(&mut self, core: usize, bits: u32) {
+        self.guards.raise_emu_msg(core, bits);
+    }
+
     fn check(address: u32, size: usize, operation: &'static str) -> Result<(), AccessFault> {
         if !matches!(size, 1 | 2 | 4) {
             return Err(Self::fault(

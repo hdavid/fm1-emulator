@@ -38,6 +38,21 @@ fn unsupported(pc: u32, h: u32) -> Box<Fault> {
     Box::new(Fault::Unsupported { pc, word: h as u16 })
 }
 
+/// An integer divide by zero at `pc` (a four-byte form): with the EMU_CON
+/// trap armed the exception follows and the destination is not written;
+/// with it off the quotient the divider leaves is unmeasured, so stop.
+fn integer_divide_by_zero(cpu: &mut Cpu, pc: u32, name: &'static str) -> Step<u32> {
+    if !cpu.divide_by_zero(pc)? {
+        return Err(Box::new(Fault::Trap {
+            pc,
+            reason: "integer divide by zero with the EMU_CON trap off: \
+                     the quotient on the chip is unmeasured",
+        }));
+    }
+    cpu.name = name;
+    Ok(pc + 4)
+}
+
 /// Execute an extended.rs form; returns the next PC and records the form's
 /// name in the CPU.
 #[inline(always)]
@@ -542,6 +557,9 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
             // x bit 12 selects the signed form (Felucca's formant filter:
             // an int64 divided by an int32).
             let pair = d & 14;
+            if cpu.r[c] == 0 {
+                return integer_divide_by_zero(cpu, pc, "divide_long");
+            }
             let dividend = cpu.r[s] as u64 | ((cpu.r[s + 1] as u64) << 32);
             let quotient = if x & 0x1000 != 0 {
                 (dividend as i64)
@@ -583,6 +601,10 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
             name = "multiply_extended";
         }
         Op::Divide => {
+            if cpu.r[c] == 0 {
+                return integer_divide_by_zero(cpu, pc, "divide");
+            }
+            // What remains to fault is INT_MIN / -1 (overflow, unmeasured).
             cpu.r[d] = if x & 1 == 0 {
                 cpu.r[s].checked_div(cpu.r[c])
             } else {
@@ -750,6 +772,13 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
                 2 => v.ceil(),
                 _ => v.floor(),
             };
+            // A zero divisor (either sign, any dividend) raises the
+            // divide-by-zero trap when armed: X0X ea3c665 saw it fire on a
+            // float divide on a real FM-1. With the trap off: IEEE results.
+            if x & 15 == 3 && b == 0.0 && cpu.divide_by_zero(pc)? {
+                cpu.name = "float_op";
+                return Ok(next);
+            }
             cpu.r[d] = match x & 15 {
                 0 => (a + b).to_bits(),
                 1 => (a - b).to_bits(),

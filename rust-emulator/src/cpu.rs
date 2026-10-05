@@ -12,11 +12,27 @@ use std::{fmt, io::Write};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Fault {
-    Access { pc: u32, fault: AccessFault },
-    Unsupported { pc: u32, word: u16 },
-    Limit { pc: u32, limit: u64 },
+    Access {
+        pc: u32,
+        fault: AccessFault,
+    },
+    Unsupported {
+        pc: u32,
+        word: u16,
+    },
+    Limit {
+        pc: u32,
+        limit: u64,
+    },
     Preservation,
     Trace(String),
+    /// A CPU exception the emulator cannot deliver, or whose result on the
+    /// real chip is unmeasured (e.g. an integer divide by zero with the
+    /// EMU_CON trap off): stop rather than guess.
+    Trap {
+        pc: u32,
+        reason: &'static str,
+    },
 }
 
 #[cfg(test)]
@@ -186,6 +202,7 @@ impl fmt::Display for Fault {
             Self::Limit { pc, limit } => write!(f, "instruction limit {limit} at PC 0x{pc:08x}"),
             Self::Preservation => write!(f, "probe did not preserve registers or stack"),
             Self::Trace(message) => write!(f, "trace: {message}"),
+            Self::Trap { pc, reason } => write!(f, "CPU exception at PC 0x{pc:08x}: {reason}"),
         }
     }
 }
@@ -219,6 +236,13 @@ pub struct Cpu {
     subtick: u32,
     pub interrupts_enabled: bool,
     pub irq_entries: u64,
+    /// CPU exceptions (vector 1) entered, both cores.
+    pub exception_entries: u64,
+    /// The PC of an instruction that raised a CPU exception in this step;
+    /// `step_core` enters vector 1 once the instruction is done.
+    exception: Option<u32>,
+    /// (core, PC) of the last exception entered.
+    last_exception: (usize, u32),
     in_interrupt: bool,
     predicate_skip: Option<(u32, u32)>,
     irq_predicate: Option<(u32, u32)>,
@@ -326,6 +350,9 @@ impl Cpu {
             subtick: 0,
             interrupts_enabled: false,
             irq_entries: 0,
+            exception_entries: 0,
+            exception: None,
+            last_exception: (0, 0),
             in_interrupt: false,
             predicate_skip: None,
             irq_predicate: None,
@@ -385,6 +412,12 @@ impl Cpu {
         let value = self.read(self.sr[14], 4)?;
         self.sr[14] = self.sr[14].wrapping_add(4);
         Ok(value)
+    }
+
+    /// The core (0 or 1) and PC of the instruction that raised the last CPU
+    /// exception (diagnostics; (0, 0) before any).
+    pub fn last_exception(&self) -> (usize, u32) {
+        self.last_exception
     }
 
     /// The primary core is inside an interrupt handler (until its `rti`).
@@ -604,7 +637,9 @@ impl Cpu {
         } else {
             self.execute(h, op, code)?;
         }
-        if let Some((start, end, count)) = self.repeat {
+        if let Some(at) = self.exception.take() {
+            self.enter_exception(at)?;
+        } else if let Some((start, end, count)) = self.repeat {
             if self.pc == end {
                 if count > 1 {
                     self.pc = start;
@@ -1289,6 +1324,76 @@ impl Cpu {
             return Ok(());
         }
         self.take_interrupt()
+    }
+
+    /// A divide by zero at `pc` on this core. With the trap armed (EMU_CON
+    /// bit 2, AC79 SDK debug.c) it sets EMU_MSG bit 2 ("div0_err") and
+    /// returns true: the caller leaves its destination unwritten and the
+    /// exception is entered after the instruction. False: the trap is off.
+    pub(crate) fn divide_by_zero(&mut self, pc: u32) -> Step<bool> {
+        const DIV0: u32 = 1 << 2;
+        let core = self.sr[6] as usize;
+        if self.bus.emu_con(core) & DIV0 == 0 {
+            return Ok(false);
+        }
+        self.bus.raise_emu_msg(core, DIV0);
+        self.exception = Some(pc);
+        Ok(true)
+    }
+
+    /// Enter the CPU exception, source 1 of the interrupt controller
+    /// (IRQ_EXCEPTION_IDX), for the instruction at `at`. Unlike an
+    /// interrupt it is synchronous: it is taken with interrupts disabled,
+    /// inside a handler (X0X's hardware crash was in its audio interrupt)
+    /// and inside repeat or conditional blocks. reti holds the faulting
+    /// instruction's address (the SDK's exception report reads reti as the
+    /// crash address; whether hardware stores it or the next one is
+    /// unmeasured, and the handlers seen report and reset either way).
+    #[cold]
+    #[inline(never)]
+    fn enter_exception(&mut self, at: u32) -> Step<()> {
+        const SOURCE: usize = 1;
+        let core = self.sr[6] as usize;
+        let Some(priority) = self.bus.devices.irq_priority_for(SOURCE, self.sr[11], core) else {
+            // Undelivered on hardware it would be lost or held: unmeasured.
+            return Err(Fault::Trap {
+                pc: at,
+                reason: "divide by zero trapped (EMU_MSG div0_err) but exception vector 1 \
+                         is not enabled in ICFG",
+            }
+            .into());
+        };
+        let mask_register = 0x1eef1a8 + self.sr[6] * 0x200;
+        let level = self.read(mask_register, 4)?;
+        if self.in_interrupt {
+            self.irq_nest.push(IrqFrame {
+                source: self.sr[11] & 255,
+                priority_mask: self.irq_priority_mask,
+                predicate: self.irq_predicate.take(),
+                repeat: self.irq_repeat.take(),
+            });
+        }
+        self.irq_priority_mask = level;
+        self.write(mask_register, priority)?;
+        let handler = self.read(0x01c7_fe00 + SOURCE as u32 * 4, 4)?;
+        self.bus
+            .fetch(handler)
+            .map_err(|fault| Fault::Access { pc: at, fault })?;
+        self.sr[0] = at;
+        if self.irq_nest.is_empty() {
+            self.sr[12] = self.sr[14];
+            self.sr[14] = self.sr[13];
+        }
+        self.pc = handler;
+        self.sr[11] = (self.sr[11] & !0x2ff) | SOURCE as u32;
+        self.in_interrupt = true;
+        self.irq_predicate = self.predicate_skip.take();
+        self.irq_repeat = self.repeat.take();
+        self.interrupts_enabled = false;
+        self.halted = false;
+        self.exception_entries += 1;
+        self.last_exception = (core, at);
+        Ok(())
     }
 
     /// Enter the highest-priority deliverable interrupt, if any.
