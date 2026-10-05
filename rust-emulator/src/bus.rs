@@ -397,6 +397,10 @@ impl Bus {
     }
 
     pub fn fetch(&self, address: u32) -> Result<u16, AccessFault> {
+        // A current decode-cache entry holds exactly what the read returns.
+        if let Some(entry) = self.code.get(address) {
+            return Ok(entry.h);
+        }
         // Startup later copies .ram_text here; instructions can execute from RAM.
         self.read_as(address, 2, "fetch").map(|value| value as u16)
     }

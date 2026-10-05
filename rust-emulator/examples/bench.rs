@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Interpreter throughput and determinism check.
 //   bench FIRMWARE LIMIT          lean loop: step only, report instr/s
+//   bench FIRMWARE LIMIT batch    the same through Cpu::run_steps
 //   bench FIRMWARE LIMIT hash     also fold PC, registers, special registers
 //                                 and interrupt count into a hash every step,
 //                                 then hash all SRAM and audio samples
+//                                 (batch prints those final hashes too)
 // FM1_CPU_MHZ=N sets the emulated clock as in diagnose.
 use fm1_emu::{cpu::Cpu, firmware::Firmware};
 use std::{env, path::Path, process::ExitCode, time::Instant};
@@ -25,12 +27,13 @@ fn state_hash(cpu: &Cpu, hash: u64) -> u64 {
 fn run() -> Result<(), String> {
     let args: Vec<_> = env::args().skip(1).collect();
     if !(2..=3).contains(&args.len()) {
-        return Err("usage: bench FIRMWARE LIMIT [hash]".into());
+        return Err("usage: bench FIRMWARE LIMIT [hash|batch]".into());
     }
     let limit: u64 = args[1].parse().map_err(|_| "invalid instruction limit")?;
-    let hashing = match args.get(2).map(String::as_str) {
-        None => false,
-        Some("hash") => true,
+    let (hashing, batched) = match args.get(2).map(String::as_str) {
+        None => (false, false),
+        Some("hash") => (true, false),
+        Some("batch") => (false, true),
         Some(other) => return Err(format!("unknown mode {other}")),
     };
     let firmware = Firmware::load(Path::new(&args[0]))?;
@@ -50,6 +53,10 @@ fn run() -> Result<(), String> {
             }
             hash = state_hash(&cpu, hash);
         }
+    } else if batched {
+        if let Err(error) = cpu.run_steps(limit) {
+            fault = Some(error);
+        }
     } else {
         for _ in 0..limit {
             if let Err(error) = cpu.step() {
@@ -64,7 +71,7 @@ fn run() -> Result<(), String> {
         "{steps} instructions in {seconds:.3} s: {:.1} M instr/s",
         steps as f64 / seconds / 1e6
     );
-    if hashing {
+    if hashing || batched {
         let ram_hash = (0..fm1_emu::RAM_SIZE as u32)
             .step_by(4)
             .fold(FNV_OFFSET, |h, i| {
@@ -76,7 +83,10 @@ fn run() -> Result<(), String> {
             .samples
             .iter()
             .fold(FNV_OFFSET, |h, [l, r]| fold(fold(h, *l as u32), *r as u32));
-        println!("state hash {hash:016x}");
+        if hashing {
+            println!("state hash {hash:016x}");
+        }
+        println!("final state {:016x}", state_hash(&cpu, FNV_OFFSET));
         println!("ram hash {ram_hash:016x}");
         println!("audio hash {audio_hash:016x} ({} frames)", cpu.bus.audio.frames);
         println!("serial bytes pending {}", cpu.bus.usb.serial.len());

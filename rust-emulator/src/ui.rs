@@ -183,31 +183,31 @@ impl Emulator {
                 let budget = if paced { u64::MAX } else { 400_000 * cpu.instructions_per_tick as u64 };
                 let mut i = 0u64;
                 while i < budget {
-                    if i % 1024 == 0 {
-                        let contacts = self
-                            .encoders
-                            .update(|column| cpu.bus.devices.gpio.column_scans(column));
-                        for (e, (a, b)) in contacts.into_iter().enumerate() {
-                            let [ac, ar, bc, br] = ui_knobs::CONTACTS[e];
-                            let gpio = &mut cpu.bus.devices.gpio;
-                            gpio.press(ac, ar, a).unwrap();
-                            gpio.press(bc, br, b).unwrap();
-                        }
-                        if let Some(audio) = &self.audio {
-                            audio.push(cpu.bus.audio.samples.drain(..));
-                            if paced && audio.queued() >= ui_audio::TARGET_FRAMES {
-                                break;
-                            }
-                        }
-                        if Instant::now() >= deadline {
+                    // Every 1024 instructions: panel, audio queue, deadline.
+                    let contacts = self
+                        .encoders
+                        .update(|column| cpu.bus.devices.gpio.column_scans(column));
+                    for (e, (a, b)) in contacts.into_iter().enumerate() {
+                        let [ac, ar, bc, br] = ui_knobs::CONTACTS[e];
+                        let gpio = &mut cpu.bus.devices.gpio;
+                        gpio.press(ac, ar, a).unwrap();
+                        gpio.press(bc, br, b).unwrap();
+                    }
+                    if let Some(audio) = &self.audio {
+                        audio.push(cpu.bus.audio.samples.drain(..));
+                        if paced && audio.queued() >= ui_audio::TARGET_FRAMES {
                             break;
                         }
                     }
-                    if let Err(error) = cpu.step() {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    let chunk = (budget - i).min(1024);
+                    if let Err(error) = cpu.run_steps(chunk) {
                         self.fault = Some(error.to_string());
                         break;
                     }
-                    i += 1;
+                    i += chunk;
                 }
                 if let Some(audio) = &self.audio {
                     audio.push(cpu.bus.audio.samples.drain(..));

@@ -79,6 +79,26 @@ mod lock_tests {
     }
 
     #[test]
+    fn run_steps_matches_single_steps_and_stops_at_a_fault() {
+        // r0 = 5; loop: r0 += -1; if r0 != 0 goto loop; then run off the
+        // end of the image (a fetch fault).
+        let program = vec![0x40, 0x25, 0xf8, 0x3f, 0xf0, 0x5e];
+        let mut single = Cpu::new(Bus::new(program.clone()).unwrap(), crate::XIP);
+        let mut batched = Cpu::new(Bus::new(program).unwrap(), crate::XIP);
+        let mut single_fault = None;
+        for _ in 0..40 {
+            if let Err(fault) = single.step() {
+                single_fault = Some(fault);
+                break;
+            }
+        }
+        assert_eq!(batched.run_steps(40).err(), single_fault);
+        assert!(single_fault.is_some());
+        assert_eq!(single.steps, 11);
+        assert_eq!((batched.pc, batched.r, batched.steps), (single.pc, single.r, single.steps));
+    }
+
+    #[test]
     fn paused_secondary_retains_context_until_resume() {
         let mut c = Cpu::new(Bus::new(vec![0; 32]).unwrap(), crate::XIP);
         let entry = crate::RAM + 512;
@@ -258,6 +278,15 @@ impl Cpu {
 
     pub fn step(&mut self) -> Result<&'static str, Fault> {
         self.step_cores().map_err(|fault| *fault)
+    }
+
+    /// `count` calls of `step`, stopping at the first fault, in one loop
+    /// (no per-instruction call or result).
+    pub fn run_steps(&mut self, count: u64) -> Result<(), Fault> {
+        for _ in 0..count {
+            self.step_cores().map_err(|fault| *fault)?;
+        }
+        Ok(())
     }
 
     #[inline(always)]
