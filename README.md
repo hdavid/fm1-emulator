@@ -49,12 +49,11 @@ other firmware paths can stop emulation.
 | Firmware | Status | Verified behavior / blocker |
 | --- | --- | --- |
 | Felucca 0.9-beta (`FM-1_909`, `.fwsc`) | Partial | LCD, USB console, watchdog, note audio/DMA and FX pass; full UI coverage remains incomplete |
-| Felucca source build (`1e838e1`, `.elf`) | Partial | Boot, note press/release, FX, HOME and ENV pass; presets can still stop emulation |
+| Felucca source build (`1e838e1`, `.elf`) | Partial | Boot, note press/release, FX, HOME and ENV pass; other UI paths need broader coverage |
 | Official `FM-1_015` (`FM-1.fwsc`) | Partial | LCD boot, PIANO 1, FX/HOME and note audio/DMA pass |
 | Baud Girl `FM-1_093` (`FM-1_093.fwsc`) | Partial | LCD boot and FX/HOME pass; its factory preset payload fails integrity validation |
 
-FX now opens and renders in both Felucca builds. A separate unsupported
-instruction remains on the local build's presets path; see the
+FX now opens and renders in both Felucca builds; see the
 [Felucca investigation](rust-emulator/FELUCCA.md).
 See the [stock firmware trials](rust-emulator/STOCK-FIRMWARE.md) for the official
 and Baud Girl results.
