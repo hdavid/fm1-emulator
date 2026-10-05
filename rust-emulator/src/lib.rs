@@ -55,3 +55,4 @@ mod guards;
 mod nor;
 
 pub mod usb;
+pub mod usb_midi;
