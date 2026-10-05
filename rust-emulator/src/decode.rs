@@ -3,7 +3,7 @@
 // its current words through the bus, including XIP checks and SRAM changes.
 use std::sync::OnceLock;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum First {
     MoveImmediate32,
     RepeatRegister,
@@ -50,7 +50,7 @@ pub(crate) enum First {
     Extended(Extended),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum Extended {
     MoveRegisterPair,
     Multiply,
@@ -74,7 +74,7 @@ pub(crate) enum Extended {
     Unknown,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum Wide {
     FloatRegister,
     BranchRegisterMask,
@@ -648,6 +648,83 @@ fn simd(h: u32, x: u32) -> Wide {
         Wide::DualMultiply
     } else {
         Wide::Unknown
+    }
+}
+
+/// The interpreter's view of one instruction, for examples/op_scan, which
+/// compares it with the vendor disassembler.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Description {
+    /// The decoded form's name; "Unknown" when the interpreter rejects it.
+    pub form: String,
+    /// Bytes the interpreter advances over this slot; `None` if unknown.
+    pub length: Option<u32>,
+    /// Bytes a conditional block skips for this slot.
+    pub skip_length: u32,
+    /// The word the interpreter executes for this slot.
+    pub word: u16,
+    /// Whether the word opens a parallel bundle (this slot is its primary).
+    pub parallel: bool,
+}
+
+/// Describe the instruction whose halfwords start at `words[0]`. A parallel
+/// bundle's slot is described as the interpreter executes it: its primary
+/// word, with the bundle's own length.
+pub fn describe(words: &[u16]) -> Description {
+    let h = words.first().copied().unwrap_or(0) as u32;
+    let parallel = h >> 13 == 6 || h & 0xf800 == 0xf000;
+    let word = if h >> 13 == 6 {
+        h & 0x1fff
+    } else if parallel {
+        h & !0x1000
+    } else {
+        h
+    };
+    let kind = first(word);
+    let (form, length) = match kind {
+        First::Extended(Extended::Wide) => match words.get(1) {
+            Some(&x) => match wide(word, x as u32) {
+                Wide::Unknown => ("Unknown".to_string(), None),
+                Wide::BranchLong => ("BranchLong".to_string(), Some(6)),
+                form => (format!("{form:?}"), Some(4)),
+            },
+            None => ("Wide".to_string(), None),
+        },
+        First::Extended(Extended::Unknown) => ("Unknown".to_string(), None),
+        First::Extended(form) => (format!("{form:?}"), Some(2)),
+        First::MoveImmediate32 | First::CallRel32 => (format!("{kind:?}"), Some(6)),
+        First::MovSpecial
+        | First::MovMask
+        | First::MovImm16
+        | First::StackMask
+        | First::Relative22 => (format!("{kind:?}"), Some(4)),
+        form => (format!("{form:?}"), Some(2)),
+    };
+    let length = length.map(|length| match (parallel, h >> 13 == 6) {
+        (true, true) => 2,
+        (true, false) => 4,
+        (false, _) => length,
+    });
+    Description {
+        form,
+        length,
+        skip_length: skip_length(h),
+        word: word as u16,
+        parallel,
+    }
+}
+
+/// Length of the instruction word `h` as a conditional block counts it
+/// when it skips instructions (Cpu::conditional).
+pub(crate) fn skip_length(h: u32) -> u32 {
+    // FF00-FF7F are the six-byte compare-branches (vendor objdump), as the
+    // 32-bit moves and the 32-bit call.
+    if matches!(h & 0xffe0, 0xffc0 | 0xffe0) || h == 0xff80 || h & 0xff80 == 0xff00 {
+        6
+    } else if h >> 13 == 7 {
+        4
+    } else {
+        2
     }
 }
 
