@@ -28,7 +28,7 @@ pub(crate) enum Op {
     Asr,
     Shift,
     LoadStore32,
-    BytePostIncrementRegister,
+    PostIncrementRegister,
     RotateRightImmediate,
     PushPopMask,
     PushRegs,
@@ -188,10 +188,11 @@ pub(crate) fn decode(h: u32) -> Op {
         MovImm8
     } else if h & 0xe0f8 == 0x2010 {
         MovNegative
-    } else if h & 0xfc00 == 0x1000 {
-        // 0x1000-0x13ff: b[rB++=rI] load/store; the JieLi pi32v2 objdump
-        // decodes all 1024 codes this way.
-        BytePostIncrementRegister
+    } else if h & 0xfc00 == 0x1000 || h & 0xf800 == 0x0800 {
+        // 0x0800-0x13ff: [rB++=rI], h[rB++=rI] and b[rB++=rI] loads and
+        // stores; the JieLi pi32v2 objdump decodes all of these codes this
+        // way (X0X: 0881 = r1 = [r0++=r9]).
+        PostIncrementRegister
     } else if h & 0xff00 == 0x1600 {
         MovReg
     } else if matches!(h & 0xfe00, 0x1c00 | 0x1e00) {

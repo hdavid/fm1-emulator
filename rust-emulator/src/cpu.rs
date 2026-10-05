@@ -995,27 +995,36 @@ impl Cpu {
                     name = "lsl";
                 }
             }
-            Op::BytePostIncrementRegister => {
+            Op::PostIncrementRegister => {
                 // JieLi objdump: "rD = b[rB++=rI] (u)" / "b[rB++=rI] = rD" with
                 // rD = bits 0-2, store = bit 3, rB = bits 4-6, rI = r8 + bits 7-9;
                 // the access uses rB, then rB += rI (post-increment, as its
                 // "h[r15++=2]" for edd0). Stock/Baud Girl 0x0200de98: 13c0.
+                // 0x08-0x0b move words, 0x0c-0x0f halfwords (loads zero-
+                // extend: objdump "(u)"), 0x10-0x13 bytes (X0X 0x0202148c:
+                // 0881 = r1 = [r0++=r9]).
+                let size = match h >> 10 {
+                    2 => 4,
+                    3 => 2,
+                    _ => 1,
+                };
                 let data = (h & 7) as usize;
                 let base = ((h >> 4) & 7) as usize;
                 let step = 8 + ((h >> 7) & 7) as usize;
                 let address = self.r[base];
                 let next = address.wrapping_add(self.r[step]);
                 if h & 8 != 0 {
+                    let mask = if size == 4 { u32::MAX } else { (1 << (size * 8)) - 1 };
                     self.bus
-                        .write(address, self.r[data] & 0xff, 1)
+                        .write(address, self.r[data] & mask, size)
                         .map_err(|fault| Box::new(Fault::Access { pc: self.pc, fault }))?;
                     self.r[base] = next;
-                    name = "byte_store_postincrement_register";
+                    name = "store_postincrement_register";
                 } else {
-                    let value = self.read(address, 1)?;
+                    let value = self.read(address, size)?;
                     self.r[base] = next;
                     self.r[data] = value;
-                    name = "byte_load_postincrement_register";
+                    name = "load_postincrement_register";
                 }
             }
             Op::LoadStore32 => {
