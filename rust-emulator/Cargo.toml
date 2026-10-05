@@ -16,3 +16,7 @@ required-features = ["gui"]
 
 [dependencies]
 eframe = { version = "=0.31.1", optional = true, default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

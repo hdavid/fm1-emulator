@@ -61,8 +61,13 @@ impl Guards {
         Some(Ok(()))
     }
     pub fn check_write(&self, a: u32, size: usize) -> Result<(), &'static str> {
+        // Runs on every guest write: read the enable mask once.
+        let enabled = self.value(0x1eee348);
+        if enabled & 7 == 0 {
+            return Ok(());
+        }
         for n in 0..3 {
-            if self.value(0x1eee348) & (1 << n) != 0
+            if enabled & (1 << n) != 0
                 && a <= self.value(0x1eee280 + n * 4)
                 && a as u64 + size as u64 > self.value(0x1eee2c0 + n * 4) as u64
             {

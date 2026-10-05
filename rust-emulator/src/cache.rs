@@ -3,7 +3,7 @@
 // Register layout: vendor SDK asm/csfr.h; startup ranges: unchanged stock code.
 pub(crate) struct Cache {
     regs: [u32; 3],
-    cores: [u32; 2],
+    pub(crate) cores: [u32; 2],
     tags: Vec<u8>,
     ram: Vec<u8>,
 }

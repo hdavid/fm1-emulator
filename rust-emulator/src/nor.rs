@@ -1,8 +1,46 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // SPI0 serial NOR. Application ELF supplies decrypted XIP separately.
-use std::collections::BTreeMap;
+/// The SFC/SPI0 registers this model retains, each at a fixed index (`slot`).
+/// An array, not a map: XIP reads several of them on every instruction fetch.
+const NREG: usize = 14;
+fn slot(a: u32) -> Option<usize> {
+    Some(match a {
+        0x40200 => 0,
+        0x40204 => 1,
+        0x40208 => 2,
+        0x4020c => 3,
+        0x40300 => 4,
+        0x40304 => 5,
+        0x40308 => 6,
+        0x4030c => 7,
+        0x40310 => 8,
+        0x40314 => 9,
+        0x5101c => 10,
+        0x11c00 => 11,
+        0x11c04 => 12,
+        0x11c08 => 13,
+        _ => return None,
+    })
+}
+fn registers(values: &[(u32, u32)]) -> [u32; NREG] {
+    let mut regs = [0; NREG];
+    for &(a, v) in values {
+        regs[slot(a).unwrap()] = v;
+    }
+    regs
+}
+/// XIP settings decoded from the registers (`Nor::refresh`), read on every
+/// instruction fetch from flash.
+#[derive(Default, Clone, Copy)]
+struct XipConfig {
+    active: bool,
+    base: usize,
+    encrypted: bool,
+    window: Option<(u32, u32)>,
+}
 pub struct Nor {
-    regs: BTreeMap<u32, u32>,
+    regs: [u32; NREG],
+    xip: XipConfig,
     command: Vec<u8>,
     selected: bool,
     pub bytes: Vec<u8>,
@@ -17,8 +55,9 @@ pub struct Nor {
 
 impl Default for Nor {
     fn default() -> Self {
-        Self {
-            regs: BTreeMap::from([(0x40200, 1), (0x4020c, 0x4000), (0x5101c, 32), (0x40300, 1)]),
+        let mut nor = Self {
+            regs: registers(&[(0x40200, 1), (0x4020c, 0x4000), (0x5101c, 32), (0x40300, 1)]),
+            xip: XipConfig::default(),
             command: vec![],
             selected: false,
             bytes: vec![255; 1024 * 1024],
@@ -28,7 +67,9 @@ impl Default for Nor {
             write_enabled: false,
             erases: 0,
             programs: 0,
-        }
+        };
+        nor.refresh();
+        nor
     }
 }
 
@@ -39,30 +80,44 @@ impl Nor {
         crate::package::sfc(&mut decoded, key);
         self.decoded = Some(decoded);
         self.key = key;
-        self.regs
-            .extend([(0x40200, 0x809803b5), (0x40204, 1), (0x40208, 0x8e17)]);
+        for (a, v) in [(0x40200, 0x809803b5), (0x40204, 1), (0x40208, 0x8e17)] {
+            self.regs[slot(a).unwrap()] = v;
+        }
+        self.refresh();
+    }
+    /// Re-decode the XIP settings after any register change.
+    fn refresh(&mut self) {
+        let reg = |a| self.regs[slot(a).unwrap()];
+        let control = reg(0x40300);
+        self.xip = XipConfig {
+            active: reg(0x40200) & 1 != 0 && reg(0x5101c) & 32 != 0,
+            base: reg(0x4020c) as usize,
+            encrypted: control & 1 != 0,
+            window: (control & 2 != 0).then(|| (reg(0x4030c), reg(0x40308))),
+        };
     }
     pub fn packaged(&self) -> bool {
         self.decoded.is_some()
     }
     pub fn xip_active(&self) -> bool {
-        self.read(0x40200).unwrap() & 1 != 0 && self.read(0x5101c).unwrap() & 32 != 0
+        self.xip.active
     }
 
     pub fn xip(&self, address: u32, size: usize) -> Option<Result<u32, &'static str>> {
         // The SFC maps flash offset 0x4000 at CPU address 0x02000000.
-        let offset = address.checked_sub(0x0200_0000)? as usize + self.read(0x4020c)? as usize;
+        let xip = self.xip;
+        let offset = address.checked_sub(0x0200_0000)? as usize + xip.base;
         let bytes = self.bytes.get(offset..offset.checked_add(size)?)?;
-        if !self.xip_active() {
+        if !xip.active {
             return Some(Err(
                 "XIP unavailable while SFC or flash pin routing is disabled",
             ));
         }
-        let control = self.read(0x40300).unwrap();
-        let plain = control & 1 == 0
-            || (control & 2 != 0
-                && address >= self.read(0x4030c).unwrap()
-                && address.checked_add(size as u32 - 1)? <= self.read(0x40308).unwrap());
+        let plain = !xip.encrypted
+            || match xip.window {
+                Some((low, high)) => address >= low && address.checked_add(size as u32 - 1)? <= high,
+                None => false,
+            };
         if !plain {
             if let Some(decoded) = &self.decoded {
                 if offset < 0x4000 {
@@ -87,25 +142,8 @@ impl Nor {
     }
 
     pub fn read(&self, a: u32) -> Option<u32> {
-        matches!(
-            a,
-            0x40200
-                | 0x40204
-                | 0x40208
-                | 0x4020c
-                | 0x40300
-                | 0x40304
-                | 0x40308
-                | 0x4030c
-                | 0x40310
-                | 0x40314
-                | 0x5101c
-                | 0x11c00
-                | 0x11c04
-                | 0x11c08
-        )
-        .then(|| {
-            let value = *self.regs.get(&a).unwrap_or(&0);
+        slot(a).map(|i| {
+            let value = self.regs[i];
             // Bit 31 is transaction busy, not retained configuration. The
             // functional bus completes each access before a following read.
             if a == 0x40200 {
@@ -242,10 +280,10 @@ impl Nor {
                 }
                 _ => return Some(Err("unimplemented SPI NOR command")),
             }
-            self.regs
-                .insert(0x11c00, self.read(0x11c00).unwrap() | 0x8000);
+            self.regs[slot(0x11c00).unwrap()] |= 0x8000;
         }
-        self.regs.insert(a, value);
+        self.regs[slot(a).unwrap()] = value;
+        self.refresh();
         Some(Ok(()))
     }
 }

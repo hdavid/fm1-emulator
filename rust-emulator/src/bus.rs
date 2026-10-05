@@ -90,6 +90,14 @@ impl Bus {
         }
     }
 
+    /// The core control word at 0x1eee000 + 4 * core, as a 4-byte bus read
+    /// returns it. The CPU reads it before every instruction; this skips the
+    /// MMIO dispatch chain (it never faults) but still counts the access.
+    pub(crate) fn core_control(&self, core: usize) -> u32 {
+        self.count_mmio(0x1eee000 + 4 * core as u32, 0);
+        self.cache.cores[core]
+    }
+
     fn check(address: u32, size: usize, operation: &'static str) -> Result<(), AccessFault> {
         if !matches!(size, 1 | 2 | 4) {
             return Err(Self::fault(
