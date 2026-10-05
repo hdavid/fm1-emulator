@@ -782,7 +782,7 @@ impl Cpu {
     }
 
     fn dispatch_interrupt(&mut self) -> Result<(), Fault> {
-        if !self.interrupts_enabled || self.in_interrupt {
+        if !self.interrupts_enabled || self.in_interrupt || self.repeat.is_some() {
             return Ok(());
         }
         if let Some(source) = self.bus.pending_irq_for(self.sr[11], self.sr[6] as usize) {

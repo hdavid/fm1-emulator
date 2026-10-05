@@ -724,7 +724,7 @@ fn immediate_repeat_clears_twenty_words_and_copies_multiword_blocks() {
 }
 
 #[test]
-fn an_interrupt_preserves_the_unfinished_repeat() {
+fn repeat_finishes_before_dispatching_a_pending_interrupt() {
     use fm1_emu::devices::{IRQ_CONFIG, TIMER5};
     for repeat in [0x8200, 0x0303] {
         let mut c = cpu(&[repeat, 0x0592, 0x0000, 0x0081]);
@@ -740,13 +740,19 @@ fn an_interrupt_preserves_the_unfinished_repeat() {
         c.bus.write(TIMER5, 9, 4).unwrap();
         c.interrupts_enabled = true;
         c.step().unwrap();
+        assert_eq!(c.pc, XIP + 2);
+        assert_eq!(c.irq_entries, 0);
+        c.step().unwrap();
+        c.step().unwrap();
+        assert_eq!(c.pc, XIP + 2);
+        assert_eq!(c.irq_entries, 0);
+        c.step().unwrap();
         assert_eq!(c.pc, XIP + 6);
+        assert_eq!(c.irq_entries, 1);
+        assert_eq!(c.sr[0], XIP + 4); // RETI is after the complete repeat.
         c.bus.write(TIMER5, 0x4000, 4).unwrap();
         c.step().unwrap(); // rti
-        while c.pc != XIP + 4 {
-            c.step().unwrap();
-            assert!(c.steps <= 5);
-        }
+        assert_eq!(c.pc, XIP + 4);
         assert_eq!(c.r[1], RAM + 12);
         assert_eq!(c.bus.read(RAM + 8, 4).unwrap(), 42);
         assert_eq!(c.r[3], if repeat == 0x0303 { 0 } else { 3 });
