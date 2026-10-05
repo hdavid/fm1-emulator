@@ -85,6 +85,8 @@ struct Emulator {
     /// Pointer angle per drawn knob (radians, 0 = up) and unspent drag/scroll.
     knob_angle: [f32; 8],
     knob_accum: [f32; 8],
+    /// Where each knob was last drawn (screen points).
+    knob_centre: [egui::Pos2; 8],
     /// Guest speed against real time (24 M instructions/s), sampled each second.
     speed: Option<f64>,
     speed_mark: (Instant, u64),
@@ -106,6 +108,7 @@ impl Emulator {
             master: 768,
             knob_angle: [0.; 8],
             knob_accum: [0.; 8],
+            knob_centre: [egui::Pos2::ZERO; 8],
             speed: None,
             speed_mark: (Instant::now(), 0),
         };
@@ -344,8 +347,14 @@ impl Emulator {
         }
         match encoder {
             None => {
-                let value = self.master as f32 + amount * 4.;
-                self.master = value.clamp(0., 1023.) as u16;
+                // A pot: the pointer follows the turn and stops at both ends.
+                let turn = amount / DETENT_PX * DETENT_ANGLE;
+                let value = self.master as f32
+                    + self.knob_accum[index]
+                    + turn / (1.5 * std::f32::consts::PI) * 1023.;
+                let value = value.clamp(0., 1023.);
+                self.master = value as u16;
+                self.knob_accum[index] = value - self.master as f32; // keep slow drags
                 self.knob_angle[index] = master_angle(self.master);
             }
             Some(e) => {
@@ -389,8 +398,23 @@ impl Emulator {
                 None => format!("{name} volume · drag or scroll · keys {keys}"),
             };
             let response = c.knob(ui, *x, *y, name, self.knob_angle[index], &hint);
-            // Drag up or right, scroll up, or the right-hand key: clockwise.
-            let mut amount = response.drag_delta().x - response.drag_delta().y;
+            // Circling the knob turns it by the pointer's angle around its
+            // centre (clockwise +); scroll up or the right-hand key: clockwise.
+            let mut amount = 0.;
+            let centre = c.origin + vec2(*x, *y) * c.scale;
+            self.knob_centre[index] = centre;
+            if let Some(now) = response.interact_pointer_pos().filter(|_| response.dragged()) {
+                let (from, to) = (now - response.drag_delta() - centre, now - centre);
+                if from.length() > 6. * c.scale && to.length() > 6. * c.scale {
+                    let mut turn = to.x.atan2(-to.y) - from.x.atan2(-from.y);
+                    if turn > std::f32::consts::PI {
+                        turn -= std::f32::consts::TAU;
+                    } else if turn < -std::f32::consts::PI {
+                        turn += std::f32::consts::TAU;
+                    }
+                    amount += turn / DETENT_ANGLE * DETENT_PX;
+                }
+            }
             if response.hovered() {
                 amount += ui.input(|i| i.raw_scroll_delta.y) * 0.5;
             }
@@ -753,5 +777,40 @@ mod tests {
         assert!(cpu.bus.lcd.pixels.iter().all(|&pixel| pixel == 0));
         app.run_slice(&ctx);
         assert_eq!(app.cpu.as_ref().unwrap().steps, steps);
+    }
+    #[test]
+    fn circling_a_knob_clicks_its_encoder_and_master_stops_at_its_ends() {
+        let mut app = demo();
+        let ctx = egui::Context::default();
+        draw(&mut app, &ctx, vec![], true);
+        let drag = |app: &mut Emulator, index: usize, degrees: i32| {
+            let centre = app.knob_centre[index];
+            let at = |d: i32| {
+                let a = (d as f32).to_radians();
+                centre + vec2(a.sin(), -a.cos()) * 22.
+            };
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            draw(app, &ctx, vec![egui::Event::PointerMoved(at(0))], true);
+            draw(app, &ctx, vec![button(at(0), true)], true);
+            let step = degrees.signum() * 5;
+            for d in (step..=degrees).step_by(5).chain((degrees..=step).rev().step_by(5)) {
+                draw(app, &ctx, vec![egui::Event::PointerMoved(at(d))], true);
+            }
+            draw(app, &ctx, vec![button(at(degrees), false)], true);
+        };
+        // A quarter turn clockwise around KNOB1 is six 15-degree clicks.
+        drag(&mut app, 4, 90);
+        assert!((app.knob_angle[4] - 6. * DETENT_ANGLE).abs() < 1e-4, "{}", app.knob_angle[4]);
+        // Endless: two full turns back keep counting.
+        drag(&mut app, 4, -720);
+        assert!((app.knob_angle[4] + 42. * DETENT_ANGLE).abs() < 1e-4, "{}", app.knob_angle[4]);
+        // MASTER is a pot: a big clockwise turn pins it at full scale.
+        drag(&mut app, 0, 300);
+        assert_eq!(app.master, 1023);
     }
 }
