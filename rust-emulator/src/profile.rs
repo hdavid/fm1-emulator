@@ -17,6 +17,8 @@ pub struct Profile {
     /// Instructions run inside an interrupt handler (the audio ISR renders
     /// the mix there, so this is the audio load).
     pub interrupt: u64,
+    /// Slots the core spent halted in `idle` (counted in `total`, at no PC).
+    pub idle: u64,
 }
 
 /// Executed instructions attributed to one function (or to `name` =
@@ -54,6 +56,7 @@ impl Profile {
             other: HashMap::new(),
             total: 0,
             interrupt: 0,
+            idle: 0,
         }
     }
 
@@ -68,11 +71,18 @@ impl Profile {
         }
     }
 
+    /// `slots` instruction slots halted in `idle` (no PC executed).
+    pub fn record_idle(&mut self, slots: u64) {
+        self.total += slots;
+        self.idle += slots;
+    }
+
     pub fn clear(&mut self) {
         self.dense.iter_mut().for_each(|count| *count = 0);
         self.other.clear();
         self.total = 0;
         self.interrupt = 0;
+        self.idle = 0;
     }
 
     /// Every executed PC with its count, by address.

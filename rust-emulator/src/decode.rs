@@ -39,8 +39,7 @@ pub(crate) enum Op {
     PopRetsRegs,
     PopPcRegs,
     MoveStackPointer,
-    PushIrqFrame,
-    PopIrqFrame,
+    PushSpecial,
     PopSpecial,
     CallRel32,
     Rel22,
@@ -137,6 +136,12 @@ pub(crate) enum Op {
     WordPostincrementStore,
     WordPostincrementLoad,
     MemoryIndexed,
+    PushSpecialMask,
+    PopSpecialMask,
+    Trigger,
+    PairRegisterPreincrement,
+    RegisterPostincrement,
+    SaturateSigned16,
     Unsupported,
 }
 
@@ -215,11 +220,9 @@ pub(crate) fn decode(h: u32) -> Op {
         PopPcRegs
     } else if matches!(h, 0x1440..=0x1443) {
         MoveStackPointer
-    } else if matches!(h, 0x04e8 | 0x04e9 | 0x04e1) {
-        PushIrqFrame
-    } else if matches!(h, 0x04a8 | 0x04a9 | 0x04a1) {
-        PopIrqFrame
-    } else if h & 0xfff0 == 0x0480 && h & 15 != 0 {
+    } else if h & 0xffc0 == 0x04c0 {
+        PushSpecial
+    } else if h & 0xffc0 == 0x0480 {
         PopSpecial
     } else if h == 0xff80 {
         CallRel32
@@ -267,9 +270,11 @@ fn decode_extended(h: u32) -> Op {
         AddRegister
     } else if h & 0xfff8 == 0x14c0 {
         ClearHighRegister
-    } else if h & 0xfff0 == 0x0230 {
+    } else if h & 0xffe0 == 0x0220 {
+        // flush [rN] (0220) and flushinv [rN] (0230), one data cache line.
         CacheFlushInvalidate
-    } else if h & 0xe058 == 0x2000 {
+    } else if h & 0xe050 == 0x2000 {
+        // Bit 3 selects r8-r15 (objdump: 2709 r9 = [sp+28]).
         StackWord
     } else if matches!(h & 0xff88, 0x1700 | 0x1708 | 0x1780 | 0x1788) {
         Extend
@@ -309,11 +314,11 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         MemoryAddRegister
     } else if h & 0xfff8 == 0xed50 || h & 0xfff8 == 0xed58 {
         HalfwordExtended
-    } else if matches!(h, 0xedd0 | 0xedd4) {
+    } else if h & 0xfff8 == 0xedd0 {
         HalfwordPostincrement
-    } else if h == 0xeed2 {
+    } else if matches!(h, 0xeed2 | 0xeed3) {
         BytePostincrementStore
-    } else if matches!(h, 0xeed0 | 0xeed4) {
+    } else if matches!(h, 0xeed0 | 0xeed1 | 0xeed4 | 0xeed5) {
         BytePostincrementLoad
     } else if h & 0xfff0 == 0xe1e0 {
         MultiplyImmediate
@@ -321,6 +326,18 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         BitMask
     } else if h == 0xe9d0 {
         StackPair
+    } else if h == 0xe078 && x & 0xff == 1 {
+        // rD = sat16(rS) (s); the (u) form (x & 0xff == 0) is not decided.
+        SaturateSigned16
+    } else if h == 0xe958 && x & 0x8000 == 0 {
+        // [--sp] = {sp, ssp, ..., reti}: x bit n is sr[n]. Pushing pc is
+        // not decided (no firmware uses it).
+        PushSpecialMask
+    } else if h == 0xe950 && x & 0x4000 == 0 {
+        // {pc, ..., reti} = [sp++]; popping sp itself is not decided.
+        PopSpecialMask
+    } else if h == 0xe870 && x == 0 {
+        Trigger
     } else if h == 0xe070 && x & 255 == 0 {
         ReverseBytes
     } else if h & 0xfff0 == 0xe0f0 {
@@ -381,16 +398,21 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         BranchLong
     } else if h == 0xe190 && x & 15 <= 3 {
         LogicThree
-    } else if h & 0xfff0 == 0xeb20 && x != 0 {
+    } else if h & 0xffe0 == 0xeb20 && x != 0 {
+        // [rN+] = {...} (eb2X) and [rN++] = {...} (eb3X).
         StoreRegisterList
-    } else if h & 0xfff0 == 0xeb00 && x != 0 {
+    } else if h & 0xffe0 == 0xeb00 && x != 0 {
+        // {...} = [rN+] (eb0X) and {...} = [rN++] (eb1X).
         LoadRegisterList
     } else if matches!(h, 0xe9d8 | 0xe9d9 | 0xe9dc | 0xe9dd | 0xe9de) {
         StackSubword
     } else if h == 0xe9d4 {
         StackExtended
-    } else if h & 0xfff8 == 0xec50 && x & 3 != 2 {
+    } else if h & 0xfff8 == 0xec50 {
         MemoryPair
+    } else if h == 0xec5c && x & 2 != 0 {
+        // r9_r8 = d[++r1=r0] (stock 0x0200940e), x bit 0 the store.
+        PairRegisterPreincrement
     } else if (h & 0xfff0 == 0xe1a0 && x & 3 == 0) || (h & 0xfff0 == 0xe1b0 && x & 2 == 0) {
         // JieLi objdump: e1aX insert (x bits 0-1 = 0), e1bX uextra (0) or
         // sextra (1); other low bits are not these forms.
@@ -399,9 +421,13 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         BranchEqualFlag
     } else if h & 0xfff0 == 0xe850 {
         BranchBit
-    } else if matches!(h & 0xffe0, 0xef00 | 0xef80 | 0xefc0) {
+    } else if h & 0xff00 == 0xef00 {
         MemoryMask
-    } else if conditional_kind((h >> 4) & 255) && h & 0xf000 == 0xe000 {
+    } else if conditional_kind((h >> 4) & 255)
+        && h & 0xf000 == 0xe000
+        // Register forms with x bits 7 and 6 set: <unknown> to objdump.
+        && !((h >> 4) & 7 == 1 && x & 0xc0 == 0xc0)
+    {
         ConditionalBlock
     } else if h == 0xe864 {
         MemoryLogic
@@ -432,7 +458,18 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         BranchCompareRegister
     } else if matches!(
         h,
-        0xee50 | 0xee51 | 0xee52 | 0xee53 | 0xee54 | 0xee55 | 0xee58 | 0xee59 | 0xee5a | 0xee5b
+        0xee50
+            | 0xee51
+            | 0xee52
+            | 0xee53
+            | 0xee54
+            | 0xee55
+            | 0xee58
+            | 0xee59
+            | 0xee5a
+            | 0xee5b
+            | 0xee5c
+            | 0xee5d
     ) {
         ByteExtended
     } else if h & 0xfff8 == 0xecd0 {
@@ -445,14 +482,156 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         HalfwordRegisterPreincrement
     } else if h == 0xeddc && matches!(x & 15, 1 | 3) {
         HalfwordRegisterPreincrementStore
-    } else if h == 0xecd8 && x & 3 == 1 {
+    } else if h & 0xfff8 == 0xecd8 && x & 3 == 1 {
+        // ecd8-ecdf: rS advances by a signed 11-bit immediate.
         WordPostincrementStore
-    } else if h == 0xecd8 && x & 3 == 0 {
+    } else if h & 0xfff8 == 0xecd8 && x & 3 == 0 {
         WordPostincrementLoad
+    } else if (h == 0xecde && x & 2 != 0) || h == 0xedde || (h == 0xeede && x & 3 != 3) {
+        // [rS++=rC]: the access at rS, then rS += rC.
+        RegisterPostincrement
     } else if matches!(h, 0xecd8 | 0xedd8 | 0xeed8) {
         MemoryIndexed
     } else {
         Unsupported
+    }
+}
+
+/// Length in bytes the interpreter gives a form whose word is `h` (after
+/// `primary`); `None` for `Unsupported` and for `Wide` without its extension.
+pub(crate) fn length(op: Op) -> Option<u32> {
+    use Op::*;
+    match op {
+        Unsupported | Wide => None,
+        MovImm32 | CallRel32 | BranchLong => Some(6),
+        MovSpecial | MovMask | MovImm16 | PushPopMask | Rel22 => Some(4),
+        // Every form decided by the extension halfword.
+        BranchRegisterMask
+        | MemoryShift
+        | MemoryAddRegister
+        | HalfwordExtended
+        | HalfwordPostincrement
+        | BytePostincrementStore
+        | BytePostincrementLoad
+        | MultiplyImmediate
+        | BitMask
+        | StackPair
+        | ReverseBytes
+        | SubtractPackedImmediate
+        | ReverseSubtract
+        | MultiplyLong
+        | MultiplyAccumulateLong
+        | DivideLong
+        | CarryArithmetic
+        | MultiplyExtended
+        | Divide
+        | CountLeadingZeros
+        | Absolute
+        | Maximum
+        | Minimum
+        | MemoryAdd
+        | DecrementBranch
+        | MemoryBit
+        | AddSubtractExtended
+        | ShiftRegisterExtended
+        | BytePreincrement
+        | RotateRightImmediate
+        | ShiftExtended
+        | ShiftPair
+        | ShiftPairRegister
+        | FloatOp
+        | LogicThree
+        | StoreRegisterList
+        | LoadRegisterList
+        | StackSubword
+        | StackExtended
+        | MemoryPair
+        | BitField
+        | BranchEqualFlag
+        | BranchBit
+        | MemoryMask
+        | ConditionalBlock
+        | MemoryLogic
+        | LogicImmediate
+        | StoreImmediate
+        | AddImmediate
+        | AddStackExtended
+        | AdjustStackExtended
+        | BranchCompareImmediate
+        | BranchCompareRegister
+        | ByteExtended
+        | WordExtended
+        | WordRegisterPreincrementStore
+        | WordRegisterPreincrement
+        | HalfwordRegisterPreincrement
+        | HalfwordRegisterPreincrementStore
+        | WordPostincrementStore
+        | WordPostincrementLoad
+        | MemoryIndexed
+        | PushSpecialMask
+        | PopSpecialMask
+        | Trigger
+        | PairRegisterPreincrement
+        | RegisterPostincrement
+        | SaturateSigned16 => Some(4),
+        _ => Some(2),
+    }
+}
+
+/// Length in bytes of the instruction word `h` as a conditional block counts
+/// it when it skips instructions (`Cpu::conditional`), from the word alone.
+pub(crate) fn skip_length(h: u32) -> u32 {
+    // ff00-ff7f: the six-byte compare-branches (objdump), as BranchLong.
+    if matches!(h & 0xffe0, 0xffc0 | 0xffe0) || h == 0xff80 || h & 0xff80 == 0xff00 {
+        6
+    } else if h >> 13 == 7 {
+        4
+    } else {
+        2
+    }
+}
+
+/// The interpreter's view of one instruction (examples/op_scan compares
+/// it with the vendor disassembler).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Description {
+    /// The form's name (`Op` variant), "Unsupported" when not decoded.
+    pub form: String,
+    /// Bytes the interpreter advances over this slot; `None` if unsupported.
+    pub length: Option<u32>,
+    /// Bytes a conditional block skips for this slot.
+    pub skip_length: u32,
+    /// The word the interpreter executes for this slot (`primary`).
+    pub word: u16,
+    /// Whether the word opens a parallel bundle (this slot is its primary).
+    pub parallel: bool,
+}
+
+/// Describe the instruction whose halfwords start at `words[0]`; the slot of
+/// a parallel bundle is described as the interpreter executes it (its
+/// primary word, with the bundle's own length).
+pub fn describe(words: &[u16]) -> Description {
+    let h = words.first().copied().unwrap_or(0) as u32;
+    let word = primary(h);
+    let mut op = decode(word);
+    if op == Op::Wide {
+        if let Some(&x) = words.get(1) {
+            op = decode_wide(word, x as u32);
+        }
+    }
+    let parallel = is_parallel(h);
+    // A bundle's primary slot advances as `Cpu::execute_bundle` does.
+    let length = length(op).map(|length| match (parallel, h >> 13 == 6) {
+        (true, true) => 2,
+        (true, false) => 4,
+        (false, _) => length,
+    });
+    Description {
+        form: format!("{op:?}"),
+        length,
+        skip_length: skip_length(h),
+        word: word as u16,
+        parallel,
     }
 }
 
@@ -468,11 +647,15 @@ fn conditional_kind(kind: u32) -> bool {
             | 0x92
             | 0x93
             | 0x99
+            // if (rA < #packed): e9a3 0ba0 (objdump: < 81920).
+            | 0x9a
             | 0x9b
             | 0xa1
             | 0xa2
             | 0xa3
             | 0xc1
+            // if (rA > #packed): Felucca/SLOOP ota_session ec23 0ba0 (> 81920).
+            | 0xc2
             | 0xc3
             | 0xc9
             | 0xca
@@ -484,6 +667,8 @@ fn conditional_kind(kind: u32) -> bool {
             | 0xda
             | 0xdb
             | 0xe1
+            // ifs (rA > #packed): FM-1_093 0x020a3008 ee21 0e5e (> 3552).
+            | 0xe2
             // ifs (rA > #imm12): FM-1_093 0x02004872 ee37 5fff (r7 > -1).
             | 0xe3
             | 0xe9
@@ -511,5 +696,25 @@ mod tests {
         assert_eq!(decode_wide(0xe86c, 1), Op::Unsupported);
         assert_eq!(decode(0xe064), Op::MovSpecial);
         assert_eq!(decode(0x2010), Op::MovNegative);
+    }
+
+    #[test]
+    fn describe_reports_the_interpreted_form_and_its_length() {
+        // r3 = 29392640 (6 bytes), r1 = [r3+32] (2), call (4).
+        let d = describe(&[0xffc3, 0x7f00, 0x01c0]);
+        assert_eq!((d.form.as_str(), d.length), ("MovImm32", Some(6)));
+        assert_eq!(describe(&[0x68b1]).length, Some(2));
+        assert_eq!(describe(&[0xea80, 0xc6ba]).length, Some(4));
+        // A wide word without its extension halfword is not decided yet.
+        assert_eq!(describe(&[0xe86c]).length, None);
+        // Bundles: "r6 = r0  #" (0xd606, 2 bytes) and "r0 = r8 >> 8  #"
+        // (0xf1c0 0x0888, 4 bytes) execute their primary word.
+        let d = describe(&[0xd606]);
+        assert!(d.parallel);
+        assert_eq!((d.word, d.length), (0x1606, Some(2)));
+        let d = describe(&[0xf1c0, 0x0888]);
+        assert_eq!((d.word, d.length), (0xe1c0, Some(4)));
+        assert_eq!(describe(&[0x0081]).form, "Rti");
+        assert_eq!(describe(&[0x0002]).length, None);
     }
 }

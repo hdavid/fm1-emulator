@@ -2,7 +2,7 @@
 // Probe decodings mirror emu.py, checked against vendor objdump and the FM-1.
 // Startup-only additions use the pinned Quarkslab pi32v2 reference; see README.
 use crate::code_cache::Operands;
-use crate::decode::{decode, decode_wide, is_parallel, primary, Op};
+use crate::decode::{decode, decode_wide, is_parallel, primary, skip_length, Op};
 use crate::devices::OSC_TICKS_PER_INSTRUCTION;
 use crate::{
     bus::{AccessFault, Bus},
@@ -120,6 +120,25 @@ mod lock_tests {
     }
 
     #[test]
+    fn both_cores_share_one_step_of_guest_time() {
+        let mut c = Cpu::new(Bus::new(vec![0; 64]).unwrap(), crate::XIP);
+        let entry = crate::RAM + 512;
+        c.bus.write(0x01c7fff8, entry, 4).unwrap();
+        c.bus.write(0x1eee004, 8, 4).unwrap();
+        for _ in 0..10 {
+            c.step().unwrap();
+        }
+        // Ten pairs of instructions (the secondary starts in the first).
+        assert_eq!(c.steps, 10);
+        assert_eq!(c.core_steps, [10, 10]);
+        // CPU0 stopped: the secondary alone carries guest time.
+        c.bus.write(0x1eee000, 4, 4).unwrap();
+        c.step().unwrap();
+        assert_eq!(c.steps, 11);
+        assert_eq!(c.core_steps, [10, 11]);
+    }
+
+    #[test]
     fn paused_secondary_retains_context_until_resume() {
         let mut c = Cpu::new(Bus::new(vec![0; 32]).unwrap(), crate::XIP);
         let entry = crate::RAM + 512;
@@ -166,6 +185,13 @@ pub struct Cpu {
     pub sr: [u32; 16],
     pub pc: u32,
     pub steps: u64,
+    /// Instructions executed by each core. `steps` is the time base: with
+    /// both cores running, a pair of instructions (one per core) takes one
+    /// step of guest time, as both cores run on the same clock.
+    pub core_steps: [u64; 2],
+    /// False while the secondary executes alongside the primary: its
+    /// instruction then shares the primary's step of guest time.
+    counts_time: bool,
     /// Instructions per 24 MHz oscillator tick: the emulated CPU clock is
     /// 24 MHz times this (1 = 24 MHz, the real-time default; the FM-1's
     /// WL82 runs at 120-396 MHz, typically 320). Timers, audio DMA, USB and
@@ -180,10 +206,22 @@ pub struct Cpu {
     repeat: Option<(u32, u32, u32)>,
     irq_repeat: Option<(u32, u32, u32)>,
     bus_locked: bool,
+    /// Stopped by `idle` until an interrupt is taken (per core).
+    halted: bool,
     secondary: Option<Core>,
     irq_priority_mask: u32,
     /// Name of the last executed instruction form (what `step` returns).
     pub(crate) name: &'static str,
+    /// `run_steps` and `skip_idle` jump over halted spans (true, the
+    /// default); false steps every halted slot (the reference behaviour,
+    /// identical guest-visible state, for comparisons).
+    pub idle_skip: bool,
+    /// Instruction slots in which a core was halted by `idle` (stepped or
+    /// skipped), summed over both cores: the units of `core_steps`, in
+    /// which they are counted too.
+    pub idle_slots: u64,
+    /// Of `idle_slots`, those jumped over by `skip_idle` without stepping.
+    pub idle_skipped: u64,
 }
 
 // Per-core context. Memory and devices remain on the one shared bus.
@@ -199,6 +237,7 @@ struct Core {
     repeat: Option<(u32, u32, u32)>,
     irq_repeat: Option<(u32, u32, u32)>,
     bus_locked: bool,
+    halted: bool,
 }
 impl Core {
     fn reset(pc: u32) -> Self {
@@ -217,6 +256,7 @@ impl Core {
             repeat: None,
             irq_repeat: None,
             bus_locked: false,
+            halted: false,
         }
     }
     fn swap(&mut self, cpu: &mut Cpu) {
@@ -232,6 +272,7 @@ impl Core {
         swap(&mut self.irq_repeat, &mut cpu.irq_repeat);
         swap(&mut self.bus_locked, &mut cpu.bus_locked);
         swap(&mut self.irq_priority_mask, &mut cpu.irq_priority_mask);
+        swap(&mut self.halted, &mut cpu.halted);
     }
 }
 
@@ -243,6 +284,8 @@ impl Cpu {
             sr: [0; 16],
             pc: entry,
             steps: 0,
+            core_steps: [0; 2],
+            counts_time: true,
             instructions_per_tick: 1,
             subtick: 0,
             interrupts_enabled: false,
@@ -253,9 +296,13 @@ impl Cpu {
             repeat: None,
             irq_repeat: None,
             bus_locked: false,
+            halted: false,
             secondary: None,
             irq_priority_mask: 0,
             name: "",
+            idle_skip: true,
+            idle_slots: 0,
+            idle_skipped: 0,
         }
     }
 
@@ -283,7 +330,7 @@ impl Cpu {
     }
 
     #[inline]
-    fn push(&mut self, value: u32) -> Step<()> {
+    pub(crate) fn push(&mut self, value: u32) -> Step<()> {
         let address = self.sr[14].wrapping_sub(4);
         self.write(address, value)?;
         self.sr[14] = address;
@@ -291,7 +338,7 @@ impl Cpu {
     }
 
     #[inline]
-    fn pop(&mut self) -> Step<u32> {
+    pub(crate) fn pop(&mut self) -> Step<u32> {
         let value = self.read(self.sr[14], 4)?;
         self.sr[14] = self.sr[14].wrapping_add(4);
         Ok(value)
@@ -306,13 +353,123 @@ impl Cpu {
         self.step_cores().map_err(|fault| *fault)
     }
 
+    /// Instructions `run_steps` runs between checks for halted cores.
+    const HALT_CHECK_INTERVAL: u64 = 64;
+
+    /// The primary core is halted by `idle`, waiting for an interrupt.
+    pub fn halted(&self) -> bool {
+        self.halted
+    }
+
     /// `count` calls of `step`, stopping at the first fault, in one loop
-    /// (no per-instruction call or result).
+    /// (no per-instruction call or result). Spans in which every running
+    /// core is halted are jumped over (`skip_idle`) unless `idle_skip` is
+    /// off; the guest-visible state is the same either way.
     pub fn run_steps(&mut self, count: u64) -> Result<(), Fault> {
-        for _ in 0..count {
-            self.step_cores().map_err(|fault| *fault)?;
+        let mut done = 0;
+        while done < count {
+            if self.halted || self.secondary.as_ref().is_some_and(|core| core.halted) {
+                let skipped = self.skip_calls(count - done, u64::MAX);
+                if skipped > 0 {
+                    done += skipped;
+                    continue;
+                }
+            }
+            // Checking for a halt only every few instructions keeps this
+            // loop as tight as a plain one; the halted slots stepped
+            // meanwhile are equivalent to skipped ones.
+            let batch = (count - done).min(Self::HALT_CHECK_INTERVAL);
+            for _ in 0..batch {
+                self.step_cores().map_err(|fault| *fault)?;
+            }
+            done += batch;
         }
         Ok(())
+    }
+
+    /// While every core that would run is halted by `idle` and no interrupt
+    /// can be taken, jump guest time forward as if the halted slots had
+    /// been stepped one by one, to just before the slot that runs the next
+    /// device event, by at most `max_steps` steps of guest time (`steps`).
+    /// Returns the steps skipped (0: step normally). Each skipped step
+    /// counts exactly like a stepped halted one (in `steps`, `core_steps`
+    /// and `idle_slots`), so timers,
+    /// audio DMA, the LCD, USB and the watchdog see the same ticks.
+    pub fn skip_idle(&mut self, max_steps: u64) -> u64 {
+        let before = self.steps;
+        self.skip_calls(u64::MAX, max_steps);
+        self.steps - before
+    }
+
+    /// `skip_idle` counted in calls of `step` (one step of guest time
+    /// each), at most `max_calls`; returns the calls skipped.
+    pub fn skip_idle_calls(&mut self, max_calls: u64) -> u64 {
+        self.skip_calls(max_calls, u64::MAX)
+    }
+
+    /// `skip_idle` in calls of `step_cores` (at most `max_calls`, and at
+    /// most `max_steps` steps of guest time); returns the calls skipped.
+    #[cold]
+    #[inline(never)]
+    fn skip_calls(&mut self, max_calls: u64, max_steps: u64) -> u64 {
+        if !self.idle_skip {
+            return 0;
+        }
+        // Mirror `step_cores`: which cores step on the next call. A call
+        // that starts or resets the secondary core is stepped normally.
+        let control = self.bus.core_control(1);
+        let secondary = self.secondary.as_ref();
+        if (control & 2 != 0 && secondary.is_some()) || (secondary.is_none() && control & 10 == 8) {
+            return 0;
+        }
+        let secondary_running = control & 0x18 == 8 && secondary.is_some();
+        let secondary_alone = secondary_running
+            && (self.bus.core_control(0) & 16 != 0 || secondary.is_some_and(|core| core.bus_locked));
+        let primary_steps = !secondary_alone;
+        let secondary_steps = secondary_alone || (secondary_running && !self.bus_locked);
+        if (primary_steps && !self.halted)
+            || (secondary_steps && !secondary.is_some_and(|core| core.halted))
+        {
+            return 0;
+        }
+        // A halted core takes a deliverable interrupt in its next slot.
+        if self.bus.any_irq_pending() {
+            if primary_steps && self.bus.pending_irq_for(self.sr[11], self.sr[6] as usize).is_some() {
+                return 0;
+            }
+            if secondary_steps
+                && secondary.is_some_and(|core| {
+                    self.bus.pending_irq_for(core.sr[11], core.sr[6] as usize).is_some()
+                })
+            {
+                return 0;
+            }
+        }
+        let now = self.bus.now;
+        let next_event = self.bus.next_event;
+        if next_event <= now {
+            return 0;
+        }
+        let per_tick = self.instructions_per_tick as u64;
+        // Every call of `step_cores` is one step of guest time: the two
+        // cores share a clock, so a pair of slots (one per core) takes one
+        // step. Steps up to and including the one whose tick reaches
+        // next_event; that one is left to `step_cores` (it runs the event).
+        let to_event = (per_tick - self.subtick as u64) + (next_event - now - 1) * per_tick;
+        let calls = (to_event - 1).min(max_calls).min(max_steps);
+        if calls == 0 {
+            return 0;
+        }
+        let subtick = self.subtick as u64 + calls;
+        self.bus.now += subtick / per_tick;
+        self.subtick = (subtick % per_tick) as u32;
+        self.steps += calls;
+        self.core_steps[0] += if primary_steps { calls } else { 0 };
+        self.core_steps[1] += if secondary_steps { calls } else { 0 };
+        let slots = calls * (u64::from(primary_steps) + u64::from(secondary_steps));
+        self.idle_slots += slots;
+        self.idle_skipped += slots;
+        calls
     }
 
     #[inline(always)]
@@ -337,9 +494,15 @@ impl Cpu {
             return self.step_secondary();
         }
         self.step_core()?;
+        self.core_steps[0] += 1;
         let op = self.name;
         if !self.bus_locked && secondary_running {
-            self.step_secondary()?;
+            // Both cores run on one clock: the secondary's instruction shares
+            // the primary's step of guest time instead of adding its own.
+            self.counts_time = false;
+            let result = self.step_secondary();
+            self.counts_time = true;
+            result?;
         }
         Ok(op)
     }
@@ -350,6 +513,7 @@ impl Cpu {
         let result = self.step_core();
         secondary.swap(self);
         self.secondary = Some(secondary);
+        self.core_steps[1] += 1;
         result.map(|()| self.name)
     }
 
@@ -371,6 +535,9 @@ impl Cpu {
 
     #[inline(always)]
     fn step_core(&mut self) -> Step<()> {
+        if self.halted {
+            return self.halted_slot();
+        }
         if let Some((at, end)) = self.predicate_skip {
             if self.pc == at {
                 self.pc = end;
@@ -404,6 +571,28 @@ impl Cpu {
                 }
             }
         }
+        if self.counts_time {
+            self.count_slot(pc)?;
+        }
+        self.dispatch_interrupt()
+    }
+
+    /// A slot of a core halted in `idle`: no instruction issues, but it
+    /// takes the slot (and, when it carries guest time, the step of guest
+    /// time) of one, so guest time runs exactly as if it had.
+    #[inline(never)]
+    fn halted_slot(&mut self) -> Step<()> {
+        self.name = "halted";
+        self.idle_slots += 1;
+        if self.counts_time {
+            self.count_slot(self.pc)?;
+        }
+        self.dispatch_interrupt()
+    }
+
+    /// One step of guest time (`pc`: for a device fault).
+    #[inline(always)]
+    fn count_slot(&mut self, pc: u32) -> Step<()> {
         self.steps += 1;
         self.subtick += 1;
         if self.subtick >= self.instructions_per_tick {
@@ -413,7 +602,7 @@ impl Cpu {
                 self.advance_devices(pc)?;
             }
         }
-        self.dispatch_interrupt()
+        Ok(())
     }
 
     /// A parallel bundle at `pc`: the following slot, then the primary slot
@@ -503,6 +692,12 @@ impl Cpu {
         self.secondary.as_ref().map(|core| core.pc)
     }
 
+    /// Diagnostics: whether the secondary core, if started, is halted in
+    /// `idle`.
+    pub fn secondary_halted(&self) -> Option<bool> {
+        self.secondary.as_ref().map(|core| core.halted)
+    }
+
     pub fn set_cpu_mhz(&mut self, mhz: u32) -> Result<(), String> {
         if mhz == 0 || mhz % 24 != 0 {
             return Err(format!(
@@ -526,24 +721,11 @@ impl Cpu {
         let else_count = (counts >> 12) & 3;
         for i in 0..then_count + else_count {
             let h = self.read(cursor, 2)?;
-            let length = if matches!(h & 0xffe0, 0xffc0 | 0xffe0) || h == 0xff80 {
-                6
-            } else if h >> 13 == 7 {
-                4
-            } else {
-                2
-            };
-            cursor += length;
+            cursor += skip_length(h);
             // A parallel pair counts as one conditional instruction bundle.
             if h >> 13 == 6 || h & 0xf800 == 0xf000 {
                 let following = self.read(cursor, 2)?;
-                cursor += if matches!(following & 0xffe0, 0xffc0 | 0xffe0) || following == 0xff80 {
-                    6
-                } else if following >> 13 == 7 {
-                    4
-                } else {
-                    2
-                };
+                cursor += skip_length(following);
             }
             if i + 1 == then_count {
                 then_end = cursor;
@@ -647,19 +829,9 @@ impl Cpu {
             }
             Op::MovMask => {
                 let extra = self.operand(code.x, pc + 2)?;
-                let byte = extra & 255;
-                let mode = (extra >> 10) & 3;
-                let value = if mode != 0 {
-                    ((0x80 | (extra & 127)) << (32 - mode * 8)) >> ((extra >> 7) & 7)
-                } else if extra & 0x0f00 == 0x0300 {
-                    byte * 0x0101_0101
-                } else if extra & 0x0f00 == 0x0100 {
-                    (byte << 24) | (byte << 8)
-                } else if extra & 0x0f00 == 0 {
-                    byte
-                } else {
-                    return Err(Fault::Unsupported { pc, word: h as u16 }.into());
-                };
+                // The packed immediate of the other forms (JieLi objdump:
+                // e060 3164 is r3 = 0x640064, 3264 is r3 = 0x64006400).
+                let value = crate::extended::packed(extra);
                 self.r[((extra >> 12) & 15) as usize] = value;
                 next = pc + 4;
                 name = "mov_mask";
@@ -865,30 +1037,24 @@ impl Cpu {
                 }
                 name = "move_stack_pointer";
             }
-            Op::PushIrqFrame => {
-                // 0x04c0 | mask over {reti 0, rets 3, psr 5}, highest first
-                // (04e9 = {psr, rets, reti}; 04e1 = {psr, reti}).
-                for index in [5, 3, 0] {
+            Op::PushSpecial => {
+                // 0x04c0 | mask over {reti 0, rete 1, retx 2, rets 3, sr4 4,
+                // psr 5}, highest first, so the lowest is at the lowest
+                // address (04e9 = {psr, rets, reti}; fm1_vec.S stubs: 04c8 =
+                // {rets}).
+                for index in (0..6).rev() {
                     if h & (1 << index) != 0 {
                         self.push(self.sr[index])?;
                     }
                 }
-                name = "push_irq_frame";
-            }
-            Op::PopIrqFrame => {
-                for index in [0, 3, 5] {
-                    if h & (1 << index) != 0 {
-                        self.sr[index] = self.pop()?;
-                    }
-                }
-                name = "pop_irq_frame";
+                name = "push_special";
             }
             Op::PopSpecial => {
-                // pop {reti, rete, retx, rets}: bit n restores sr[n], lowest
-                // first (SLOOP's tail calls: pop {rets}; goto f).
-                for n in 0..4 {
-                    if h & (1 << n) != 0 {
-                        self.sr[n] = self.pop()?;
+                // 0x0480 | the same mask, lowest first (SLOOP's tail calls:
+                // pop {rets}; goto f; irq exit: 04a9 = {psr, rets, reti}).
+                for index in 0..6 {
+                    if h & (1 << index) != 0 {
+                        self.sr[index] = self.pop()?;
                     }
                 }
                 name = "pop_special";
@@ -995,11 +1161,20 @@ impl Cpu {
             }
             Op::Nop => {
                 // 0x0001 is the SDK's asm("idle") (wait for interrupt; FM-1_093
-                // IDLE0 task at 0x0205b8da). Treated as a hint: execution
-                // continues, which only costs instructions while idle.
+                // IDLE0 task at 0x0205b8da): with interrupts enabled the core
+                // halts after it until it takes an interrupt, which returns
+                // to the next instruction. With interrupts off (or inside a
+                // handler) nothing could wake it: there it is a hint and
+                // execution continues (what the hardware does then is
+                // unverified).
                 name = match h {
                     0x0020 => "csync",
-                    0x0001 => "idle",
+                    0x0001 => {
+                        self.halted = self.interrupts_enabled
+                            && !self.in_interrupt
+                            && !self.blocks_interrupts_at(pc + 2);
+                        "idle"
+                    }
                     _ => "nop",
                 };
             }
@@ -1030,6 +1205,15 @@ impl Cpu {
         let pc = self.pc;
         matches!(self.repeat, Some((start, end, _)) if (start..end).contains(&pc))
             || matches!(self.predicate_skip, Some((at, _)) if pc < at && at - pc <= 32)
+    }
+
+    /// Whether the PC `next` after an `idle` is one at which no interrupt
+    /// is taken (`inside_block`, including a repeat that loops back): an
+    /// `idle` there could never be woken, so it stays a hint.
+    fn blocks_interrupts_at(&self, next: u32) -> bool {
+        matches!(self.repeat, Some((start, end, count))
+            if (start..end).contains(&next) || (next == end && count > 1))
+            || matches!(self.predicate_skip, Some((at, _)) if next < at && at - next <= 32)
     }
 
     #[inline(always)]
@@ -1074,6 +1258,7 @@ impl Cpu {
             self.irq_predicate = self.predicate_skip.take();
             self.irq_repeat = self.repeat.take();
             self.interrupts_enabled = false;
+            self.halted = false;
             self.irq_entries += 1;
         }
         Ok(())
