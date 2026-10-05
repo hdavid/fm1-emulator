@@ -185,6 +185,23 @@ pub struct Cpu {
     idle: bool,
     idle_wake_delay: u8,
     secondary: Option<Core>,
+    /// Opt-in, unmeasured: let an interrupt of a higher priority than the
+    /// running handler's preempt it once the handler re-enabled interrupts.
+    /// In this mode an entry clears the global enable (the handler's `sti`
+    /// re-enables it), as the fork's pre-ICFG model did; the SLOOP and
+    /// Melodee USB audio builds rely on preemption. Off by default: the
+    /// physical FM-1 measurements behind the interrupt model do not nest.
+    pub nested_irqs: bool,
+    /// Preempted handlers, innermost last (`nested_irqs`).
+    irq_nest: Vec<IrqFrame>,
+}
+
+/// What a nested interrupt entry keeps of the handler it preempts: its
+/// ICFG and the block state of the code that handler interrupted.
+struct IrqFrame {
+    icfg: u32,
+    predicate: Option<(u32, u32)>,
+    repeat: Option<Repeat>,
 }
 
 // Per-core context. Memory and devices remain on the one shared bus.
@@ -202,6 +219,7 @@ struct Core {
     bus_locked: bool,
     idle: bool,
     idle_wake_delay: u8,
+    irq_nest: Vec<IrqFrame>,
 }
 impl Core {
     fn reset(pc: u32) -> Self {
@@ -222,6 +240,7 @@ impl Core {
             bus_locked: false,
             idle: false,
             idle_wake_delay: 0,
+            irq_nest: Vec::new(),
         }
     }
     fn swap(&mut self, cpu: &mut Cpu) {
@@ -239,6 +258,7 @@ impl Core {
         swap(&mut self.bus_locked, &mut cpu.bus_locked);
         swap(&mut self.idle, &mut cpu.idle);
         swap(&mut self.idle_wake_delay, &mut cpu.idle_wake_delay);
+        swap(&mut self.irq_nest, &mut cpu.irq_nest);
     }
 }
 
@@ -293,6 +313,8 @@ impl Cpu {
             idle: false,
             idle_wake_delay: 0,
             secondary: None,
+            nested_irqs: false,
+            irq_nest: Vec::new(),
         }
     }
 
@@ -981,6 +1003,19 @@ impl Cpu {
                 next = self.r[(h & 15) as usize];
                 op = "call_reg";
             }
+            First::Rti if !self.irq_nest.is_empty() => {
+                // Back into the preempted handler (nested_irqs): same stack,
+                // still in interrupt context, its ICFG and block state.
+                let outer = self.irq_nest.pop().unwrap();
+                next = self.sr[0];
+                self.predicate_skip = self.irq_predicate.take();
+                self.repeat = self.irq_repeat.take();
+                self.irq_predicate = outer.predicate;
+                self.irq_repeat = outer.repeat;
+                self.sr[11] = outer.icfg;
+                self.interrupts_enabled = outer.icfg & 0x200 != 0;
+                op = "rti";
+            }
             First::Rti if self.in_interrupt => {
                 next = self.sr[0];
                 self.sr[13] = self.sr[14];
@@ -1035,7 +1070,7 @@ impl Cpu {
 
     fn dispatch_interrupt(&mut self) -> Result<(), Fault> {
         if !self.interrupts_enabled
-            || self.in_interrupt
+            || (self.in_interrupt && !self.nested_irqs)
             || self.repeat.is_some()
             || self.predicate_skip.is_some()
         {
@@ -1058,13 +1093,29 @@ impl Cpu {
                 .devices
                 .irq_priority_for(source, self.sr[11], self.sr[6] as usize)
                 .unwrap();
+            // nested_irqs: only a higher priority than the running
+            // handler's (ICFG bits 24-26) preempts it.
+            let nesting = self.in_interrupt;
+            if nesting && priority <= (self.sr[11] >> 24) & 7 {
+                return Ok(());
+            }
             let handler = self.read(0x01c7_fe00 + source as u32 * 4, 4)?;
             self.bus
                 .fetch(handler)
                 .map_err(|fault| Fault::Access { pc: self.pc, fault })?;
+            let active = if nesting {
+                self.irq_nest.push(IrqFrame {
+                    icfg: self.sr[11],
+                    predicate: self.irq_predicate.take(),
+                    repeat: self.irq_repeat.take(),
+                });
+                self.sr[11] & 255
+            } else {
+                self.sr[12] = self.sr[14];
+                self.sr[14] = self.sr[13];
+                0
+            };
             self.sr[0] = self.pc;
-            self.sr[12] = self.sr[14];
-            self.sr[14] = self.sr[13];
             self.pc = handler;
             // FM-1_989: ICFG records source/priority above the active
             // priority bitmap. Entry preserves the global enable and clears
@@ -1072,7 +1123,12 @@ impl Cpu {
             self.sr[11] = (self.sr[11] & !0x077f04ff)
                 | ((source as u32) << 16)
                 | (priority << 24)
-                | (1 << priority);
+                | (1 << priority)
+                | active;
+            if self.nested_irqs {
+                self.interrupts_enabled = false;
+                self.sr[11] &= !0x200;
+            }
             self.in_interrupt = true;
             self.idle = false;
             self.irq_predicate = self.predicate_skip.take();

@@ -188,3 +188,93 @@ fn an_instruction_clock_override_sets_guest_time_per_instruction() {
         assert_eq!(cpu.bus.read(TIMER4 + 4, 4).unwrap(), expected, "{hz} Hz");
     }
 }
+
+/// A primary core running csyncs, software interrupt 126 (priority 2) and
+/// 127 (priority 5 unless changed) wired to RAM handlers. 126 has been
+/// taken; its handler starts with `sti` (now executed), then two csyncs
+/// and `rti`. The 127 handler is a lone `rti`.
+fn nesting_cpu(nested: bool) -> (Cpu, u32, u32) {
+    let mut c = Cpu::new(
+        Bus::new(vec![0x20, 0, 0x20, 0, 0x20, 0]).unwrap(),
+        fm1_emu::XIP,
+    );
+    c.nested_irqs = nested;
+    let (outer, inner) = (fm1_emu::RAM + 512, fm1_emu::RAM + 768);
+    for (k, h) in [0x0061u32, 0x0020, 0x0020, 0x0081].iter().enumerate() {
+        c.bus.write(outer + 2 * k as u32, *h, 2).unwrap();
+    }
+    c.bus.write(inner, 0x0081, 2).unwrap();
+    c.bus.write(0x01c7fe00 + 126 * 4, outer, 4).unwrap();
+    c.bus.write(0x01c7fe00 + 127 * 4, inner, 4).unwrap();
+    c.bus.write(IRQ_CONFIG + 15 * 4, 0xb500_0000, 4).unwrap();
+    c.sr[11] = 0x300;
+    c.interrupts_enabled = true;
+    c.sr[14] = USER_STACK;
+    c.sr[13] = SYSTEM_STACK;
+    c.bus.write(0x1eef1a0, 64, 4).unwrap(); // raise 126
+    c.step().unwrap();
+    assert_eq!(c.pc, outer);
+    c.bus.write(0x1eef1a4, 64, 4).unwrap();
+    c.step().unwrap(); // sti
+    (c, outer, inner)
+}
+
+#[test]
+fn a_higher_priority_interrupt_nests_into_a_handler_that_reenabled_interrupts() {
+    let (mut c, outer, inner) = nesting_cpu(true);
+    let sp = c.sr[14];
+    assert_eq!((c.sr[11] >> 24) & 7, 2);
+    c.bus.write(0x1eef1a0, 128, 4).unwrap(); // raise 127
+    c.step().unwrap();
+    assert_eq!(c.pc, inner, "priority 5 preempts priority 2");
+    assert_eq!((c.sr[11] >> 16) & 0x7f, 127);
+    assert_eq!((c.sr[11] >> 24) & 7, 5);
+    assert_eq!(
+        c.sr[11] & 255,
+        (1 << 5) | (1 << 2),
+        "both priorities active"
+    );
+    assert!(!c.interrupts_enabled, "entry masks until the handler's sti");
+    assert_eq!(c.sr[14], sp, "still on the system stack");
+    assert_eq!(
+        c.bus.read(0x1eef1a8, 4).unwrap(),
+        0,
+        "INTPRI stays the guest's"
+    );
+    c.bus.write(0x1eef1a4, 128, 4).unwrap();
+    c.step().unwrap(); // inner rti
+    assert_eq!(
+        c.pc,
+        outer + 4,
+        "back in the outer handler (its csync ran before the entry)"
+    );
+    assert_eq!((c.sr[11] >> 16) & 0x7f, 126);
+    assert_eq!(c.sr[11] & 255, 1 << 2);
+    assert!(c.interrupts_enabled);
+    assert_eq!(c.sr[14], sp);
+    c.step().unwrap();
+    c.step().unwrap(); // outer rti
+    assert_eq!(c.sr[14], USER_STACK);
+    assert!(!c.in_interrupt());
+}
+
+#[test]
+fn an_equal_or_lower_priority_interrupt_waits_for_the_handler() {
+    let (mut c, outer, _) = nesting_cpu(true);
+    c.bus.write(IRQ_CONFIG + 15 * 4, 0x3500_0000, 4).unwrap(); // 127 at priority 1
+    c.bus.write(0x1eef1a0, 128, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.pc, outer + 4, "no preemption by priority 1");
+}
+
+#[test]
+fn without_nesting_the_handler_runs_to_its_return_first() {
+    let (mut c, outer, _) = nesting_cpu(false);
+    c.bus.write(0x1eef1a0, 128, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.pc, outer + 4);
+    c.step().unwrap();
+    c.step().unwrap(); // outer rti, then 127 enters
+    c.step().unwrap();
+    assert_eq!((c.sr[11] >> 16) & 0x7f, 127);
+}

@@ -40,6 +40,9 @@ fn run() -> Result<(), String> {
     if let Ok(mhz) = env::var("FM1_CPU_MHZ") {
         cpu.set_cpu_mhz(mhz.parse().map_err(|_| "invalid FM1_CPU_MHZ")?)?;
     }
+    // Optional: FM1_NESTED_IRQ=1 lets a higher-priority interrupt preempt a
+    // handler that re-enabled interrupts (the USB audio builds need it).
+    cpu.nested_irqs = env::var("FM1_NESTED_IRQ").is_ok_and(|v| v == "1");
     // Optional: FM1_WATCHDOG_OFF=1 keeps counting watchdog ticks but never
     // resets. Diagnostic experiments only; the output says so.
     let watchdog_off = env::var("FM1_WATCHDOG_OFF").is_ok_and(|v| v == "1");
