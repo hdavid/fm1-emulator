@@ -2,7 +2,7 @@
 use fm1_emu::{
     bus::Bus,
     lcd::{IOMAP, SPI},
-    RAM,
+    RAM, XIP,
 };
 
 fn write(bus: &mut Bus, address: u32, value: u32) {
@@ -91,7 +91,9 @@ fn invalid_dma_and_unsupported_commands_fault() {
     write(&mut bus, SPI + 12, RAM + 512 * 1024 - 1);
     assert!(bus.write(SPI + 16, 2, 4).is_err());
     write(&mut bus, SPI + 12, 0x02000120);
-    assert!(bus.write(SPI + 16, 2, 4).is_err());
+    assert!(bus.write(SPI + 16, 3, 4).is_err()); // Past the loaded image.
+    write(&mut bus, SPI + 12, SPI);
+    assert!(bus.write(SPI + 16, 1, 4).is_err()); // MMIO is not a DMA source.
     assert!(bus.write(SPI, 0, 1).is_err());
     assert!(bus.read(SPI + 1, 1).is_err());
     write(&mut bus, 0x50080, 0);
@@ -102,4 +104,21 @@ fn invalid_dma_and_unsupported_commands_fault() {
         write(&mut bus, SPI + 8, byte);
     }
     assert!(bus.write(SPI + 8, 240, 4).is_err());
+}
+
+#[test]
+fn lcd_dma_can_read_flash_constants_at_a_byte_aligned_address() {
+    let mut bus = init();
+    bus.flash = vec![0, 0xf8, 0, 0x07, 0xe0];
+    cmd(&mut bus, 0x2c);
+    write(&mut bus, 0x50080, 0x100);
+    write(&mut bus, SPI + 12, XIP + 1);
+    write(&mut bus, SPI + 16, 4);
+    assert_eq!(bus.lcd.pixels_written, 2);
+    assert_eq!(&bus.lcd.pixels[..2], &[0xff0000, 0x00ff00]);
+    assert_ne!(bus.read(SPI, 4).unwrap() & 0x8000, 0);
+    assert_eq!(bus.read(XIP + 1, 1).unwrap(), 0xf8);
+    write(&mut bus, SPI + 12, XIP + 4);
+    assert!(bus.write(SPI + 16, 2, 4).is_err());
+    assert_eq!(bus.lcd.pixels_written, 2);
 }

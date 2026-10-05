@@ -12,6 +12,39 @@ pub struct AccessFault {
     pub reason: &'static str,
 }
 
+#[cfg(test)]
+mod dma_tests {
+    use super::*;
+    #[test]
+    fn packaged_lcd_dma_honors_decryption_mapping_and_xip_enable() {
+        let mut plain = vec![0; 0x140];
+        plain[0x121..0x129].copy_from_slice(&[0xf8, 0, 7, 0xe0, 0, 0x1f, 0xff, 0xff]);
+        crate::package::sfc(&mut plain, 0x980f);
+        let mut raw = vec![255; 0x4140];
+        raw[0x4000..].copy_from_slice(&plain);
+        // The application view deliberately differs from the real flash;
+        // DMA must go through SFC/encryption, not read Bus::flash directly.
+        let mut b = Bus::new(vec![0; 8]).unwrap();
+        b.load_flash(&raw, 0x980f);
+        for (address, value) in [
+            (0x51020, 0x10), (0x50088, !0x780), (SPI, 0x4021),
+            (0x50080, 0), (SPI + 8, 0x11), (SPI + 8, 0x3a),
+            (0x50080, 0x100), (SPI + 8, 0x55),
+            (0x50080, 0), (SPI + 8, 0x2c),
+            (0x50080, 0x100), (SPI + 12, XIP + 1), (SPI + 16, 4),
+        ] {
+            b.write(address, value, 4).unwrap();
+        }
+        assert_eq!(&b.lcd.pixels[..2], &[0xff0000, 0x00ff00]);
+        b.write(0x4020c, 0x4004, 4).unwrap();
+        b.write(SPI + 16, 4, 4).unwrap();
+        assert_eq!(&b.lcd.pixels[2..4], &[0x0000ff, 0xffffff]);
+        b.write(0x40200, 0, 4).unwrap();
+        assert!(b.write(SPI + 16, 4, 4).unwrap_err().reason.contains("XIP"));
+        assert_eq!(b.lcd.pixels_written, 4);
+    }
+}
+
 impl fmt::Display for AccessFault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -301,25 +334,33 @@ impl Bus {
             }
             let bytes = if address == SPI + 16 {
                 let source = self.lcd.dma_address();
-                let offset =
-                    Self::offset(source, value as usize, RAM, self.ram.len()).ok_or_else(|| {
-                        Self::fault(
-                            source,
-                            value as usize,
-                            "DMA read",
-                            "LCD DMA source must be in SRAM",
-                        )
-                    })?;
-                &self.ram[offset..offset + value as usize]
+                let length = value as usize;
+                if let Some(offset) = Self::offset(source, length, RAM, self.ram.len()) {
+                    self.ram[offset..offset + length].to_vec()
+                } else if Self::offset(source, length, XIP, self.flash.len()).is_some() {
+                    // Stock LCD initialization sends constant data from flash.
+                    // Read bytes through XIP so packaged encryption/mapping,
+                    // flash modifications and disabled-XIP faults still apply.
+                    (0..length)
+                        .map(|i| self.read_as(source + i as u32, 1, "DMA read").map(|v| v as u8))
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    return Err(Self::fault(
+                        source,
+                        length,
+                        "DMA read",
+                        "LCD DMA source is outside SRAM and application XIP",
+                    ));
+                }
             } else {
-                &[]
+                Vec::new()
             };
             let pc_out = self.devices.gpio.read(0x50080).unwrap();
             let pc_dir = self.devices.gpio.read(0x50088).unwrap();
             let selected = pc_dir & 0x180 == 0 && pc_out & 0x80 == 0;
             return self
                 .lcd
-                .write(address, value, selected, pc_out & 0x100 != 0, bytes)
+                .write(address, value, selected, pc_out & 0x100 != 0, &bytes)
                 .map_err(|reason| Self::fault(address, size, "write", reason));
         }
         if let Some(result) = self.devices.write(address, value, size) {
