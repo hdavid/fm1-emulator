@@ -390,7 +390,9 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         StackExtended
     } else if h & 0xfff8 == 0xec50 && x & 3 != 2 {
         MemoryPair
-    } else if matches!(h & 0xfff0, 0xe1a0 | 0xe1b0) {
+    } else if (h & 0xfff0 == 0xe1a0 && x & 3 == 0) || (h & 0xfff0 == 0xe1b0 && x & 2 == 0) {
+        // JieLi objdump: e1aX insert (x bits 0-1 = 0), e1bX uextra (0) or
+        // sextra (1); other low bits are not these forms.
         BitField
     } else if h == 0xe840 {
         BranchEqualFlag

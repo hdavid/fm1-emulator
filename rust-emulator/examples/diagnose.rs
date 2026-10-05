@@ -34,6 +34,9 @@ fn run() -> Result<(), String> {
     let firmware = Firmware::load(Path::new(&args[0]))?;
     let mut cpu = Cpu::new(firmware.bus()?, firmware.entry);
     cpu.r[0] = 0x01c7_fe08;
+    if env::var("FM1_LCD_LOG").is_ok() {
+        cpu.bus.lcd.log = Some(Default::default());
+    }
     // Optional: FM1_CPU_MHZ=N emulates an N MHz CPU (default 24, real time).
     if let Ok(mhz) = env::var("FM1_CPU_MHZ") {
         cpu.set_cpu_mhz(mhz.parse().map_err(|_| "invalid FM1_CPU_MHZ")?)?;
@@ -280,6 +283,28 @@ fn run() -> Result<(), String> {
                     })
                     .collect();
                 eprintln!("  {:08x}: {}", address + line, bytes.join(" "));
+            }
+        }
+    }
+    // Optional: FM1_LCD_LOG=N prints the last N SPI1 panel transfers.
+    if let Ok(n) = env::var("FM1_LCD_LOG") {
+        let n: usize = n.parse().map_err(|_| "invalid FM1_LCD_LOG")?;
+        if let Some(log) = &cpu.bus.lcd.log {
+            for line in log.iter().skip(log.len().saturating_sub(n)) {
+                eprintln!("  LCD {line}");
+            }
+        }
+    }
+    // Optional: FM1_LCD_OWNER=X,Y prints which transfer last wrote a pixel.
+    if let Ok(xy) = env::var("FM1_LCD_OWNER") {
+        for pair in xy.split(';') {
+            if let Some((x, y)) = pair.split_once(',') {
+                let (x, y): (usize, usize) = (x.parse().unwrap_or(0), y.parse().unwrap_or(0));
+                let i = y * fm1_emu::lcd::WIDTH + x;
+                eprintln!(
+                    "  pixel {x},{y} = {:06x} by transfer #{}",
+                    cpu.bus.lcd.pixels[i], cpu.bus.lcd.owner[i]
+                );
             }
         }
     }

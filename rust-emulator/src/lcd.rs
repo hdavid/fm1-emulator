@@ -35,6 +35,11 @@ pub struct Lcd {
     iomap: u32,
     /// lsb ticks until an interrupt-mode transfer completes (see write).
     busy: u64,
+    /// Diagnostics: when Some, a bounded log of panel commands and data.
+    pub log: Option<std::collections::VecDeque<String>>,
+    /// Diagnostics: per visible pixel, the transfer count that last wrote it.
+    pub owner: Vec<u32>,
+    pub transfers: u32,
 }
 
 impl Default for Lcd {
@@ -56,6 +61,9 @@ impl Default for Lcd {
             registers: [0; 5],
             iomap: 0,
             busy: 0,
+            log: None,
+            owner: vec![0; WIDTH * HEIGHT],
+            transfers: 0,
         }
     }
 }
@@ -118,6 +126,34 @@ impl Lcd {
         // 13, the interrupt enable (same layout as its SPI2 CON 0x6020).
         if self.registers[0] & 0x1fff != 0x21 || self.iomap & 0x10 == 0 {
             return Err("unsupported LCD SPI configuration or pin routing");
+        }
+        self.transfers += 1;
+        if let Some(log) = &mut self.log {
+            let what = if index == 2 {
+                format!(
+                    "BUF {:02x} {}{}",
+                    value as u8,
+                    if data { 'D' } else { 'C' },
+                    if selected { "" } else { " (CS high)" }
+                )
+            } else {
+                let head: Vec<_> = dma.iter().take(8).map(|b| format!("{b:02x}")).collect();
+                format!(
+                    "DMA {} bytes from {:#x} {}{} [{}]",
+                    dma.len(),
+                    self.registers[3],
+                    if data { 'D' } else { 'C' },
+                    if selected { "" } else { " (CS high)" },
+                    head.join(" ")
+                )
+            };
+            if log.len() >= 4096 {
+                log.pop_front();
+            }
+            log.push_back(format!(
+                "#{} cols {:?} rows {:?} {what}",
+                self.transfers, self.columns, self.rows
+            ));
         }
         if selected {
             if index == 2 {
@@ -209,6 +245,7 @@ impl Lcd {
                 let [x, y] = self.cursor;
                 if x < WIDTH && y < HEIGHT {
                     self.pixels[y * WIDTH + x] = rgb;
+                    self.owner[y * WIDTH + x] = self.transfers;
                     self.pixels_written += 1;
                 } else if x < WIDTH && y < RAM_ROWS {
                     self.offscreen[(y - HEIGHT) * WIDTH + x] = rgb;

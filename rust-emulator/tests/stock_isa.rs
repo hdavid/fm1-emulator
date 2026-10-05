@@ -598,6 +598,64 @@ fn half_precision_conversions_use_the_low_halfword() {
 }
 
 #[test]
+fn signed_field_extract_sign_extends() {
+    // JieLi objdump: e1b0 b041 = r0 = sextra(r11, p:0, l:16) (Baud Girl
+    // text renderer 0x02012c5e); e1b1 0d0c = r1 = uextra(r0, p:26, l:3),
+    // e1b1 0d0d = r1 = sextra(r0, p:26, l:3).
+    let mut c = cpu(&[0xe1b0, 0xb041, 0xe1b1, 0x0d0c, 0xe1b1, 0x0d0d]);
+    c.r[11] = 0x1234_fff4;
+    c.step().unwrap();
+    assert_eq!(c.r[0], 0xffff_fff4);
+    c.r[0] = 0b101 << 26;
+    c.step().unwrap();
+    assert_eq!(c.r[1], 5);
+    c.step().unwrap();
+    assert_eq!(c.r[1], 0xffff_fffd);
+}
+
+#[test]
+fn halfword_offset_forms_take_a_signed_ten_bit_offset() {
+    // JieLi objdump: ed5b cf2a = r12 = h[++r2=-6] (u) (Baud Girl glyph
+    // blender 0x02012788); ed59 0f2a = r0 = h[++r2=506] (u);
+    // ed52 0f2a = r0 = h[r2+-262] (u); ed53 0f2b = h[r2+-6] = r0;
+    // ed55 0f2b = h[r2+506] = r0.h (bit 2 stores the upper halfword).
+    let mut c = cpu(&[0xed5b, 0xcf2a, 0xed59, 0x0f2a, 0xed52, 0x0f2a, 0xed53, 0x0f2b, 0xed55, 0x0f2b]);
+    c.r[2] = RAM + 0x400;
+    c.bus.write(RAM + 0x400 - 6, 0xbeef, 2).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.r[12], 0xbeef);
+    assert_eq!(c.r[2], RAM + 0x400 - 6);
+    c.r[2] = RAM + 0x400;
+    c.bus.write(RAM + 0x400 + 506, 0x1234, 2).unwrap();
+    c.step().unwrap();
+    assert_eq!((c.r[0], c.r[2]), (0x1234, RAM + 0x400 + 506));
+    c.r[2] = RAM + 0x400;
+    c.bus.write(RAM + 0x400 - 262, 0x5678, 2).unwrap();
+    c.step().unwrap();
+    assert_eq!((c.r[0], c.r[2]), (0x5678, RAM + 0x400));
+    c.r[0] = 0xaaaa_5555;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x400 - 6, 2).unwrap(), 0x5555);
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x400 + 506, 2).unwrap(), 0xaaaa);
+    assert_eq!(c.r[2], RAM + 0x400);
+}
+
+#[test]
+fn packed_immediates_repeat_bytes_as_the_vendor_objdump_shows() {
+    // JieLi objdump: e1e0 0101 = r0 = r0 * 0x10001 (stock fill at
+    // 0x02012c82 builds a two-pixel word: colour * 0x10001);
+    // e1e0 01ab = * 0xAB00AB, e1e0 02ab = * 0xAB00AB00, e1e0 03ab =
+    // * 0xABABABAB, e1e0 00ab = * 0xAB.
+    for (x, factor) in [(0x0101u16, 0x0001_0001u32), (0x01ab, 0x00ab_00ab), (0x02ab, 0xab00_ab00), (0x03ab, 0xabab_abab), (0x00ab, 0xab)] {
+        let mut c = cpu(&[0xe1e0, x]);
+        c.r[0] = 1;
+        c.step().unwrap();
+        assert_eq!(c.r[0], factor, "e1e0 {x:04x}");
+    }
+}
+
+#[test]
 fn register_repeat_with_a_zero_count_skips_its_block() {
     let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);
     c.r[1] = RAM;

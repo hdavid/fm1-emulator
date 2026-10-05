@@ -12,9 +12,12 @@ type Memory = (usize, usize, u32, usize, bool, bool, Option<u32>);
 
 pub(crate) fn packed(x: u32) -> u32 {
     match (x >> 10) & 3 {
+        // JieLi objdump: 0x0ab -> 0xAB, 0x1ab -> 0xAB00AB, 0x2ab ->
+        // 0xAB00AB00, 0x3ab -> 0xABABABAB.
         0 => match x & 0x300 {
             0x300 => (x & 255) * 0x01010101,
-            0x100 => ((x & 255) << 24) | ((x & 255) << 8),
+            0x100 => (x & 255) * 0x0001_0001,
+            0x200 => (x & 255) * 0x0100_0100,
             _ => x & 255,
         },
         mode => ((0x80 | (x & 127)) << (32 - mode * 8)) >> ((x >> 7) & 7),
@@ -258,23 +261,25 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
             };
         }
         Op::HalfwordExtended => {
+            // JieLi objdump (ed50-ed5f): offset = signed 10-bit
+            // ((h & 3) << 8 | x[11:8] << 4 | x[3:1] << 1), e.g. ed5b cf2a =
+            // r12 = h[++r2=-6] (u). Bit 2: loads sign-extend, stores write
+            // the upper halfword (ed55 0f2b = h[r2+506] = r0.h). Bit 3:
+            // pre-increment (the base takes the address).
             let store = x & 1 != 0;
-            let high = if store {
-                signed(h & 7, 3)
+            let raw = ((h & 3) << 8) | (((x >> 8) & 15) << 4) | (x & 14);
+            let addr = cpu.r[s].wrapping_add(signed(raw, 10) as u32);
+            let updated = if h & 8 != 0 { Some(addr) } else { None };
+            if store && h & 4 != 0 {
+                cpu.bus
+                    .write(addr, cpu.r[d] >> 16, 2)
+                    .map_err(|fault| Fault::Access { pc, fault })?;
+                if let Some(value) = updated {
+                    cpu.r[s] = value;
+                }
             } else {
-                (h & 1) as i32
-            };
-            let offset = (high << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 14) as i32;
-            let addr = cpu.r[s].wrapping_add(offset as u32);
-            mem = Some((
-                d,
-                s,
-                addr,
-                2,
-                store,
-                !store && h & 4 != 0,
-                if h & 8 != 0 { Some(addr) } else { None },
-            ));
+                mem = Some((d, s, addr, 2, store, !store && h & 4 != 0, updated));
+            }
             name = "halfword_extended";
         }
         Op::HalfwordPostincrement => {
@@ -733,8 +738,13 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
             let mask = (1u32 << len) - 1;
             cpu.r[n] = if h & 0x10 == 0 {
                 (cpu.r[n] & !(mask << pos)) | ((cpu.r[d] & mask) << pos)
-            } else {
+            } else if x & 1 == 0 {
                 (cpu.r[d] >> pos) & mask
+            } else {
+                // sextra: the extracted field sign-extended (objdump
+                // e1b0 b041 = r0 = sextra(r11, p:0, l:16), Baud Girl
+                // 0x02012c5e).
+                signed((cpu.r[d] >> pos) & mask, len.max(1)) as u32
             };
             name = "bit_field";
         }
