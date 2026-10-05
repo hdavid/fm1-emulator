@@ -59,6 +59,21 @@ fn shift_registers_select_active_low_columns_and_both_row_ports() {
 }
 
 #[test]
+fn output_edges_drive_the_matrix_with_input_buffers_disabled() {
+    let mut bus = configured();
+    bus.write(GPIO + DIE, 0x1e1, 4).unwrap(); // Input rows only, as in stock.
+    bus.devices.gpio.press(6, 1, true).unwrap();
+    select(&mut bus, 0xffbf);
+    assert_eq!(bus.devices.gpio.latched, 0xffbf);
+    assert_eq!(bus.read(GPIO + IN, 4).unwrap(), 0x1c1);
+    // Output pads still drive the chain with every input buffer disabled.
+    bus.write(GPIO + DIE, 0, 4).unwrap();
+    select(&mut bus, 0xfffe);
+    assert_eq!(bus.devices.gpio.latched, 0xfffe);
+    assert_eq!(bus.read(GPIO + IN, 4).unwrap(), 0);
+}
+
+#[test]
 fn disabled_output_drivers_do_not_clock_the_matrix() {
     let mut bus = configured();
     bus.write(GPIO + DIR, u32::MAX, 4).unwrap();
@@ -155,6 +170,7 @@ fn raw_and_elf_firmware_boots_produce_the_same_observations() {
 fn spi_dma_clocks_matrix_before_gpio_latch_and_acknowledges_its_irq() {
     use fm1_emu::{devices::IRQ_CONFIG, lcd::IOMAP, RAM, XIP};
     let mut bus = configured();
+    bus.write(GPIO + DIE, 0x1e1, 4).unwrap();
     // Source 37, priority 5. Startup installs the descriptor before enabling.
     bus.write(IRQ_CONFIG + 4 * 4, 11 << 20, 4).unwrap();
     bus.write(0x10014, 6, 4).unwrap(); // 360 MHz system, 60 MHz LSB

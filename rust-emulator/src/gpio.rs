@@ -105,7 +105,9 @@ impl Gpio {
         self.ports[port][register as usize / 4] = value;
         if port == 0 {
             let a = self.ports[0];
-            let driven = a[OUT as usize / 4] & !a[DIR as usize / 4] & a[DIE as usize / 4];
+            // DIE enables the input buffer; DIR controls the output driver.
+            // Stock leaves PA1's input buffer disabled while pulsing its latch.
+            let driven = a[OUT as usize / 4] & !a[DIR as usize / 4];
             if driven & 8 != 0 && self.previous_driven_a & 8 == 0 {
                 self.shift = (self.shift << 1) | ((driven >> 4) & 1) as u16;
             }
