@@ -4,13 +4,91 @@
 // Steps: run:SECONDS (guest time), turn:KNOB:DETENTS (SELECT ALGORITHM
 // PRESETS KNOB1..KNOB4), hold:ID,ID.. / release (matrix key ids, notes 14..40,
 // as fm1-ui's KEYMAP), level:SECONDS (run and print the audio level),
-// png:PATH, cores (instructions per core), words:ADDRESS:N (N words, decimal). Stops on a guest fault and prints the last instructions with
+// png:PATH, cores (instructions per core), words:ADDRESS:N (N words, decimal).
+// FM1_HOT=N profiles the primary core: hot:on / hot:off start and
+// pause counting (without them, every step is counted), hot:print reports and
+// clears; peek:SYMBOL:WORDS prints WORDS 32-bit words at an ELF symbol; the report (top N functions, their hot address ranges) uses the
+// function symbols of FM1_ELF, or of FIRMWARE's .elf sibling. Stops on a guest fault and prints the last instructions with
 // registers (PLAY_TRACE=N for the last N, default 40).
 use fm1_emu::{
+    firmware::{elf_symbols, Symbol},
     player::{knob, Player},
     png,
+    profile::{function_of, Profile},
 };
 use std::{env, path::Path};
+
+/// Function symbols for the profile: FM1_ELF, the firmware itself if it is an
+/// ELF, or an .elf next to it with the same stem.
+fn profile_symbols(firmware: &str) -> Result<Vec<Symbol>, String> {
+    let path = match env::var("FM1_ELF") {
+        Ok(path) => path.into(),
+        Err(_) => Path::new(firmware).with_extension("elf"),
+    };
+    if !path.exists() {
+        eprintln!("profile: no ELF at {} (set FM1_ELF): PCs only", path.display());
+        return Ok(vec![]);
+    }
+    let data = std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    elf_symbols(&data)
+}
+
+fn location(symbols: &[Symbol], pc: u32) -> String {
+    match function_of(symbols, pc) {
+        Some(f) => format!("0x{pc:08x} {}+0x{:x}", f.name, pc - f.address),
+        None => format!("0x{pc:08x}"),
+    }
+}
+
+/// The top `top` functions by executed instructions, then the hot ranges
+/// (loops) of the first of them.
+fn report(profile: &Profile, symbols: &[Symbol], top: usize) {
+    // Optional: FM1_HOT_DUMP=FILE writes every executed PC and its count
+    // (hex PC, decimal count per line), e.g. to annotate a disassembly.
+    if let Ok(path) = env::var("FM1_HOT_DUMP") {
+        let lines: String = profile
+            .pcs()
+            .iter()
+            .map(|(pc, count)| format!("{pc:08x} {count}\n"))
+            .collect();
+        if let Err(error) = std::fs::write(&path, lines) {
+            eprintln!("profile: {path}: {error}");
+        }
+    }
+    let total = profile.total.max(1) as f64;
+    let share = |count: u64| 100.0 * count as f64 / total;
+    println!(
+        "profile: {} primary-core instructions, {} ({:.2}%) in interrupt handlers",
+        profile.total,
+        profile.interrupt,
+        share(profile.interrupt)
+    );
+    let functions = profile.by_function(symbols);
+    for f in functions.iter().take(top) {
+        println!("  {:6.2}% {:>12} {}", share(f.count), f.count, f.name);
+    }
+    println!("hot ranges (loops) of the top functions:");
+    for f in functions.iter().take(top.min(10)) {
+        let size = symbols
+            .iter()
+            .find(|s| s.address == f.address && s.name == f.name)
+            .map_or(2, |s| s.size);
+        for r in profile.ranges(f.address, f.address + size).iter().take(4) {
+            if share(r.count) < 0.5 {
+                break;
+            }
+            println!(
+                "  {:6.2}% {:>12} {} .. +0x{:x} ({} B), peak {}",
+                share(r.count),
+                r.count,
+                location(symbols, r.start),
+                r.end - f.address,
+                r.end + 2 - r.start,
+                r.peak
+            );
+        }
+    }
+}
 
 fn seconds(step: &str, text: &str) -> Result<f64, String> {
     text.parse().map_err(|_| format!("bad {step}"))
@@ -71,6 +149,23 @@ fn main() -> Result<(), String> {
     // Optional: FM1_CPU_MHZ=N emulates an N MHz CPU (default 24, real time).
     if let Ok(mhz) = env::var("FM1_CPU_MHZ") {
         player.cpu.set_cpu_mhz(mhz.parse().map_err(|_| "invalid FM1_CPU_MHZ")?)?;
+    }
+    // Optional: FM1_HOT=N profiles the primary core (see the top).
+    let hot_top: usize = env::var("FM1_HOT")
+        .ok()
+        .map(|value| value.parse().map_err(|_| "invalid FM1_HOT"))
+        .transpose()?
+        .unwrap_or(0);
+    let wants_symbols = hot_top > 0 || steps.iter().any(|step| step.starts_with("peek:"));
+    let symbols = if wants_symbols { profile_symbols(firmware)? } else { vec![] };
+    let mut paused = None;
+    if hot_top > 0 {
+        let profile = Profile::new();
+        if steps.iter().any(|step| step == "hot:on") {
+            paused = Some(profile);
+        } else {
+            player.profile = Some(profile);
+        }
     }
     for step in steps {
         let parts: Vec<&str> = step.split(':').collect();
@@ -135,6 +230,36 @@ fn main() -> Result<(), String> {
                     level.peak
                 );
             }),
+            ["hot", "on"] => {
+                player.profile = player.profile.take().or(paused.take()).or(Some(Profile::new()));
+                Ok(())
+            }
+            ["hot", "off"] => {
+                paused = player.profile.take().or(paused.take());
+                Ok(())
+            }
+            ["hot", "print"] => {
+                if let Some(profile) = player.profile.as_mut().or(paused.as_mut()) {
+                    report(profile, &symbols, hot_top.max(1));
+                    profile.clear();
+                }
+                Ok(())
+            }
+            ["peek", name, words] => {
+                let words: u32 = words.parse().map_err(|_| format!("bad {step}"))?;
+                let symbol = symbols
+                    .iter()
+                    .find(|s| s.name == *name)
+                    .ok_or(format!("no symbol {name}"))?;
+                let values: Vec<String> = (0..words)
+                    .map(|w| {
+                        let value = player.cpu.bus.read(symbol.address + w * 4, 4).unwrap_or(0);
+                        format!("{value}")
+                    })
+                    .collect();
+                println!("  {name} @ 0x{:08x}: {}", symbol.address, values.join(" "));
+                Ok(())
+            }
             ["png", path] => {
                 let bytes = png::encode_rgb(240, 240, &player.cpu.bus.lcd.pixels)?;
                 std::fs::write(path, bytes).map_err(|error| format!("{path}: {error}"))
@@ -148,6 +273,11 @@ fn main() -> Result<(), String> {
             return Err(fault.to_string());
         }
         println!("{step}: ok ({} instructions)", player.cpu.steps);
+    }
+    if let Some(profile) = player.profile.as_ref().or(paused.as_ref()) {
+        if profile.total > 0 {
+            report(profile, &symbols, hot_top);
+        }
     }
     Ok(())
 }
