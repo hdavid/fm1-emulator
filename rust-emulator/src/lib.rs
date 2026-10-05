@@ -53,3 +53,5 @@ mod nor;
 
 pub mod usb;
 pub mod usb_midi;
+#[cfg(feature = "web")]
+pub mod web;
