@@ -14,8 +14,13 @@ pub struct Adc {
     pub master: u16,
     pub battery: u16,
     pub conversions: u64,
+    /// P33 P3_ANA_CON4 at conversion start: bit 0 PMU_DET_EN, bits 1-3
+    /// ADC_CHANNEL_SEL (AC79 SDK p33.h / adc_api.h).
+    pub pmu_select: u8,
 }
 
+/// ADC full scale (VDDIO) in millivolts.
+const VDDIO_MV: u32 = 3300;
 impl Default for Adc {
     fn default() -> Self {
         Self {
@@ -27,6 +32,7 @@ impl Default for Adc {
             master: 512,
             battery: 800,
             conversions: 0,
+            pmu_select: 0,
         }
     }
 }
@@ -49,6 +55,10 @@ impl Adc {
                     self.sample = match (value >> 8) & 15 {
                         3 => self.battery,
                         4 => self.master,
+                        15 => match self.pmu_sample() {
+                            Ok(sample) => sample,
+                            Err(reason) => return Some(Err(reason)),
+                        },
                         _ => return Some(Err("unsupported ADC channel")),
                     } & 1023;
                     self.remaining = CONVERSION_TICKS;
@@ -70,6 +80,27 @@ impl Adc {
             _ => return None,
         }
         Some(Ok(()))
+    }
+
+    /// A PMU sub-channel as the 10-bit SARADC reads it. The ADC's full scale
+    /// is VDDIO (AC79 SDK adc_api.c vddiom_trim: vddio = vbg * 1023 / adc),
+    /// modelled at 3.3 V; the sources are nominal supply voltages. The SDK's
+    /// wvdd_trim raises the WVDD LDO until vbg-scaled WVDD exceeds 700 mV.
+    fn pmu_sample(&self) -> Result<u16, &'static str> {
+        if self.pmu_select & 1 == 0 {
+            return Err("PMU ADC channel sampled with PMU_DET_EN clear");
+        }
+        let millivolts: u32 = match (self.pmu_select >> 1) & 7 {
+            0 => 800,  // VBG, the trim centre (CENTER0)
+            1 => 1400, // VDC14
+            2 => 1200, // SYSVDD
+            3 => return Err("unmodeled PMU ADC sub-channel VTEMP"),
+            4 => return Err("unmodeled PMU ADC sub-channel PROGF"),
+            5 => 1050, // VBAT/4: 4.2 V, powered over USB
+            6 => 1250, // LDO5V/4: 5 V USB
+            _ => 750,  // WVDD, the radio LDO's target
+        };
+        Ok((millivolts * 1023 / VDDIO_MV) as u16)
     }
 
     pub fn advance(&mut self, ticks: u32) {

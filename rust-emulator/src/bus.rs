@@ -36,7 +36,10 @@ pub struct Bus {
     crc: crate::crc::Crc,
     clock: crate::clock::Clock,
     /// Optional diagnostic counts of MMIO reads/writes by address.
-    pub mmio_stats: std::cell::RefCell<Option<std::collections::BTreeMap<u32, [u64; 2]>>>,
+    /// Keyed by (address, PC of the accessing instruction).
+    pub mmio_stats: std::cell::RefCell<Option<std::collections::BTreeMap<(u32, u32), [u64; 2]>>>,
+    /// PC of the instruction being executed (diagnostics only).
+    pub pc_hint: std::cell::Cell<u32>,
 }
 
 impl Bus {
@@ -67,6 +70,7 @@ impl Bus {
             crc: Default::default(),
             clock: Default::default(),
             mmio_stats: Default::default(),
+            pc_hint: Default::default(),
         })
     }
 
@@ -86,7 +90,7 @@ impl Bus {
 
     fn count_mmio(&self, address: u32, kind: usize) {
         if let Some(stats) = self.mmio_stats.borrow_mut().as_mut() {
-            stats.entry(address).or_default()[kind] += 1;
+            stats.entry((address, self.pc_hint.get())).or_default()[kind] += 1;
         }
     }
 
@@ -285,6 +289,9 @@ impl Bus {
                 .lcd
                 .write(address, value, selected, pc_out & 0x100 != 0, bytes)
                 .map_err(|reason| Self::fault(address, size, "write", reason));
+        }
+        if address == crate::adc::CONTROL {
+            self.devices.adc.pmu_select = self.system.p33_register(4);
         }
         if let Some(result) = self.devices.write(address, value, size) {
             return result.map_err(|reason| Self::fault(address, size, "write", reason));

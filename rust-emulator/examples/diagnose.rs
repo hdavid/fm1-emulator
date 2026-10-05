@@ -60,6 +60,15 @@ fn run() -> Result<(), String> {
         })
         .unwrap_or_default();
     let mut watch_hits = 0;
+    // Optional: FM1_MEMWATCH=ADDRESS prints each instruction that changes the
+    // aligned 32-bit word at ADDRESS (first 400 changes).
+    let memwatch: Option<u32> = env::var("FM1_MEMWATCH")
+        .ok()
+        .map(|a| u32::from_str_radix(a.trim_start_matches("0x"), 16).map_err(|_| "invalid FM1_MEMWATCH"))
+        .transpose()?
+        .map(|a| a & !3);
+    let mut memwatch_value = memwatch.and_then(|a| cpu.bus.read(a, 4).ok());
+    let mut memwatch_hits = 0;
     // Optional: FM1_MMIO=N counts MMIO reads/writes over the final N steps.
     let mmio_window: u64 = env::var("FM1_MMIO")
         .ok()
@@ -97,6 +106,19 @@ fn run() -> Result<(), String> {
                 fault = Some(error);
                 break;
             }
+        }
+        if let Some(address) = memwatch {
+            let value = cpu.bus.read(address, 4).ok();
+            if value != memwatch_value && memwatch_hits < 400 {
+                memwatch_hits += 1;
+                eprintln!(
+                    "memwatch {step}: {} wrote 0x{address:08x}: {:x?} -> {:x?}",
+                    location(&firmware.symbols, pc),
+                    memwatch_value,
+                    value
+                );
+            }
+            memwatch_value = value;
         }
         // Terminal stdout contains only real guest CDC endpoint data.
         while let Some(byte) = cpu.bus.usb.serial.pop_front() {
@@ -146,10 +168,10 @@ fn run() -> Result<(), String> {
             .and_then(|value| value.parse().ok())
             .unwrap_or(40);
         let mut ranked: Vec<_> = stats.into_iter().collect();
-        ranked.sort_by_key(|&(address, [r, w])| (std::cmp::Reverse(r + w), address));
+        ranked.sort_by_key(|&(key, [r, w])| (std::cmp::Reverse(r + w), key));
         eprintln!("MMIO accesses in the final {mmio_window} steps (reads, writes):");
-        for (address, [r, w]) in ranked.into_iter().take(mmio_top) {
-            eprintln!("  0x{address:08x}: {r:>9} {w:>9}");
+        for ((address, pc), [r, w]) in ranked.into_iter().take(mmio_top) {
+            eprintln!("  0x{address:08x}: {r:>9} {w:>9}  pc 0x{pc:08x}");
         }
     }
     // Optional: FM1_DUMP=ADDRESS:BYTES[,ADDRESS:BYTES] hex-dumps guest memory.

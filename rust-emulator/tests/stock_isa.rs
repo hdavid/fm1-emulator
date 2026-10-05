@@ -123,3 +123,19 @@ fn add_with_carry_propagates_the_low_word_carry() {
     c.step().unwrap();
     assert_eq!((c.r[0], c.r[5]), (1, 9));
 }
+
+#[test]
+fn stack_adjust_by_signed_thirteen_bit_immediate_allocates_and_frees_frames() {
+    // Stock FM-1_015 0x0200c97c prologue: push, then e8f0 1d98 (sp -= 616);
+    // its epilogues e8f0 0268 (sp += 616), then pop. Jangada 0x0200de16:
+    // e8f0 1cc8 (sp -= 824).
+    for (operand, delta) in [(0x1d98u16, -616i32), (0x0268, 616), (0x1cc8, -824)] {
+        let mut c = cpu(&[0xe8f0, operand]);
+        c.sr[14] = RAM + 0x4000;
+        let before = c.r;
+        c.step().unwrap();
+        assert_eq!(c.sr[14], (RAM + 0x4000).wrapping_add(delta as u32));
+        assert_eq!(c.r, before);
+        assert_eq!(c.pc, XIP + 4);
+    }
+}

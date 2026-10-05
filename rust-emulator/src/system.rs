@@ -31,6 +31,10 @@ impl Default for System {
     }
 }
 impl System {
+    /// Current value of a P33 analog/PMU register (e.g. 0x04 P3_ANA_CON4).
+    pub fn p33_register(&self, index: usize) -> u8 {
+        self.registers[index]
+    }
     pub fn read(&self, address: u32) -> Option<u32> {
         match address {
             0x13400 => Some(self.osa_control),

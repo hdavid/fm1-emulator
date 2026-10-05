@@ -630,6 +630,11 @@ pub(crate) fn execute(
         } else if h == 0xe8f8 {
             cpu.r[d] = cpu.sr[14].wrapping_add(x & 4095);
             op = "add_stack_extended";
+        } else if h == 0xe8f0 && x >> 13 == 0 {
+            // sp += signed 13-bit immediate: stock prologues pair e8f0 1d98
+            // (-616) with epilogues e8f0 0268 (+616) around push/pop.
+            cpu.sr[14] = cpu.sr[14].wrapping_add(signed(x, 13) as u32);
+            op = "adjust_stack_extended";
         } else if h & 0xff80 == 0xf800
             || h & 0xff80 == 0xf880
             || matches!(

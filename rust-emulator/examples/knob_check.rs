@@ -58,7 +58,8 @@ fn main() -> Result<(), String> {
     run_for(&mut cpu, &mut encoders, 24_000_000)?;
     if let Some(stats) = cpu.bus.mmio_stats.borrow_mut().take() {
         for port in [0x50004u32, 0x50044] {
-            println!("GPIO IN 0x{port:x}: {} reads in 1 s of guest time", stats.get(&port).map_or(0, |c| c[0]));
+            let reads: u64 = stats.iter().filter(|((a, _), _)| *a == port).map(|(_, c)| c[0]).sum();
+            println!("GPIO IN 0x{port:x}: {reads} reads in 1 s of guest time");
         }
     }
     let before = cpu.bus.lcd.pixels.clone();

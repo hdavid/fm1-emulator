@@ -279,6 +279,7 @@ impl Cpu {
             }
         }
         let pc = self.pc;
+        self.bus.pc_hint.set(pc);
         let h = self
             .bus
             .fetch(pc)
