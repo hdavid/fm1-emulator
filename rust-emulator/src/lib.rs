@@ -13,10 +13,12 @@ pub mod firmware;
 pub mod gpio;
 pub mod lcd;
 mod package;
-pub mod radio;
+pub mod player;
 pub mod png;
+pub mod radio;
 mod resample;
 mod rng;
+pub mod ui_knobs;
 
 pub const XIP: u32 = 0x0200_0120;
 pub const XIP_END: u32 = 0x0210_0000;

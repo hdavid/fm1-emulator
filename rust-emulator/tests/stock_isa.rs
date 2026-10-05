@@ -391,3 +391,150 @@ fn cpu_clock_sets_instructions_per_oscillator_tick() {
     assert_eq!(c.steps, 8);
     assert_eq!(c.ticks(), 2); // devices saw two 24 MHz ticks
 }
+
+#[test]
+fn register_list_load_puts_the_lowest_register_at_the_base() {
+    // Felucca 0.9-beta 0x02011fcc (GRAIN, gr_run inlined): eb04 8004 loads
+    // g->z (offset 0) and g->pos (offset 4) of a gr_grain_t; the next
+    // instructions read z->n through r2. Descending order put pos in r2 and
+    // faulted on the read of [pos + 4].
+    let mut c = cpu(&[0xeb04, 0x8004]);
+    c.r[4] = RAM;
+    c.bus.write(RAM, 0x0201_2da4, 4).unwrap(); // z
+    c.bus.write(RAM + 4, 0x256c, 4).unwrap(); // pos
+    c.step().unwrap();
+    assert_eq!(c.r[2], 0x0201_2da4);
+    assert_eq!(c.r[15], 0x256c);
+    assert_eq!(c.r[4], RAM);
+    assert_eq!(c.pc, XIP + 4);
+}
+
+#[test]
+fn register_list_store_and_load_keep_stock_linked_lists_consistent() {
+    // Stock FM-1 0x02002284: list insertion before the head r1:
+    // 6112 r2 = [r1+4]; 6190 [r1+4] = r0; eb20 0006 {r1, r2} -> [r0];
+    // 60a0 [r2] = r0. Then 0x0201fb7a removes it again:
+    // eb00 0006 {r1, r2} <- [r0]; 6192 [r1+4] = r2; 60a1 [r2] = r1.
+    // Nodes are {next, prev}; the list starts as head <-> a.
+    let (head, a, node) = (RAM + 0x100, RAM + 0x180, RAM + 0x200);
+    let mut c = cpu(&[
+        0x6112, 0x6190, 0xeb20, 0x0006, 0x60a0, 0xeb00, 0x0006, 0x6192, 0x60a1,
+    ]);
+    for (at, value) in [(head, a), (head + 4, a), (a, head), (a + 4, head)] {
+        c.bus.write(at, value, 4).unwrap();
+    }
+    c.r[0] = node;
+    c.r[1] = head;
+    for _ in 0..4 {
+        c.step().unwrap();
+    }
+    // head <-> a <-> node <-> head
+    assert_eq!(c.bus.read(head + 4, 4).unwrap(), node); // head.prev
+    assert_eq!(c.bus.read(a, 4).unwrap(), node); // a.next
+    assert_eq!(c.bus.read(node, 4).unwrap(), head); // node.next
+    assert_eq!(c.bus.read(node + 4, 4).unwrap(), a); // node.prev
+    for _ in 0..3 {
+        c.step().unwrap();
+    }
+    for (at, value) in [(head, a), (head + 4, a), (a, head), (a + 4, head)] {
+        assert_eq!(c.bus.read(at, 4).unwrap(), value);
+    }
+}
+
+#[test]
+fn halfword_postincrement_with_low_bit_set_stores() {
+    // Felucca 0.9-beta 0x02011e98 (GRAIN gr_fill: rb[q - lo] = pred):
+    // edd0 10f3 = h[r15 ++= 2] = r1. As in the edd8 register forms, x bit 0
+    // selects the store and the increment is even; reading it as a load
+    // advanced r15 by 3 and faulted on the next unaligned access.
+    let mut c = cpu(&[0xedd0, 0x10f3]);
+    c.r[15] = RAM + 0x3a0;
+    c.r[1] = 0xffff_9271;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x3a0, 2).unwrap(), 0x9271);
+    assert_eq!(c.r[15], RAM + 0x3a2);
+    assert_eq!(c.r[1], 0xffff_9271);
+    assert_eq!(c.pc, XIP + 4);
+}
+
+#[test]
+fn pair_shift_by_immediate_shifts_the_64_bit_register_pair() {
+    // Felucca 0.9-beta 0x02010462 (VOICE, eng_formant.c: f0 >> 4 with
+    // f0 = ((uint64_t)inc * 705600) >> 32): e1d0 2a04 = r3:r2 >>= 36
+    // (logical). Mode (x >> 10) & 3 as in e1c0: 0 lsl, 2 lsr, 3 asr; the
+    // pair is x >> 12 (even), the count ((x >> 8) & 3) * 16 + (x & 15).
+    let mut c = cpu(&[0xe1d0, 0x2a04]);
+    c.r[2] = 0xa2dd_ec80;
+    c.r[3] = 0x0000_125a;
+    c.step().unwrap();
+    assert_eq!((c.r[2], c.r[3]), (0x125, 0));
+    assert_eq!(c.pc, XIP + 4);
+    let mut c = cpu(&[0xe1d0, 0x4e00]); // r5:r4 >>>= 32 (Felucca 0x020102a4)
+    c.r[4] = 0x1234_5678;
+    c.r[5] = 0x8000_0001;
+    c.step().unwrap();
+    assert_eq!((c.r[4], c.r[5]), (0x8000_0001, 0xffff_ffff));
+    let mut c = cpu(&[0xe1d0, 0x2002]); // r3:r2 <<= 2 (Felucca 0x02010294)
+    c.r[2] = 0xc000_0001;
+    c.r[3] = 1;
+    c.step().unwrap();
+    assert_eq!((c.r[2], c.r[3]), (4, 7));
+}
+
+#[test]
+fn pair_store_with_low_bits_three_writes_the_base_back() {
+    // Felucca 0.9-beta 0x02010ac0 (TRIO trio_note_on): ec50 2213 stores
+    // v->ph[0], v->ph[1] = r2:r3 at [r1 + 0x20] and leaves r1 = v + 0x20;
+    // the following stores (ec50 2019 at +8 = ph[2], 6490 at +16 = s[1])
+    // and loads (6512 s[2], 6b12 age) only hit their fields from there.
+    let mut c = cpu(&[0xec50, 0x2213, 0xec50, 0x2019]);
+    c.r[1] = RAM + 0x100;
+    c.r[2] = 0;
+    c.r[3] = 0x1c00_0000;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x120, 4).unwrap(), 0);
+    assert_eq!(c.bus.read(RAM + 0x124, 4).unwrap(), 0x1c00_0000);
+    assert_eq!(c.r[1], RAM + 0x120);
+    c.r[2] = 0x3800_0000;
+    c.r[3] = 0;
+    c.bus.write(RAM + 0x12c, 0xffff_ffff, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x128, 4).unwrap(), 0x3800_0000);
+    assert_eq!(c.bus.read(RAM + 0x12c, 4).unwrap(), 0);
+    assert_eq!(c.r[1], RAM + 0x120);
+}
+
+#[test]
+fn multiply_accumulate_adds_the_signed_product_to_the_pair() {
+    // Felucca 0.9-beta 0x020108cc (VOICE formant resonators, int64 sums):
+    // e1fc 50a0 = r5:r4 += r10 * r0. x bit 12 set selects signed, as for
+    // e1f8; the pair is (x >> 12) & 14.
+    let mut c = cpu(&[0xe1fc, 0x50a0]);
+    c.r[4] = 0x2000_0000;
+    c.r[5] = 0;
+    c.r[10] = 0xffff_fffe; // -2
+    c.r[0] = 0x4000_0000;
+    c.step().unwrap();
+    // 0x20000000 - 0x80000000 = -0x60000000
+    assert_eq!((c.r[4], c.r[5]), (0xa000_0000, 0xffff_ffff));
+    assert_eq!(c.pc, XIP + 4);
+}
+
+#[test]
+fn long_divide_with_bit_12_set_is_signed() {
+    // Felucca 0.9-beta 0x02010524 / Jangada 0x020127be (eng_formant.c:
+    // b = ((int64_t)b * (int32_t)(f0 + (f0 >> 4))) / f): e1f6 3620 =
+    // r3:r2 = r3:r2 / r6, signed (bit 12, as for e1f8 and e1fc).
+    let mut c = cpu(&[0xe1f6, 0x3620]);
+    c.r[2] = 0xffff_ff00; // -256
+    c.r[3] = 0xffff_ffff;
+    c.r[6] = 16;
+    c.step().unwrap();
+    assert_eq!((c.r[2], c.r[3]), (0xffff_fff0, 0xffff_ffff)); // -16
+    let mut c = cpu(&[0xe1f6, 0x3620]);
+    c.r[2] = 0x0016_0434;
+    c.r[3] = 0;
+    c.r[6] = 0xffff_fffe; // -2
+    c.step().unwrap();
+    assert_eq!((c.r[2], c.r[3]), (0xfff4_fde6, 0xffff_ffff));
+}
