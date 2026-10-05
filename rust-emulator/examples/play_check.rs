@@ -4,7 +4,9 @@
 // Steps: run:SECONDS (guest time), turn:KNOB:DETENTS (SELECT ALGORITHM
 // PRESETS KNOB1..KNOB4), hold:ID,ID.. / release (matrix key ids, notes 14..40,
 // as fm1-ui's KEYMAP), level:SECONDS (run and print the audio level),
-// png:PATH, cores (instructions per core), words:ADDRESS:N (N words, decimal).
+// png:PATH, cores (instructions per core), words:ADDRESS:N (N words, decimal),
+// click:KNOB:N (N settled detents), align (to the next audio DMA half: pins a
+// following hold or release to the same audio block at any render cost).
 // FM1_HOT=N profiles the primary core: hot:on / hot:off start and
 // pause counting (without them, every step is counted), hot:print reports and
 // clears; peek:SYMBOL:WORDS prints WORDS 32-bit words at an ELF symbol; the report (top N functions, their hot address ranges) uses the
@@ -182,6 +184,34 @@ fn main() -> Result<(), String> {
             ["turn", name, detents] => {
                 let detents: i32 = detents.parse().map_err(|_| format!("bad {step}"))?;
                 player.encoders.turn(knob(name)?, detents);
+                Ok(())
+            }
+            ["click", name, clicks] => {
+                // One detent at a time, each settled (as preset_sweep): a
+                // multi-detent turn can skip or add steps in the firmware.
+                let clicks: i32 = clicks.parse().map_err(|_| format!("bad {step}"))?;
+                let id = knob(name)?;
+                (0..clicks.abs()).try_for_each(|_| {
+                    player.encoders.turn(id, clicks.signum());
+                    player.settle_encoders(1.0)?;
+                    player.run_seconds(0.3)
+                })
+            }
+            ["align"] => {
+                // Run to the next audio DMA half boundary (the start of the
+                // audio ISR's burst). A key held or released here completes
+                // its debounce 2-4 ms (press) or 8-10 ms (release) later, in
+                // the gap between two bursts at any CPU load: the note lands
+                // on the same audio block whatever the render costs.
+                let start = player.cpu.bus.audio.halves;
+                let mut waited = 0u64;
+                while player.cpu.bus.audio.halves == start {
+                    player.run(64)?;
+                    waited += 64;
+                    if waited > 1_000_000_000 {
+                        return Err("align: the audio DMA is not running".into());
+                    }
+                }
                 Ok(())
             }
             ["hold", ids] => {

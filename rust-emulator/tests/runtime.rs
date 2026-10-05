@@ -1344,6 +1344,7 @@ fn data_cache_flush_of_a_line_changes_nothing() {
     c.step().unwrap();
     assert_eq!((c.r, c.sr, c.pc), (r, sr, XIP + 4));
 }
+
 // Packed 16-bit forms (JieLi clang -mcpu=r3 assembles them; encodings and
 // text from the vendor objdump). x: rD 15:12, rB 11:8, rA 7:4; the meaning
 // of saturation, x2 and the lanes is inferred, see src/simd.rs.

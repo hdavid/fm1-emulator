@@ -923,3 +923,22 @@ fn rotate_right_by_immediate() {
     assert_eq!(c.r[0], 0x1234_5678);
     assert_eq!(c.pc, XIP + 4);
 }
+
+#[test]
+fn memory_read_modify_write_offsets_are_signed() {
+    // JieLi objdump: e868 12fc = [r1+-4] += r2, e86c 16fc = [r1+-4] <<= 6,
+    // e866 12fc = [r1+-4] |= 1 << r2 (x bits 2-7 are a signed byte). ANALOG 2
+    // SYNC SWEEP writes b[i - 1] this way; read as +252 it hit the caller.
+    let mut c = cpu(&[0xe868, 0x12fc, 0xe86c, 0x16fc, 0xe866, 0x12fc]);
+    c.r[1] = RAM + 0x100;
+    c.r[2] = 3;
+    c.bus.write(RAM + 0xfc, 5, 4).unwrap();
+    c.bus.write(RAM + 0x1fc, 0x77, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0xfc, 4).unwrap(), 8);
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0xfc, 4).unwrap(), 8 << 6);
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0xfc, 4).unwrap(), (8 << 6) | (1 << 3));
+    assert_eq!(c.bus.read(RAM + 0x1fc, 4).unwrap(), 0x77);
+}
