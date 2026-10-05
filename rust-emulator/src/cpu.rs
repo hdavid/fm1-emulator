@@ -20,6 +20,24 @@ pub enum Fault {
 mod lock_tests {
     use super::*;
     #[test]
+    fn an_idle_core_does_not_stop_the_other_core_or_double_shared_time() {
+        let mut c = Cpu::new(Bus::new(vec![1, 0, 0, 0]).unwrap(), crate::XIP);
+        let entry = crate::RAM + 512;
+        c.bus.write(0x10014, 6, 4).unwrap();
+        c.bus.write(0x10808, u32::MAX, 4).unwrap();
+        c.bus.write(0x10800, 9, 4).unwrap();
+        c.bus.write(0x01c7fff8, entry, 4).unwrap();
+        c.bus.write(0x1eee004, 8, 4).unwrap();
+        for _ in 0..30 {
+            c.step().unwrap();
+        }
+        assert_eq!(c.pc, crate::XIP + 2);
+        assert!(c.idle);
+        assert_eq!(c.secondary.as_ref().unwrap().pc, entry + 60);
+        assert!(!c.secondary.as_ref().unwrap().idle);
+        assert_eq!(c.bus.read(0x10804, 4).unwrap(), 2);
+    }
+    #[test]
     fn two_cores_share_elapsed_oscillator_time() {
         let mut c = Cpu::new(Bus::new(vec![0; 128]).unwrap(), crate::XIP);
         c.bus.write(0x10014, 6, 4).unwrap();
@@ -148,6 +166,8 @@ pub struct Cpu {
     repeat: Option<Repeat>,
     irq_repeat: Option<Repeat>,
     bus_locked: bool,
+    idle: bool,
+    idle_wake_delay: u8,
     secondary: Option<Core>,
 }
 
@@ -163,6 +183,8 @@ struct Core {
     repeat: Option<Repeat>,
     irq_repeat: Option<Repeat>,
     bus_locked: bool,
+    idle: bool,
+    idle_wake_delay: u8,
 }
 impl Core {
     fn reset(pc: u32) -> Self {
@@ -180,6 +202,8 @@ impl Core {
             repeat: None,
             irq_repeat: None,
             bus_locked: false,
+            idle: false,
+            idle_wake_delay: 0,
         }
     }
     fn swap(&mut self, cpu: &mut Cpu) {
@@ -194,6 +218,8 @@ impl Core {
         swap(&mut self.repeat, &mut cpu.repeat);
         swap(&mut self.irq_repeat, &mut cpu.irq_repeat);
         swap(&mut self.bus_locked, &mut cpu.bus_locked);
+        swap(&mut self.idle, &mut cpu.idle);
+        swap(&mut self.idle_wake_delay, &mut cpu.idle_wake_delay);
     }
 }
 
@@ -238,6 +264,8 @@ impl Cpu {
             repeat: None,
             irq_repeat: None,
             bus_locked: false,
+            idle: false,
+            idle_wake_delay: 0,
             secondary: None,
         }
     }
@@ -311,41 +339,47 @@ impl Cpu {
             }
         }
         let pc = self.pc;
-        let h = self
-            .bus
-            .fetch(pc)
-            .map_err(|fault| Fault::Access { pc, fault })? as u32;
-        let parallel = h >> 13 == 6 || h & 0xf800 == 0xf000;
-        let op = if parallel {
-            let length = if h >> 13 == 6 { 2 } else { 4 };
-            let normalized = if length == 2 { h & 0x1fff } else { h & !0x1000 };
-            self.pc = pc + length;
-            let following = self.read(self.pc, 2)?;
-            let before = self.r;
-            let specials_before = self.sr;
-            self.execute(following)?;
-            let following_registers = self.r;
-            let following_specials = self.sr;
-            let continuation = self.pc;
-            self.r = before;
-            self.sr = specials_before;
-            self.pc = pc;
-            let op = self.execute(normalized)?;
-            // Both slots read the incoming registers. Compiler bundles have
-            // distinct destinations; retain writes from the following slot
-            // where the primary slot did not change that register.
-            for i in 0..16 {
-                if self.r[i] == before[i] {
-                    self.r[i] = following_registers[i];
-                }
-                if self.sr[i] == specials_before[i] {
-                    self.sr[i] = following_specials[i];
-                }
-            }
-            self.pc = continuation;
-            op
+        let op = if self.idle {
+            // Keep shared hardware time and the other core running while this
+            // core waits. IRQ entry resumes at the instruction after IDLE.
+            "idle_wait"
         } else {
-            self.execute(h)?
+            let h = self
+                .bus
+                .fetch(pc)
+                .map_err(|fault| Fault::Access { pc, fault })? as u32;
+            let parallel = h >> 13 == 6 || h & 0xf800 == 0xf000;
+            if parallel {
+                let length = if h >> 13 == 6 { 2 } else { 4 };
+                let normalized = if length == 2 { h & 0x1fff } else { h & !0x1000 };
+                self.pc = pc + length;
+                let following = self.read(self.pc, 2)?;
+                let before = self.r;
+                let specials_before = self.sr;
+                self.execute(following)?;
+                let following_registers = self.r;
+                let following_specials = self.sr;
+                let continuation = self.pc;
+                self.r = before;
+                self.sr = specials_before;
+                self.pc = pc;
+                let op = self.execute(normalized)?;
+                // Both slots read the incoming registers. Compiler bundles have
+                // distinct destinations; retain writes from the following slot
+                // where the primary slot did not change that register.
+                for i in 0..16 {
+                    if self.r[i] == before[i] {
+                        self.r[i] = following_registers[i];
+                    }
+                    if self.sr[i] == specials_before[i] {
+                        self.sr[i] = following_specials[i];
+                    }
+                }
+                self.pc = continuation;
+                op
+            } else {
+                self.execute(h)?
+            }
         };
         // FM-1_988: conditional bundles finish and skip their unselected
         // arm before a pending interrupt can enter.
@@ -401,6 +435,7 @@ impl Cpu {
                 .advance_audio(ticks)
                 .map_err(|fault| Fault::Access { pc, fault })?;
         }
+        self.idle_wake_delay = self.idle_wake_delay.saturating_sub(1);
         self.dispatch_interrupt()?;
         Ok(op)
     }
@@ -791,6 +826,9 @@ impl Cpu {
             self.interrupts_enabled = true;
             self.sr[11] |= 0x200;
             op = "sti";
+        } else if h == 0x0001 {
+            self.idle = true;
+            op = "idle";
         } else if h == 0x0020 || h == 0x0000 {
             op = if h == 0x0020 { "csync" } else { "nop" };
         } else if let Some((destination, name)) = crate::extended::execute(self, h, pc)? {
@@ -812,6 +850,17 @@ impl Cpu {
             return Ok(());
         }
         if let Some(source) = self.bus.pending_irq_for(self.sr[11], self.sr[6] as usize) {
+            if self.idle {
+                self.idle = false;
+                // FM-1_996: wake executes four CSYNC instructions before
+                // TIMER3 enters; immediate CLI after IDLE prevents entry.
+                // This measured wake latency is in nominal issue slots.
+                self.idle_wake_delay = 4;
+                return Ok(());
+            }
+            if self.idle_wake_delay != 0 {
+                return Ok(());
+            }
             let priority = self
                 .bus
                 .devices
@@ -833,6 +882,7 @@ impl Cpu {
                 | (priority << 24)
                 | (1 << priority);
             self.in_interrupt = true;
+            self.idle = false;
             self.irq_predicate = self.predicate_skip.take();
             self.irq_repeat = self.repeat.take();
             self.irq_entries += 1;

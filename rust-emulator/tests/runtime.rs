@@ -36,6 +36,60 @@ fn scheduler_restores_the_task_frame_and_stack_pointer_banks() {
 }
 
 #[test]
+fn idle_waits_for_a_timer_interrupt_and_resumes_after_the_opcode() {
+    use fm1_emu::devices::IRQ_CONFIG;
+    // FM-1_996: TIMER3 wakes IDLE, four CSYNCs complete, then IRQ entry.
+    let mut c = cpu(&[0x0001, 0x0020, 0x0020, 0x0020, 0x0020, 0x2341, 0, 0, 0x0081]);
+    c.r[1] = 42;
+    c.sr[14] = RAM + 256;
+    c.sr[13] = RAM + 512;
+    c.sr[11] = 0x100;
+    c.bus.write(0x01c7fe00 + 7 * 4, XIP + 16, 4).unwrap();
+    c.bus.write(IRQ_CONFIG, 5 << 28, 4).unwrap();
+    c.bus.write(0x10708, 32, 4).unwrap();
+    c.bus.write(0x10700, 0x4019, 4).unwrap();
+    c.interrupts_enabled = true;
+    assert_eq!(c.step().unwrap(), "idle");
+    for _ in 0..50 {
+        assert_eq!(c.step().unwrap(), "idle_wait");
+        assert_eq!(c.pc, XIP + 2);
+        assert_eq!(c.r[1], 42);
+    }
+    for _ in 0..3000 {
+        c.step().unwrap();
+        if c.irq_entries != 0 {
+            break;
+        }
+    }
+    assert_eq!(c.irq_entries, 1);
+    assert_eq!(c.pc, XIP + 16);
+    assert_eq!(c.sr[0], XIP + 10);
+    assert_eq!(c.r[1], 42);
+    c.bus.write(0x10700, 0x4000, 4).unwrap();
+    assert_eq!(c.step().unwrap(), "rti");
+    assert_eq!(c.pc, XIP + 10);
+    c.step().unwrap();
+    assert_eq!(c.r[1], 3);
+}
+
+#[test]
+fn cli_immediately_after_idle_can_mask_the_waking_interrupt() {
+    use fm1_emu::devices::IRQ_CONFIG;
+    let mut c = cpu(&[0x0001, 0x0060, 0x2341]);
+    c.sr[11] = 0x100;
+    c.bus.write(IRQ_CONFIG + 15 * 4, 5, 4).unwrap();
+    c.interrupts_enabled = true;
+    c.step().unwrap();
+    c.bus.write(0x1eef1a0, 1, 4).unwrap();
+    assert_eq!(c.step().unwrap(), "idle_wait");
+    assert_eq!(c.irq_entries, 0);
+    assert_eq!(c.step().unwrap(), "cli");
+    c.step().unwrap();
+    assert_eq!(c.r[1], 3);
+    assert_eq!(c.irq_entries, 0);
+}
+
+#[test]
 fn leading_zero_count_selects_the_highest_ready_task_priority() {
     for (value, expected) in [
         (0, 32),
