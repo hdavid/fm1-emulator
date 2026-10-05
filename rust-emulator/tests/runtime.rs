@@ -779,7 +779,7 @@ fn stock_protection_setup_acknowledges_events_without_enabling_sdram() {
     assert_eq!(b.read(0x1eef2d4, 4).unwrap(), 0);
 }
 
-// Forms found by scripts/op-scan.sh (examples/op_scan.rs) in Felucca, Jangada
+// Forms found by scripts/op-scan.sh (examples/op_scan) in Felucca, Jangada
 // and SLOOP code; texts are the JieLi objdump's.
 
 #[test]
@@ -1168,4 +1168,155 @@ fn signed_sixteen_bit_saturation() {
         assert_eq!(c.r[2], expected as u32);
         assert_eq!(c.r[1], value as u32);
     }
+}
+
+/// Where a one-instruction register conditional block `[h, x, r1 = 1]`
+/// continues with rN (h & 15) = `lhs` and rC (x >> 8 & 15) = `rhs`: 4 when
+/// it enters the block, 6 when it skips it.
+fn register_conditional_target(h: u16, x: u16, lhs: u32, rhs: u32) -> u32 {
+    let mut c = cpu(&[h, x, 0x2141, 0x2140]);
+    c.r[((x >> 8) & 15) as usize] = rhs;
+    c.r[(h & 15) as usize] = lhs;
+    c.step().unwrap();
+    c.pc - XIP
+}
+
+#[test]
+fn register_conditional_blocks_with_x_bit_7_compare_floats() {
+    // JieLi objdump -mattr=+fprev1 (the FM-1's FPU): register conditional
+    // blocks whose x has bit 7 set (bit 6 clear) are `iff`, IEEE single
+    // compares; `u` also enters when unordered (a NaN operand). Stock RAM
+    // code: ed11 0080 iff (r1 >= r0) {, ed92 8b80 iff (r2 u< r11) {.
+    let f = |v: f32| v.to_bits();
+    let nan = f32::NAN.to_bits();
+    let cases: [(u16, f32, f32, bool, bool); 10] = [
+        // (h with rN = r3, lhs, rhs, enters, enters when unordered)
+        (0xe813, -0.0, 0.0, true, false),  // iff (r3 == r0)
+        (0xe893, 1.0, 1.0, false, true),   // iff (r3 u!= r0)
+        (0xe913, -1.0, -2.0, true, true),  // iff (r3 u>= r0)
+        (0xe993, -2.0, -1.0, true, false), // iff (r3 < r0)
+        (0xec13, -1.0, -2.0, true, true),  // iff (r3 u> r0)
+        (0xec93, -2.0, -2.0, true, false), // iff (r3 <= r0)
+        (0xed13, -1.0, -2.0, true, false), // iff (r3 >= r0)
+        (0xed93, -2.0, -1.0, true, true),  // iff (r3 u< r0)
+        (0xee13, -1.0, -2.0, true, false), // iff (r3 > r0)
+        (0xee93, -2.0, -1.0, true, true),  // iff (r3 u<= r0)
+    ];
+    for (h, lhs, rhs, enters, unordered) in cases {
+        let target = |entered: bool| if entered { 4 } else { 6 };
+        assert_eq!(
+            register_conditional_target(h, 0x0080, f(lhs), f(rhs)),
+            target(enters),
+            "{h:04x} {lhs} {rhs}"
+        );
+        assert_eq!(
+            register_conditional_target(h, 0x0080, nan, f(rhs)),
+            target(unordered),
+            "{h:04x} NaN {rhs}"
+        );
+    }
+    // The low bits of x do not matter (objdump: 0081, 0090 and 00a0 too).
+    assert_eq!(
+        register_conditional_target(0xed13, 0x0090, f(-1.0), f(-2.0)),
+        4
+    );
+    // ed92 8b80: iff (r2 u< r11) { compares r2 with r11.
+    assert_eq!(
+        register_conditional_target(0xed92, 0x0b80, f(-3.0), f(-1.0)),
+        4
+    );
+    assert_eq!(
+        register_conditional_target(0xed92, 0x0b80, f(1.0), f(-1.0)),
+        6
+    );
+}
+
+#[test]
+fn register_bit_test_block_with_x_low_bits_is_a_float_not_equal() {
+    // objdump -mattr=+fprev1, ea13 x: 0000 if ((r3 & r0) == 0) {,
+    // 0080 if ((r3 & r0) != 0) {, 0081-00bf iff (r3 != r0) { (ordered).
+    let f = |v: f32| v.to_bits();
+    assert_eq!(register_conditional_target(0xea13, 0x0000, 2, 1), 4);
+    assert_eq!(register_conditional_target(0xea13, 0x0080, 3, 1), 4);
+    assert_eq!(register_conditional_target(0xea13, 0x0080, 2, 1), 6);
+    assert_eq!(
+        register_conditional_target(0xea13, 0x0081, f(1.0), f(2.0)),
+        4
+    );
+    assert_eq!(
+        register_conditional_target(0xea13, 0x0081, f(-0.0), f(0.0)),
+        6
+    );
+    assert_eq!(
+        register_conditional_target(0xea13, 0x00bf, f32::NAN.to_bits(), f(0.0)),
+        6
+    );
+}
+
+#[test]
+fn register_conditional_blocks_with_x_bits_7_and_6_are_unsupported() {
+    // objdump (with or without the FPU): e813 00c0 is <unknown instruction>.
+    let mut c = cpu(&[0xe813, 0x00c0, 0x2141, 0x2140]);
+    assert!(c.step().is_err());
+}
+
+// Forms op-scan found in the stock RAM code (the copy startup makes to
+// 0x01c00000, which the scan now follows; objdump -mattr=+fprev1).
+
+#[test]
+fn stack_word_accesses_reach_the_high_registers() {
+    // Stock 0x01c075a6: 2709 r9 = [sp+28]; 0x01c07636: 2808 r8 = [sp+32].
+    // Bit 3 selects r8-r15: 2889 [sp+32] = r9, 20af [sp+128] = r15.
+    let mut c = cpu(&[0x2709, 0x2808, 0x2889, 0x20af]);
+    c.sr[14] = RAM + 0x100;
+    c.bus.write(RAM + 0x100 + 28, 0x1111_2222, 4).unwrap();
+    c.bus.write(RAM + 0x100 + 32, 0x3333_4444, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.r[9], 0x1111_2222);
+    assert_eq!(c.r[1], 0);
+    c.step().unwrap();
+    assert_eq!(c.r[8], 0x3333_4444);
+    c.r[9] = 0x5555_6666;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x100 + 32, 4).unwrap(), 0x5555_6666);
+    c.r[15] = 0x7777_8888;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x100 + 128, 4).unwrap(), 0x7777_8888);
+}
+
+#[test]
+fn register_list_postincrement_advances_the_base_past_the_list() {
+    // Stock 0x01c07e12: eb12 f800 {r15-r11} = [r2++]; eb12 00f0
+    // {r7-r4} = [r2++]; 0x01c07f18: eb32 00f0 [r2++] = {r7-r4}. Lowest
+    // register at the lowest address, as the other list forms; that the base
+    // advances by the list's size is read from the `++` (inferred).
+    let mut c = cpu(&[0xeb12, 0xf800, 0xeb12, 0x00f0, 0xeb32, 0x00f0]);
+    c.r[2] = RAM + 0x40;
+    for i in 0..9 {
+        c.bus.write(RAM + 0x40 + 4 * i, 0x100 + i, 4).unwrap();
+    }
+    c.step().unwrap();
+    assert_eq!(c.r[11..16], [0x100, 0x101, 0x102, 0x103, 0x104]);
+    assert_eq!(c.r[2], RAM + 0x40 + 20);
+    c.step().unwrap();
+    assert_eq!(c.r[4..8], [0x105, 0x106, 0x107, 0x108]);
+    assert_eq!(c.r[2], RAM + 0x40 + 36);
+    c.r[4..8].copy_from_slice(&[0xa, 0xb, 0xc, 0xd]);
+    c.step().unwrap();
+    for (i, value) in [0xa, 0xb, 0xc, 0xd].into_iter().enumerate() {
+        assert_eq!(c.bus.read(RAM + 0x40 + 36 + 4 * i as u32, 4).unwrap(), value);
+    }
+    assert_eq!(c.r[2], RAM + 0x40 + 52);
+}
+
+#[test]
+fn data_cache_flush_of_a_line_changes_nothing() {
+    // Stock 0x01c00e1e: csync; 0225 flush [r5]; csync, over every line
+    // (memory is not cached here, as flushinv [rN]).
+    let mut c = cpu(&[0x0225, 0x022f]);
+    c.r = std::array::from_fn(|i| RAM + 32 * i as u32);
+    let (r, sr) = (c.r, c.sr);
+    c.step().unwrap();
+    c.step().unwrap();
+    assert_eq!((c.r, c.sr, c.pc), (r, sr, XIP + 4));
 }

@@ -65,11 +65,13 @@ pub(crate) fn execute(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) ->
             name = "clear_high_register";
         }
         Op::CacheFlushInvalidate => {
+            // Memory is not cached here: writing back or dropping a line
+            // changes nothing.
             name = "cache_flush_invalidate";
         }
         Op::StackWord => {
             mem = Some((
-                a,
+                (h & 15) as usize,
                 0,
                 // Bit 5 supplies offset bit 7; Felucca spills beyond 128 bytes.
                 cpu.sr[14].wrapping_add((((h >> 8) & 31) | (h & 32)) * 4),
@@ -785,6 +787,11 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
                     address = address.wrapping_add(4);
                 }
             }
+            // [rN++] = {...}: the base advances past the list (inferred
+            // from objdump's `++`).
+            if h & 0x10 != 0 {
+                cpu.r[n] = address;
+            }
             name = "store_register_list";
         }
         Op::LoadRegisterList => {
@@ -794,6 +801,10 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
                     cpu.r[register] = cpu.read(address, 4)?;
                     address = address.wrapping_add(4);
                 }
+            }
+            // {...} = [rN++]: as the store.
+            if h & 0x10 != 0 {
+                cpu.r[n] = address;
             }
             name = "load_register_list";
         }
@@ -902,28 +913,14 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
             } else {
                 x & 4095
             };
-            let test = match kind {
-                0x81..=0x83 => lhs == rhs,
-                0x89..=0x8b => lhs != rhs,
-                0x91..=0x93 => lhs >= rhs,
-                0x99..=0x9b => lhs < rhs,
-                0xa1 => {
-                    if x & 128 == 0 {
-                        lhs & rhs == 0
-                    } else {
-                        lhs & rhs != 0
-                    }
-                }
-                0xa2 => lhs & rhs == 0,
-                0xa3 => lhs & rhs != 0,
-                0xc1..=0xc3 => lhs > rhs,
-                0xc9..=0xcb => lhs <= rhs,
-                0xd1..=0xd3 => (lhs as i32) >= (rhs as i32),
-                0xd9..=0xdb => (lhs as i32) < (rhs as i32),
-                // Same condition order as the compare-branches: 0xee00 is
-                // signed >, 0xee80 signed <= (FM-1_093 0x02002bea: ee15).
-                0xe1..=0xe3 => (lhs as i32) > (rhs as i32),
-                _ => (lhs as i32) <= (rhs as i32),
+            // Register forms with x bit 7: IEEE single compares (objdump
+            // -mattr=+fprev1 prints them iff; `u` also enters when
+            // unordered), except ea1X x = 0080, the bit test != 0.
+            let float = kind & 7 == 1 && x & 0x80 != 0 && !(kind == 0xa1 && x & 0x7f == 0);
+            let test = if float {
+                float_condition(kind, f32::from_bits(lhs), f32::from_bits(rhs))
+            } else {
+                integer_condition(kind, x, lhs, rhs)
             };
             next = cpu.conditional(test, x)?;
             name = "conditional_block";
@@ -1183,6 +1180,59 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
 }
 
 /// IEEE binary32 -> binary16, round to nearest even (vendor ftof to .l).
+/// The integer test of a conditional block (`if`/`ifs`) of kind
+/// `(h >> 4) & 255`; `rhs` is rC or the decoded immediate.
+fn integer_condition(kind: u32, x: u32, lhs: u32, rhs: u32) -> bool {
+    match kind {
+        0x81..=0x83 => lhs == rhs,
+        0x89..=0x8b => lhs != rhs,
+        0x91..=0x93 => lhs >= rhs,
+        0x99..=0x9b => lhs < rhs,
+        // x 0000 == 0, 0080 != 0 (objdump); x 0001-007f print as
+        // `if (rA ?? rC)` and are taken as == 0 here (inferred).
+        0xa1 => {
+            if x & 128 == 0 {
+                lhs & rhs == 0
+            } else {
+                lhs & rhs != 0
+            }
+        }
+        0xa2 => lhs & rhs == 0,
+        0xa3 => lhs & rhs != 0,
+        0xc1..=0xc3 => lhs > rhs,
+        0xc9..=0xcb => lhs <= rhs,
+        0xd1..=0xd3 => (lhs as i32) >= (rhs as i32),
+        0xd9..=0xdb => (lhs as i32) < (rhs as i32),
+        // Same condition order as the compare-branches: 0xee00 is
+        // signed >, 0xee80 signed <= (FM-1_093 0x02002bea: ee15).
+        0xe1..=0xe3 => (lhs as i32) > (rhs as i32),
+        _ => (lhs as i32) <= (rhs as i32),
+    }
+}
+
+/// The IEEE single test of a register conditional block with x bit 7
+/// (JieLi objdump -mattr=+fprev1, `iff`; the order of the compare-branches:
+/// e8 ==, e89 u!=, e91 u>=, e99 <, ec1 u>, ec9 <=, ed1 >=, ed9 u<, ee1 >,
+/// ee9 u<=, and ea1 the ordered !=). `u` also holds when unordered.
+fn float_condition(kind: u32, a: f32, b: f32) -> bool {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    // None: unordered (a NaN operand).
+    let order = a.partial_cmp(&b);
+    match kind {
+        0x81 => order == Some(Equal),
+        0x89 => order != Some(Equal),
+        0x91 => order != Some(Less),
+        0x99 => order == Some(Less),
+        0xa1 => matches!(order, Some(Less | Greater)),
+        0xc1 => matches!(order, None | Some(Greater)),
+        0xc9 => matches!(order, Some(Less | Equal)),
+        0xd1 => matches!(order, Some(Greater | Equal)),
+        0xd9 => matches!(order, None | Some(Less)),
+        0xe1 => order == Some(Greater),
+        _ => order != Some(Greater),
+    }
+}
+
 fn f32_to_f16(v: f32) -> u16 {
     let bits = v.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;

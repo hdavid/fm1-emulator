@@ -270,9 +270,11 @@ fn decode_extended(h: u32) -> Op {
         AddRegister
     } else if h & 0xfff8 == 0x14c0 {
         ClearHighRegister
-    } else if h & 0xfff0 == 0x0230 {
+    } else if h & 0xffe0 == 0x0220 {
+        // flush [rN] (0220) and flushinv [rN] (0230), one data cache line.
         CacheFlushInvalidate
-    } else if h & 0xe058 == 0x2000 {
+    } else if h & 0xe050 == 0x2000 {
+        // Bit 3 selects r8-r15 (objdump: 2709 r9 = [sp+28]).
         StackWord
     } else if matches!(h & 0xff88, 0x1700 | 0x1708 | 0x1780 | 0x1788) {
         Extend
@@ -396,9 +398,11 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         BranchLong
     } else if h == 0xe190 && x & 15 <= 3 {
         LogicThree
-    } else if h & 0xfff0 == 0xeb20 && x != 0 {
+    } else if h & 0xffe0 == 0xeb20 && x != 0 {
+        // [rN+] = {...} (eb2X) and [rN++] = {...} (eb3X).
         StoreRegisterList
-    } else if h & 0xfff0 == 0xeb00 && x != 0 {
+    } else if h & 0xffe0 == 0xeb00 && x != 0 {
+        // {...} = [rN+] (eb0X) and {...} = [rN++] (eb1X).
         LoadRegisterList
     } else if matches!(h, 0xe9d8 | 0xe9d9 | 0xe9dc | 0xe9dd | 0xe9de) {
         StackSubword
@@ -419,7 +423,11 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         BranchBit
     } else if h & 0xff00 == 0xef00 {
         MemoryMask
-    } else if conditional_kind((h >> 4) & 255) && h & 0xf000 == 0xe000 {
+    } else if conditional_kind((h >> 4) & 255)
+        && h & 0xf000 == 0xe000
+        // Register forms with x bits 7 and 6 set: <unknown> to objdump.
+        && !((h >> 4) & 7 == 1 && x & 0xc0 == 0xc0)
+    {
         ConditionalBlock
     } else if h == 0xe864 {
         MemoryLogic
@@ -583,7 +591,7 @@ pub(crate) fn skip_length(h: u32) -> u32 {
     }
 }
 
-/// The interpreter's view of one instruction (examples/op_scan.rs compares
+/// The interpreter's view of one instruction (examples/op_scan compares
 /// it with the vendor disassembler).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Description {
