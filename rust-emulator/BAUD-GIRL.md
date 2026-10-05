@@ -147,3 +147,48 @@ a `secondary core:` line and a `UART1 (MIDI out)` line.
 3. No LCD pixels yet. Neither image reaches display init before these blockers.
 
 Experiment: `FM1_WATCHDOG_OFF=1` (diagnose prints `EXPERIMENT:`).
+
+## Rendering artefacts (round 6): CPU forms, not the LCD controller
+
+- **Method.** New diagnose options show where a bad pixel came from:
+  - `FM1_LCD_LOG=N` logs SPI1 commands and DMAs together with the current
+    CASET/RASET window.
+  - `FM1_LCD_OWNER=x,y;...` names the transfer that last wrote a visible
+    pixel.
+- **The panel gets exactly what the guest renders:**
+  - Both firmwares draw full-width 24-row strips from two RAM buffers (IRQ
+    DMA) and small glyph windows through a 128-byte bounce buffer (polled
+    DMA).
+  - FM1_MEMWATCH on a bad strip-buffer word showed the guest storing the
+    wrong value there. The renderer was at fault, not the panel model.
+- **Three forms disagreed with the JieLi objdump (fixed in d1574e9):**
+  - **Packed immediates.** x[9:8] = 1 gives `0x00AB00AB` and 2 gives
+    `0xAB00AB00`; the emulator had `0xAB00AB00` and `0xAB`. The stock fill
+    builds its two-pixel word with `e1e0 0101` = `r0 * 0x10001`, so every
+    fill came out as alternating stripes. This also caused Baud Girl's
+    dotted meter lines.
+  - **ed50-ed5f halfword forms.**
+    - The offset is signed 10-bit from h[1:0]: `ed5b cf2a` =
+      `r12 = h[++r2=-6] (u)`, which the emulator read at +506.
+    - Bit 2 means a sign-extending load or, for stores, writing the upper
+      halfword (`ed55 0f2b` = `h[r2+506] = r0.h`).
+    - The glyph alpha blender reads its right-edge background pixels with
+      these forms, which explains the garbling at glyph right edges.
+  - **Bit-field forms.** `e1bX` x bit 0 means `sextra`. `e1aX`/`e1bX` with
+    other low bits are different forms.
+- **LCD controller left unchanged.**
+  - MADCTL/COLMOD: both firmwares send MADCTL 0 and COLMOD 0x55, already
+    handled.
+  - The round-3 rule (window addresses beyond the frame memory accepted,
+    their data dropped) is still unverified against the ST7789V datasheet,
+    which I don't have. In these runs the only out-of-range window is the
+    stock CASET 0..240 used to clear the screen at init.
+  - I also tried streaming interrupt-mode DMA bytes from RAM as the shift
+    time passed. It changed nothing visible and there is no evidence about
+    the DMA fetch behaviour, so it was removed.
+- **Screens.** In `~/GitHub/fm1-firmware/screens/`:
+  `baudgirl-192mhz-main-{before,after}-lcdfix.png` and
+  `stock-v15-192mhz-main-{before,after}-lcdfix.png`. After the fix:
+  - Stock shows a clean grey "OSC" screen with a flat yellow trace, "001"
+    and the battery.
+  - Baud Girl shows clean "100" meters and "001".
