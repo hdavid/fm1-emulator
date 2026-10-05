@@ -13,6 +13,8 @@ pub(crate) struct Wireless {
     analog: [u32; 31],
     sample_strobes: u8,
     sample_result: u32,
+    filter_ticks: u32,
+    filter_result: u8,
 }
 impl Default for Wireless {
     fn default() -> Self {
@@ -25,10 +27,15 @@ impl Default for Wireless {
             analog: [0; 31],
             sample_strobes: 0,
             sample_result: 0,
+            filter_ticks: 0,
+            filter_result: 0,
         }
     }
 }
 impl Wireless {
+    pub(crate) fn advance(&mut self, ticks: u32) {
+        self.filter_ticks = self.filter_ticks.saturating_sub(ticks);
+    }
     // Vendor wf_phy_mac_init/wl_hw_init setup words, reached through
     // wl30_mmc_io_rw_extended's direct MAC mapping (0x30000 + offset).
     fn mac_index(address: u32) -> Option<usize> {
@@ -104,6 +111,13 @@ impl Wireless {
                             }
                             self.sample_strobes = self.sample_strobes.saturating_add(1);
                             if self.sample_strobes >= 8 {
+                                if self.analog[26] & 1 != 0 {
+                                    self.sample_result = 0x80;
+                                    if self.filter_ticks == 0 {
+                                        self.sample_result |= 32 | (self.filter_result as u32) << 8;
+                                    }
+                                    return Some(Ok(()));
+                                }
                                 let cap = ((self.analog[14] >> 19) & 127) as usize;
                                 let feedback = (self.analog[15] >> 5) & 255;
                                 let (low, high) = PLL_THRESHOLDS[cap];
@@ -119,6 +133,19 @@ impl Wireless {
                         _ => return Some(Err("unsupported wireless analog sample strobe")),
                     }
                 } else {
+                    if address == 0x11968 && value & 1 != 0 && self.analog[26] & 1 == 0 {
+                        let period = (value >> 1) & 511;
+                        let window = (value >> 10) & 255;
+                        if window != 30 || !matches!(period, 254 | 145 | 80) {
+                            return Some(Err("unsupported wireless filter calibration settings"));
+                        }
+                        // A bounded calibration transaction, with nominal timing
+                        // proportional to the requested reference window.
+                        self.filter_ticks = window * period;
+                        // FM-1_985's settled capture with stock analog settings:
+                        // all three startup requests return sample 0x0000ffa0.
+                        self.filter_result = 255;
+                    }
                     self.analog[((address - 0x11900) / 4) as usize] = value;
                 }
                 Ok(())
@@ -305,3 +332,33 @@ const PLL_THRESHOLDS: [(u16, u16); 128] = [
     (0, 0),
     (0, 0),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn sample(w: &mut Wireless) -> u32 {
+        for _ in 0..8 {
+            w.write(0x11978, 1, 4).unwrap().unwrap();
+        }
+        w.write(0x11978, 0, 4).unwrap().unwrap();
+        w.read(0x11978, 4).unwrap().unwrap()
+    }
+    #[test]
+    fn filter_calibration_completes_with_measured_results_and_can_restart() {
+        let mut w = Wireless::default();
+        for period in [254, 145, 80] {
+            w.write(0x11968, 0, 4).unwrap().unwrap();
+            w.write(0x11968, 0x10007801 | period << 1, 4)
+                .unwrap()
+                .unwrap();
+            assert_eq!(sample(&mut w), 0x80);
+            w.advance(30 * period - 1);
+            assert_eq!(sample(&mut w), 0x80);
+            w.advance(1);
+            assert_eq!(sample(&mut w), 0xffa0);
+        }
+        w.write(0x11968, 0, 4).unwrap().unwrap();
+        assert!(w.write(0x11968, 0x10007803, 4).unwrap().is_err());
+        assert_eq!(w.read(0x11968, 4).unwrap().unwrap(), 0);
+    }
+}

@@ -61,11 +61,41 @@ static void rf_report(void) {
     con_puts("RF END\\r\\n");
 }
 '''.replace('CONFIG', ','.join(hex(v)+'u' for v in initial))
-p=src/'src/diag.c'
+report += """static void bw_report(void) {
+    static const uint32_t config[30]={BWCONFIG};
+    static const uint32_t periods[3]={508,290,160};
+    uint32_t saved[31],out[9],i,f=irq_save();
+    volatile uint32_t *a=(volatile uint32_t *)0x11900;
+    for(i=0;i<31;i++) saved[i]=a[i];
+    for(i=0;i<30;i++) a[i]=config[i];
+    a[1]=(a[1]&~0xf00u)|0x800u;a[19]|=0x8000000u;
+    for(i=0;i<3;i++) {
+        uint32_t n,k,res=0;
+        a[26]=periods[i]|0x7800u|0x10000000u|1;
+        for(n=0;n<10000;n++) {
+            for(k=0;k<8;k++) a[30]=1;
+            a[30]=0;res=a[30];
+            if(res&32) break;
+            if(!(n&31)) fm1_wdt_feed();
+        }
+        out[i*3]=res;out[i*3+1]=n;out[i*3+2]=a[26];
+        a[26]&=~1u;
+    }
+    for(i=0;i<31;i++) a[i]=saved[i];
+    irq_restore(f);con_puts("RF BEGIN\\r\\n");
+    for(i=0;i<9;i++) {
+        con_puts("W ");con_dec(i);con_putc(' ');
+        con_hex(out[i],8);con_puts("\\r\\n");
+    }
+    con_puts("RF END\\r\\n");
+}
+""".replace('BWCONFIG', '0xea220005u,0x1c35880u,0x9c010010u,0x672b9349u,0x508098eu,0x4078c319u,0x76a24u,0x2915c066u,0xa641c0u,0x65b80057u,0x1afae7e7u,0x52a070u,0x5d9625fu,0x1bfffffu,0x81b7d065u,0x12640f32u,0x8b41411u,0xa80u,0x0u,0x0u,0x0u,0x2822520u,0x0u,0x0u,0x0u,0x10000u,0x10000000u,0x0u,0x0u,0x0u')
+p=src/'src/diag.c' 
 code=p.read_text().replace('static int equal(',report+'static int equal(')
 code=code.replace('if(equal(con.line,"probe")) probe_report();',
                   'if(equal(con.line,"probe")) probe_report();\n'
-                  '            else if(equal(con.line,"rf")) rf_report();')
+                  '            else if(equal(con.line,"rf")) rf_report();\n'
+                  '            else if(equal(con.line,"bw")) bw_report();')
 p.write_text(code)
 b.FW=src;b.OUT=base/'build';b.GEN=b.OUT/'gen';b.LDR=b.OUT/'loader'
 b.PRODUCT='FM-1_985';b.NAME='fm1-rf-probe';b.HARDWARE_DISPLAY=False

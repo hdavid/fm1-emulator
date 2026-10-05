@@ -293,6 +293,10 @@ impl Bus {
         self.nor.advance(ticks);
     }
 
+    pub(crate) fn advance_wireless(&mut self, ticks: u32) {
+        self.wireless.advance(ticks);
+    }
+
     pub fn advance_usb(&mut self, ticks: u32) -> Result<(), AccessFault> {
         self.usb
             .advance(ticks, &mut self.ram)
