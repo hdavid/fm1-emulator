@@ -26,6 +26,10 @@ impl Usb {
     pub fn read(&self, a: u32) -> Option<u32> {
         match a {
             0x51000 => Some(self.io),
+            // FM-1_997: CON1=0 at SPL handoff (CON0=0xe0c), then
+            // CON1=2 with the full-speed D+ pull-up/input enabled (0x164c).
+            // Model the idle wire level; individual bus symbols are absent.
+            0x51004 => Some(if self.io & 0x1040 == 0x1040 { 2 } else { 0 }),
             0x10010 => Some(self.clock),
             // SDK H0_SIE_CON: stock startup disables the unused high-speed port.
             0x16800 => Some(0),
@@ -97,6 +101,7 @@ impl Usb {
                 }
             }
             0x51000 => self.io = v,
+            0x51004 => return Err("USB I/O input status is read-only in the supported model"),
             0x10010 => self.clock = v,
             0x11800 => {
                 self.regs[0] = v & !0x1000;

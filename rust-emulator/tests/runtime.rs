@@ -8,6 +8,19 @@ fn cpu(words: &[u16]) -> Cpu {
     )
 }
 #[test]
+fn usb_line_status_tracks_the_measured_idle_pullup_configuration() {
+    let mut c = cpu(&[0x0020]);
+    for (control, expected) in [(0xe0c, 0), (0x164c, 2), (0x0c, 0), (0x064c, 0), (0x160c, 0)] {
+        c.bus.write(0x51000, control, 4).unwrap();
+        assert_eq!(c.bus.read(0x51004, 4).unwrap(), expected);
+    }
+    assert!(c.bus.write(0x51004, 2, 4).is_err());
+    assert_eq!(c.bus.read(0x51004, 1).unwrap(), 0);
+    assert!(c.bus.read(0x51005, 1).is_err());
+    assert!(c.bus.read(0x51008, 4).is_err()); // Unmodeled secondary USB I/O.
+}
+
+#[test]
 fn stock_lcd_transfer_dispatches_irq_16_and_returns_after_guest_ack() {
     use fm1_emu::{devices::IRQ_CONFIG, lcd::SPI};
     let mut c = cpu(&[0x0020, 0x0020]);

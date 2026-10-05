@@ -88,6 +88,10 @@ impl Bus {
             .write(0x10010, 0x10000, &mut self.ram)
             .unwrap()
             .unwrap();
+        self.usb
+            .write(0x51000, 0xe0c, &mut self.ram)
+            .unwrap()
+            .unwrap();
         self.audio.write(0x10014, 6).unwrap().unwrap();
     }
     pub fn new(flash: Vec<u8>) -> Result<Self, String> {
