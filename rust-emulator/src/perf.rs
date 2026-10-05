@@ -26,7 +26,7 @@ impl Perf {
     fn index(a: u32) -> Option<(usize, usize)> {
         let offset = a.checked_sub(BASE)?;
         (offset < 0x40 && offset.is_multiple_of(4))
-            .then(|| ((offset / 0x20) as usize, ((offset % 0x20) / 4) as usize))
+            .then_some(((offset / 0x20) as usize, ((offset % 0x20) / 4) as usize))
     }
 
     /// Cycles of `core` at oscillator tick `now` with `per_tick` CPU cycles
