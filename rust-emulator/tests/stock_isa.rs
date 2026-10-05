@@ -233,3 +233,19 @@ fn register_list_store_and_load_keep_stock_linked_lists_consistent() {
         assert_eq!(c.bus.read(at, 4).unwrap(), value);
     }
 }
+
+#[test]
+fn halfword_postincrement_with_low_bit_set_stores() {
+    // Felucca 0.9-beta 0x02011e98 (GRAIN gr_fill: rb[q - lo] = pred):
+    // edd0 10f3 = h[r15 ++= 2] = r1. As in the edd8 register forms, x bit 0
+    // selects the store and the increment is even; reading it as a load
+    // advanced r15 by 3 and faulted on the next unaligned access.
+    let mut c = cpu(&[0xedd0, 0x10f3]);
+    c.r[15] = RAM + 0x3a0;
+    c.r[1] = 0xffff_9271;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x3a0, 2).unwrap(), 0x9271);
+    assert_eq!(c.r[15], RAM + 0x3a2);
+    assert_eq!(c.r[1], 0xffff_9271);
+    assert_eq!(c.pc, XIP + 4);
+}

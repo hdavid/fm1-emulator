@@ -250,15 +250,18 @@ fn execute_wide(
             name = "halfword_extended";
         }
         Op::HalfwordPostincrement => {
-            let increment = ((x >> 8) & 15) * 16 + (x & 15);
+            // x bit 0 selects the store (as in the edd8 register forms); the
+            // increment is even.
+            let store = x & 1 != 0;
+            let increment = ((x >> 8) & 15) * 16 + (x & 14);
             let address = cpu.r[s];
             mem = Some((
                 d,
                 s,
                 address,
                 2,
-                false,
-                h & 4 != 0,
+                store,
+                !store && h & 4 != 0,
                 Some(address.wrapping_add(increment)),
             ));
             name = "halfword_postincrement";
