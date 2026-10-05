@@ -27,6 +27,7 @@ fn unsupported(pc: u32, h: u32) -> Box<Fault> {
 
 /// Execute an extended.rs form; returns the next PC and records the form's
 /// name in the CPU.
+#[inline(always)]
 pub(crate) fn execute(
     cpu: &mut Cpu,
     op: Op,
@@ -173,6 +174,7 @@ pub(crate) fn execute(
 }
 
 /// Perform a deferred load or store and its base-register update.
+#[inline(always)]
 fn access(cpu: &mut Cpu, pc: u32, mem: Option<Memory>) -> Step<()> {
     if let Some((reg, base, address, size, store, sign, updated)) = mem {
         if store {
@@ -195,6 +197,7 @@ fn access(cpu: &mut Cpu, pc: u32, mem: Option<Memory>) -> Step<()> {
 }
 
 /// Execute a 32- or 48-bit form; the extension halfword is already known.
+#[inline(always)]
 fn execute_wide(
     cpu: &mut Cpu,
     op: Op,

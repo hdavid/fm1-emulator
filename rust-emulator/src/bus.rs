@@ -391,6 +391,7 @@ impl Bus {
         }
     }
 
+    #[inline]
     pub fn read(&self, address: u32, size: usize) -> Result<u32, AccessFault> {
         self.read_as(address, size, "read")
     }

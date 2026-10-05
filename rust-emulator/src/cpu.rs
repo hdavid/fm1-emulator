@@ -218,12 +218,14 @@ impl Cpu {
         }
     }
 
+    #[inline]
     pub(crate) fn read(&self, address: u32, size: usize) -> Step<u32> {
         self.bus
             .read(address, size)
             .map_err(|fault| Box::new(Fault::Access { pc: self.pc, fault }))
     }
 
+    #[inline]
     pub(crate) fn write(&mut self, address: u32, value: u32) -> Step<()> {
         self.bus
             .write(address, value, 4)
@@ -239,6 +241,7 @@ impl Cpu {
         self.sr[5] & 2 != 0
     }
 
+    #[inline]
     fn push(&mut self, value: u32) -> Step<()> {
         let address = self.sr[14].wrapping_sub(4);
         self.write(address, value)?;
@@ -246,6 +249,7 @@ impl Cpu {
         Ok(())
     }
 
+    #[inline]
     fn pop(&mut self) -> Step<u32> {
         let value = self.read(self.sr[14], 4)?;
         self.sr[14] = self.sr[14].wrapping_add(4);
@@ -256,6 +260,7 @@ impl Cpu {
         self.step_cores().map_err(|fault| *fault)
     }
 
+    #[inline(always)]
     fn step_cores(&mut self) -> Step<&'static str> {
         let control = self.bus.core_control(1);
         if control & 2 != 0 && self.secondary.is_some() {
@@ -309,6 +314,7 @@ impl Cpu {
         })
     }
 
+    #[inline(always)]
     fn step_core(&mut self) -> Step<()> {
         if let Some((at, end)) = self.predicate_skip {
             if self.pc == at {
@@ -501,6 +507,7 @@ impl Cpu {
 
     /// A code halfword after the instruction word: the decode cache's copy
     /// when it has one, otherwise a bus read (with the bus's faults).
+    #[inline]
     pub(crate) fn operand(&self, known: Option<u16>, address: u32) -> Step<u32> {
         match known {
             Some(value) => Ok(value as u32),
