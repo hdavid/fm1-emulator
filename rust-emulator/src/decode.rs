@@ -447,6 +447,9 @@ fn conditional_kind(kind: u32) -> bool {
             | 0xda
             | 0xdb
             | 0xe9
+            // ifs (rA <= #packed): SLOOP's fx.c gain_next and punch.c sweeps
+            // (eea3 0d80 = <= 0x1000; eea2 0d08 / 0cb0 = <= 0x2200 / 0x5800).
+            | 0xea
             | 0xeb
     )
 }
