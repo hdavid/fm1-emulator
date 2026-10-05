@@ -6,7 +6,7 @@
 // as fm1-ui's KEYMAP), level:SECONDS (run and print the audio level),
 // png:PATH. FM1_HOT=N profiles the primary core: hot:on / hot:off start and
 // pause counting (without them, every step is counted), hot:print reports and
-// clears; the report (top N functions, their hot address ranges) uses the
+// clears; peek:SYMBOL:WORDS prints WORDS 32-bit words at an ELF symbol; the report (top N functions, their hot address ranges) uses the
 // function symbols of FM1_ELF, or of FIRMWARE's .elf sibling. Stops on a guest fault and prints the last instructions with
 // registers (PLAY_TRACE=N for the last N, default 40).
 use fm1_emu::{
@@ -42,6 +42,18 @@ fn location(symbols: &[Symbol], pc: u32) -> String {
 /// The top `top` functions by executed instructions, then the hot ranges
 /// (loops) of the first of them.
 fn report(profile: &Profile, symbols: &[Symbol], top: usize) {
+    // Optional: FM1_HOT_DUMP=FILE writes every executed PC and its count
+    // (hex PC, decimal count per line), e.g. to annotate a disassembly.
+    if let Ok(path) = env::var("FM1_HOT_DUMP") {
+        let lines: String = profile
+            .pcs()
+            .iter()
+            .map(|(pc, count)| format!("{pc:08x} {count}\n"))
+            .collect();
+        if let Err(error) = std::fs::write(&path, lines) {
+            eprintln!("profile: {path}: {error}");
+        }
+    }
     let total = profile.total.max(1) as f64;
     let share = |count: u64| 100.0 * count as f64 / total;
     println!(
@@ -143,7 +155,8 @@ fn main() -> Result<(), String> {
         .map(|value| value.parse().map_err(|_| "invalid FM1_HOT"))
         .transpose()?
         .unwrap_or(0);
-    let symbols = if hot_top > 0 { profile_symbols(firmware)? } else { vec![] };
+    let wants_symbols = hot_top > 0 || steps.iter().any(|step| step.starts_with("peek:"));
+    let symbols = if wants_symbols { profile_symbols(firmware)? } else { vec![] };
     let mut paused = None;
     if hot_top > 0 {
         let profile = Profile::new();
@@ -207,6 +220,21 @@ fn main() -> Result<(), String> {
                     report(profile, &symbols, hot_top.max(1));
                     profile.clear();
                 }
+                Ok(())
+            }
+            ["peek", name, words] => {
+                let words: u32 = words.parse().map_err(|_| format!("bad {step}"))?;
+                let symbol = symbols
+                    .iter()
+                    .find(|s| s.name == *name)
+                    .ok_or(format!("no symbol {name}"))?;
+                let values: Vec<String> = (0..words)
+                    .map(|w| {
+                        let value = player.cpu.bus.read(symbol.address + w * 4, 4).unwrap_or(0);
+                        format!("{value}")
+                    })
+                    .collect();
+                println!("  {name} @ 0x{:08x}: {}", symbol.address, values.join(" "));
                 Ok(())
             }
             ["png", path] => {
