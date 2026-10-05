@@ -380,6 +380,38 @@ fn wireless_pll_samples_follow_measured_comparator_boundaries() {
 }
 
 #[test]
+fn stock_ble_anchor_configuration_keeps_columns_and_slots_separate() {
+    let mut c = cpu(&[0]);
+    // Vendor RF_ble.c __set/__get_ble_anchor_con, reached by unchanged
+    // FM-1_015 at 0x0205e5b8/0x0205e546. No packet engine is exercised.
+    for (column, slot, data) in [(2, 0, 0xf7ff), (2, 1, 0x1234), (16, 0, 0x4321)] {
+        c.bus.write(0x28020, data, 4).unwrap();
+        c.bus
+            .write(0x2801c, column << 10 | slot << 4 | 5, 4)
+            .unwrap();
+        // Writing configuration does not update the previous read result.
+        assert_eq!(c.bus.read(0x28024, 4).unwrap(), 0);
+    }
+    for (column, slot, data) in [(2, 0, 0xf7ff), (2, 1, 0x1234), (16, 0, 0x4321), (0, 0, 0)] {
+        c.bus
+            .write(0x2801c, column << 10 | slot << 4 | 2, 4)
+            .unwrap();
+        assert_eq!(c.bus.read(0x28024, 4).unwrap(), data);
+    }
+    assert!(c.bus.write(0x2801c, 17 << 10 | 2, 4).is_err());
+    assert!(c.bus.write(0x2801c, 3, 4).is_err());
+    assert!(c.bus.read(0x28020, 4).is_err());
+    assert!(c.bus.read(0x2801c, 4).is_err());
+    assert!(c.bus.write(0x28024, 0, 4).is_err());
+    assert!(c.bus.write(0x28020, 0, 2).is_err());
+    assert_eq!(c.bus.read(0x28038, 4).unwrap(), 0);
+    c.bus.write(0x28020, 0x800, 4).unwrap();
+    c.bus.write(0x2801c, 2 << 10 | 5, 4).unwrap();
+    assert!(c.bus.read(0x28038, 4).is_err());
+    assert!(c.bus.read(0x28040, 4).is_err());
+}
+
+#[test]
 fn wireless_bbp_transactions_store_and_read_selected_bytes() {
     let mut c = cpu(&[0]);
     let command = 0x3101c;

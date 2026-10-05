@@ -8,7 +8,8 @@
 // controller initializer at 0x02072326. Packet state and event registers are
 // deliberately excluded; a configuration latch does not simulate a radio.
 const BT_CONFIGURATION: &[u32] = &[
-    0x28000, 0x28008, 0x2800c, 0x28010, 0x28014, 0x28018, 0x28034, 0x20000, 0x2000c, 0x20018,
+    0x28000, 0x28008, 0x2800c, 0x28010, 0x28014, 0x28018, 0x28028, 0x2802c, 0x28034, 0x2804c,
+    0x20000, 0x2000c, 0x20018,
     0x2002c, 0x20058, 0x2005c, 0x2007c, 0x20080, 0x20084, 0x200f0, 0x200f4, 0x20120, 0x20124,
     0x20128, 0x2012c, 0x20130, 0x20134, 0x20138, 0x20150, 0x20154, 0x20158, 0x2015c, 0x20160,
     0x20164, 0x20168, 0x2fc00, 0x2fc04, 0x2fc08, 0x2fc0c, 0x2fc10, 0x2fc14, 0x2fc18, 0x2fc1c,
@@ -31,6 +32,9 @@ pub(crate) struct Wireless {
     bt_configuration: [u32; BT_CONFIGURATION.len()],
     bt_table: [u32; 128],
     bt_table_position: usize,
+    ble_anchor_data: u32,
+    ble_anchor_result: u32,
+    ble_anchors: [[u32; 64]; 17],
 }
 impl Default for Wireless {
     fn default() -> Self {
@@ -48,6 +52,9 @@ impl Default for Wireless {
             bt_configuration: [0; BT_CONFIGURATION.len()],
             bt_table: [0; 128],
             bt_table_position: 0,
+            ble_anchor_data: 0,
+            ble_anchor_result: 0,
+            ble_anchors: [[0; 64]; 17],
         }
     }
 }
@@ -80,6 +87,26 @@ impl Wireless {
         }
     }
     pub(crate) fn read(&self, address: u32, size: usize) -> Option<Result<u32, &'static str>> {
+        if address & !3 == 0x28038 {
+            return Some(if size != 4 {
+                Err("wireless registers require word accesses")
+            } else if self.ble_anchors[2].iter().any(|control| control & 0x800 != 0) {
+                Err("active BLE packet scheduling is not implemented")
+            } else {
+                // Vendor ble_hw_disable polls bit 1 until the engine is idle.
+                // No enabled anchor means no outstanding packet transaction.
+                Ok(0)
+            });
+        }
+        if matches!(address & !3, 0x2801c | 0x28020 | 0x28024) {
+            return Some(if size != 4 {
+                Err("wireless registers require word accesses")
+            } else if address == 0x28024 {
+                Ok(self.ble_anchor_result)
+            } else {
+                Err("BLE anchor command/data readback is not implemented")
+            });
+        }
         if let Some(index) = Self::bt_index(address & !3) {
             return Some(if size != 4 {
                 Err("wireless registers require word accesses")
@@ -131,6 +158,44 @@ impl Wireless {
         value: u32,
         size: usize,
     ) -> Option<Result<(), &'static str>> {
+        if address & !3 == 0x28038 {
+            return Some(if size != 4 {
+                Err("wireless registers require word accesses")
+            } else if matches!(value, 0 | 64) {
+                // Vendor event handler acknowledges bit 7 by writing bit 6.
+                // There are no events in the idle engine.
+                Ok(())
+            } else {
+                Err("unsupported BLE packet status write")
+            });
+        }
+        if matches!(address & !3, 0x2801c | 0x28020 | 0x28024) {
+            if size != 4 {
+                return Some(Err("wireless registers require word accesses"));
+            }
+            match address {
+                0x28020 => self.ble_anchor_data = value,
+                0x2801c => {
+                    // Vendor RF_ble.c: __set/__get_ble_anchor_con issue
+                    // (column << 10) | (HW_ID << 4) | 5/2 respectively.
+                    // Functional configuration storage only. Completion at
+                    // csync, active-radio side effects, field masks and command
+                    // readback still need measurements with an active controller.
+                    let column = (value >> 10) as usize;
+                    let slot = ((value >> 4) & 63) as usize;
+                    if column >= self.ble_anchors.len() || !matches!(value & 15, 2 | 5) {
+                        return Some(Err("unsupported BLE anchor transaction"));
+                    }
+                    if value & 15 == 5 {
+                        self.ble_anchors[column][slot] = self.ble_anchor_data;
+                    } else {
+                        self.ble_anchor_result = self.ble_anchors[column][slot];
+                    }
+                }
+                _ => return Some(Err("BLE anchor result is read-only")),
+            }
+            return Some(Ok(()));
+        }
         if let Some(index) = Self::bt_index(address & !3) {
             if size != 4 {
                 return Some(Err("wireless registers require word accesses"));
