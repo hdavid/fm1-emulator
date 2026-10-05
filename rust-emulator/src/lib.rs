@@ -41,6 +41,7 @@ pub const NAMES: [&str; 12] = [
 
 mod blocks;
 mod decode;
+pub use decode::{describe, Description};
 mod extended;
 mod jit;
 
