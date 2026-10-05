@@ -24,7 +24,6 @@ pub struct Lcd {
     registers: [u32; 5],
     iomap: u32,
     gram: Vec<u32>,
-    view_row: usize,
     panel_configuration: [Vec<u8>; 256],
 }
 
@@ -46,7 +45,6 @@ impl Default for Lcd {
             registers: [0; 5],
             iomap: 0,
             gram: vec![0; WIDTH * GRAM_HEIGHT],
-            view_row: 0,
             panel_configuration: std::array::from_fn(|_| Vec::new()),
         }
     }
@@ -125,7 +123,6 @@ impl Lcd {
                     // Software reset affects the panel, not the host SPI registers.
                     self.pixels.fill(0);
                     self.gram.fill(0);
-                    self.view_row = 0;
                     self.panel_configuration.iter_mut().for_each(Vec::clear);
                     self.display_on = false;
                     self.sleeping = true;
@@ -162,11 +159,11 @@ impl Lcd {
                     | (b << 3)
                     | (b >> 2);
                 self.gram[self.cursor[1] * WIDTH + self.cursor[0]] = rgb;
-                if let Some(y) = self.cursor[1]
-                    .checked_sub(self.view_row)
-                    .filter(|y| *y < HEIGHT)
-                {
-                    self.pixels[y * WIDTH + self.cursor[0]] = rgb;
+                // RASET chooses RAM write addresses; it does not reposition
+                // the display. The FM-1 UI uses rows 0..239 even though the
+                // stock initialization clears rows 40..279 in 320-row GRAM.
+                if self.cursor[1] < HEIGHT {
+                    self.pixels[self.cursor[1] * WIDTH + self.cursor[0]] = rgb;
                 }
                 self.pixels_written += 1;
                 self.cursor[0] += 1;
@@ -205,13 +202,6 @@ impl Lcd {
                             self.columns = [start, end];
                         } else {
                             self.rows = [start, end];
-                            if self.pixels_written == 0 && end - start + 1 == HEIGHT {
-                                // Present the guest's initial full-panel window:
-                                // stock uses rows 40..279, Felucca uses 0..239.
-                                // This is a functional viewport; panel gate-line
-                                // placement still needs physical verification.
-                                self.view_row = start;
-                            }
                         }
                     }
                 }

@@ -151,7 +151,7 @@ fn lcd_dma_can_read_flash_constants_at_a_byte_aligned_address() {
 }
 
 #[test]
-fn stock_panel_setup_and_offset_windows_draw_guest_pixels() {
+fn stock_panel_setup_does_not_move_the_visible_ram_origin() {
     let mut bus = init();
     // Stock initialization uses a 240-row window in 320-row ST7789 RAM.
     cmd(&mut bus, 0x2b);
@@ -183,7 +183,12 @@ fn stock_panel_setup_and_offset_windows_draw_guest_pixels() {
     assert_eq!(bus.lcd.pixels_written, 0);
     cmd(&mut bus, 0x2a);
     data(&mut bus, &[0, 7, 0, 7]);
-    for (row, color) in [(40, [0xf8, 0]), (279, [7, 0xe0]), (39, [0xff, 0xff])] {
+    for (row, color) in [
+        (40, [0xf8, 0]),
+        (279, [7, 0xe0]),
+        (0, [0xff, 0xff]),
+        (239, [0, 0x1f]),
+    ] {
         cmd(&mut bus, 0x2b);
         data(
             &mut bus,
@@ -192,13 +197,14 @@ fn stock_panel_setup_and_offset_windows_draw_guest_pixels() {
         cmd(&mut bus, 0x2c);
         data(&mut bus, &color);
     }
-    assert_eq!(bus.lcd.pixels[7], 0xff0000);
-    assert_eq!(bus.lcd.pixels[239 * 240 + 7], 0x00ff00);
+    assert_eq!(bus.lcd.pixels[7], 0xffffff);
+    assert_eq!(bus.lcd.pixels[40 * 240 + 7], 0xff0000);
+    assert_eq!(bus.lcd.pixels[239 * 240 + 7], 0x0000ff);
     assert!(bus
         .lcd
         .pixels
         .iter()
-        .all(|p| matches!(*p, 0 | 0xff0000 | 0x00ff00)));
+        .all(|p| matches!(*p, 0 | 0xff0000 | 0xffffff | 0x0000ff)));
     cmd(&mut bus, 0xe7);
     write(&mut bus, 0x50080, 0x100);
     assert!(bus.write(SPI + 8, 0x10, 4).is_err());
