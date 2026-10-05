@@ -147,15 +147,19 @@ pub(crate) fn execute(
                 next = next.wrapping_add((signed(x, 16) * 2) as u32);
             }
             op = "branch_register_mask";
-        } else if h == 0xe86c && matches!(x & 3, 0 | 2) {
+        } else if matches!(h, 0xe86c | 0xe86d) && matches!(x & 3, 0 | 2 | 3) {
             let address = cpu.r[d].wrapping_add(x & 252);
             let value = cpu.read(address, 4)?;
-            cpu.write(address, if x & 2 == 0 { value << c } else { value >> c })?;
-            op = if x & 2 == 0 {
-                "memory_shift_left"
-            } else {
-                "memory_shift_right"
-            };
+            let shift = c + ((h & 1) as usize) * 16;
+            cpu.write(
+                address,
+                match x & 3 {
+                    0 => value << shift,
+                    2 => value >> shift,
+                    _ => ((value as i32) >> shift) as u32,
+                },
+            )?;
+            op = "memory_shift";
         } else if h == 0xe868 {
             let addr = cpu.r[d] + (x & 252);
             cpu.write(addr, cpu.read(addr, 4)?.wrapping_add(cpu.r[c]))?;

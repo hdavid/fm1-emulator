@@ -527,6 +527,26 @@ fn carry_arithmetic_matches_seven_physical_fm1_measurements() {
 }
 
 #[test]
+fn memory_shifts_cover_the_high_shift_bit_and_signed_right_mode() {
+    for shift in [0, 1, 15, 16, 22, 31] {
+        for mode in [0, 2, 3] {
+            let mut c = cpu(&[0xe86c | shift / 16, 0x1004 | (shift % 16) << 8 | mode]);
+            c.r[1] = RAM;
+            let value = 0x87654321u32;
+            c.bus.write(RAM + 4, value, 4).unwrap();
+            c.step().unwrap();
+            let expected = match mode {
+                0 => value << shift,
+                2 => value >> shift,
+                _ => ((value as i32) >> shift) as u32,
+            };
+            assert_eq!(c.bus.read(RAM + 4, 4).unwrap(), expected);
+            assert_eq!(c.r[1], RAM);
+        }
+    }
+}
+
+#[test]
 fn wide_multiply_accumulate_keeps_carry_and_incoming_aliased_operands() {
     for (encoding, left, right, accumulator, expected) in [
         (0xae60, u32::MAX, 2, u32::MAX as u64, 0x2fffffffd),
