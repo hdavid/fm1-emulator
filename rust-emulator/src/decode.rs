@@ -140,6 +140,7 @@ pub(crate) enum Op {
     PopSpecialMask,
     Trigger,
     PairRegisterPreincrement,
+    PairPostincrement,
     RegisterPostincrement,
     SaturateSigned16,
     // Packed 16-bit forms (simd.rs).
@@ -417,6 +418,9 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         StackExtended
     } else if h & 0xfff8 == 0xec50 {
         MemoryPair
+    } else if h & 0xfff8 == 0xec58 && x & 2 == 0 {
+        // d[r0++=8] = r3_r2 (ec58 2009, Felucca 1.0 0x02024c88).
+        PairPostincrement
     } else if h == 0xec5c && x & 2 != 0 {
         // r9_r8 = d[++r1=r0] (stock 0x0200940e), x bit 0 the store.
         PairRegisterPreincrement
@@ -600,8 +604,15 @@ pub(crate) fn length(op: Op) -> Option<u32> {
         | PopSpecialMask
         | Trigger
         | PairRegisterPreincrement
+        | PairPostincrement
         | RegisterPostincrement
-        | SaturateSigned16 => Some(4),
+        | SaturateSigned16
+        | HalfAddSubtract
+        | HalfMultiply
+        | HalfMultiplyWord
+        | Pack
+        | DualAddSubtract
+        | DualMultiply => Some(4),
         _ => Some(2),
     }
 }
@@ -744,5 +755,20 @@ mod tests {
         assert_eq!((d.word, d.length), (0xe1c0, Some(4)));
         assert_eq!(describe(&[0x0081]).form, "Rti");
         assert_eq!(describe(&[0x0002]).length, None);
+    }
+
+    #[test]
+    fn every_form_decided_by_the_extension_is_four_bytes() {
+        // The packed 16-bit forms (objdump: e500 3430 `r3.l = r3.l + r4.l`,
+        // e543 4434, e404 2102, e519 2102, e551 2990) were described as two
+        // bytes, which op_scan reports as a length mismatch.
+        for h in 0xe000..=0xefffu32 {
+            for x in [0u32, 0x0102, 0x2990, 0x3430, 0x4434, 0x8008, 0xffff] {
+                let op = decode_wide(h, x);
+                if op != Op::Unsupported {
+                    assert_eq!(length(op), Some(4), "{h:04x} {x:04x} {op:?}");
+                }
+            }
+        }
     }
 }

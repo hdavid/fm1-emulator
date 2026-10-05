@@ -1136,6 +1136,30 @@ fn register_pair_preincrement_by_a_register() {
 }
 
 #[test]
+fn register_pair_postincrement_by_an_immediate() {
+    // Felucca 1.0 0x02024c88: ec58 2009, d[r0++=8] = r3_r2 (objdump). The
+    // offset is signed(h & 7) << 8 | x[11:8] << 4 | x & 12: ec5f 2f09 is
+    // d[r0++=-8]; ec58 2008 the load r3_r2 = d[r0++=8].
+    let mut c = cpu(&[0xec58, 0x2009, 0xec5f, 0x2f08, 0xec5c, 0x2001]);
+    c.r[0] = RAM + 0x100;
+    c.r[2] = 0x1111_1111;
+    c.r[3] = 0x2222_2222;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x100, 4).unwrap(), 0x1111_1111);
+    assert_eq!(c.bus.read(RAM + 0x104, 4).unwrap(), 0x2222_2222);
+    assert_eq!(c.r[0], RAM + 0x108);
+    c.r[0] = RAM + 0x100;
+    c.r[2] = 0;
+    c.r[3] = 0;
+    c.step().unwrap();
+    assert_eq!((c.r[2], c.r[3], c.r[0]), (0x1111_1111, 0x2222_2222, RAM + 0xf8));
+    c.r[0] = RAM + 0x800;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x800, 4).unwrap(), 0x1111_1111);
+    assert_eq!(c.r[0], RAM + 0x400);
+}
+
+#[test]
 fn memory_mask_offsets_are_signed_and_xor_is_an_operation() {
     // ef00-efff: bits 7-6 or / xor / and / and-not, bits 5-0 a signed word
     // offset. Stock 0x0208110e: ef3f 0400, [r0+-4] |= 0x80000000.

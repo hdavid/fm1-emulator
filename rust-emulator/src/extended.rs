@@ -414,6 +414,25 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
             cpu.r[s] = addr;
             name = "pair_register_preincrement";
         }
+        Op::PairPostincrement => {
+            // ec58-ec5f, x bit 1 clear: d[rS++=imm] = rD_pair / rD_pair =
+            // d[rS++=imm] (x bit 0 the store); access at rS, then rS += imm
+            // with imm = signed(h & 7) << 8 | x[11:8] << 4 | x & 12 (objdump:
+            // ec58 2009 d[r0++=8], ec5c 2001 d[r0++=-1024]).
+            let offset = (signed(h & 7, 3) << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 12) as i32;
+            let addr = cpu.r[s];
+            let reg = d & 14;
+            if x & 1 != 0 {
+                cpu.write(addr, cpu.r[reg])?;
+                cpu.write(addr + 4, cpu.r[reg + 1])?;
+            } else {
+                let (low, high) = (cpu.read(addr, 4)?, cpu.read(addr + 4, 4)?);
+                cpu.r[reg] = low;
+                cpu.r[reg + 1] = high;
+            }
+            cpu.r[s] = addr.wrapping_add(offset as u32);
+            name = "pair_postincrement";
+        }
         Op::RegisterPostincrement => {
             // ecde/edde/eede [rS++=rC]: access at rS, then rS += rC. x bits
             // 0-1 (objdump): word 2 load, 3 store; halfword 0 load, 1 store,
