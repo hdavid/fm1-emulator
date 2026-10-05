@@ -270,6 +270,41 @@ fn register_list_load_fills_the_lowest_register_from_the_lowest_address() {
 }
 
 #[test]
+fn pair_shift_moves_the_high_word_down_for_a_forty_bit_field() {
+    // FM-1_093 0x0207493e: f1d0 2a00 || 4489, then 478a. Bytes 3..6 of a
+    // record come from r2 and byte 7 from r2 after r3:r2 >>= 32 (r3 holds
+    // the byte-7 value read earlier), so the shift works on the pair.
+    let mut c = cpu(&[0xe1d0, 0x2a00]);
+    c.r[2] = 0x2308_1811;
+    c.r[3] = 0x0000_00a5;
+    c.step().unwrap();
+    assert_eq!(c.r[2], 0xa5);
+    assert_eq!(c.r[3], 0);
+    assert_eq!(c.pc, XIP + 4);
+}
+
+#[test]
+fn pair_shifts_sign_extend_and_scale_sixty_four_bit_products() {
+    // Vendor-compiled Felucca 0x020102a8: e1d0 4200; e1d0 4e00 is
+    // (int64)r4 in r5:r4 (shift left 32, arithmetic right 32), and
+    // e1d0 490e after a signed 64-bit multiply is the Q30 >> 30.
+    let mut c = cpu(&[0xe1d0, 0x4200, 0xe1d0, 0x4e00]);
+    c.r[4] = 0xffff_fff0;
+    c.r[5] = 0x1234_5678;
+    c.step().unwrap();
+    assert_eq!((c.r[5], c.r[4]), (0xffff_fff0, 0));
+    c.step().unwrap();
+    assert_eq!((c.r[5], c.r[4]), (0xffff_ffff, 0xffff_fff0));
+    let mut c = cpu(&[0xe1d0, 0x490e]);
+    let product = (0x3000_0000i64 * 0x2000_0000i64) as u64;
+    c.r[4] = product as u32;
+    c.r[5] = (product >> 32) as u32;
+    c.step().unwrap();
+    assert_eq!(c.r[4], (product >> 30) as u32);
+    assert_eq!(c.r[5], (product >> 62) as u32);
+}
+
+#[test]
 fn register_repeat_with_a_zero_count_skips_its_block() {
     let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);
     c.r[1] = RAM;

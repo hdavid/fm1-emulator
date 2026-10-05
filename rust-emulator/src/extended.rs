@@ -493,6 +493,21 @@ fn execute_wide(
             };
             name = "shift_extended";
         }
+        Op::ShiftPair => {
+            // rD+1:rD shifted as one 64-bit value, in place (same shift
+            // fields as ShiftExtended). Felucca sign-extends r4 into r5:r4
+            // with e1d0 4200; e1d0 4e00 and scales Q30 products with 490e.
+            let shift = ((x >> 8) & 3) * 16 + (x & 15);
+            let pair = (cpu.r[d] as u64) | ((cpu.r[d + 1] as u64) << 32);
+            let value = match (x >> 10) & 3 {
+                0 => pair.checked_shl(shift).unwrap_or(0),
+                2 => pair.checked_shr(shift).unwrap_or(0),
+                _ => ((pair as i64) >> shift.min(63)) as u64,
+            };
+            cpu.r[d] = value as u32;
+            cpu.r[d + 1] = (value >> 32) as u32;
+            name = "shift_pair";
+        }
         Op::BranchLong => {
             let value = match h & 0x60 {
                 0 => x & 4095,
