@@ -15,6 +15,9 @@ pub(crate) struct Wireless {
     sample_result: u32,
     filter_ticks: u32,
     filter_result: u8,
+    bt_configuration: [u32; 29],
+    bt_table: [u32; 128],
+    bt_table_position: usize,
 }
 impl Default for Wireless {
     fn default() -> Self {
@@ -29,10 +32,25 @@ impl Default for Wireless {
             sample_result: 0,
             filter_ticks: 0,
             filter_result: 0,
+            bt_configuration: [0; 29],
+            bt_table: [0; 128],
+            bt_table_position: 0,
         }
     }
 }
 impl Wireless {
+    // Vendor analog.c and the stock RF initialization routine. These are
+    // configuration words; controller packet scheduling is still unsupported.
+    fn bt_index(address: u32) -> Option<usize> {
+        [
+            0x20000, 0x2fc00, 0x2fc04, 0x2fc08, 0x2fc0c, 0x2fc10, 0x2fc14, 0x2fc18, 0x2fc1c,
+            0x2fc20, 0x2fc24, 0x2fc28, 0x2fc40, 0x2fc48, 0x2fc70, 0x2fc78, 0x2fc7c, 0x2fc88,
+            0x2fc98, 0x2fc9c, 0x2fca0, 0x2fd80, 0x2fd84, 0x2fd88, 0x2fd8c, 0x2fd90, 0x2fd94,
+            0x2fd98, 0x2fd9c,
+        ]
+        .iter()
+        .position(|a| *a == address)
+    }
     pub(crate) fn advance(&mut self, ticks: u32) {
         self.filter_ticks = self.filter_ticks.saturating_sub(ticks);
     }
@@ -56,6 +74,15 @@ impl Wireless {
         }
     }
     pub(crate) fn read(&self, address: u32, size: usize) -> Option<Result<u32, &'static str>> {
+        if let Some(index) = Self::bt_index(address & !3) {
+            return Some(if size != 4 {
+                Err("wireless registers require word accesses")
+            } else if address == 0x2fd9c {
+                Err("Bluetooth RF table reads are not implemented")
+            } else {
+                Ok(self.bt_configuration[index])
+            });
+        }
         if (0x11900..=0x1197b).contains(&address) {
             return Some(if size == 4 {
                 Ok(if address == 0x11978 {
@@ -98,6 +125,26 @@ impl Wireless {
         value: u32,
         size: usize,
     ) -> Option<Result<(), &'static str>> {
+        if let Some(index) = Self::bt_index(address & !3) {
+            if size != 4 {
+                return Some(Err("wireless registers require word accesses"));
+            }
+            if address == 0x2fd98 {
+                if value != 0 {
+                    return Some(Err("unsupported Bluetooth RF table position"));
+                }
+                self.bt_table_position = 0;
+            }
+            if address == 0x2fd9c {
+                if self.bt_table_position == self.bt_table.len() {
+                    return Some(Err("Bluetooth RF table write exceeds its capacity"));
+                }
+                self.bt_table[self.bt_table_position] = value;
+                self.bt_table_position += 1;
+            }
+            self.bt_configuration[index] = value;
+            return Some(Ok(()));
+        }
         if (0x11900..=0x1197b).contains(&address) {
             return Some(if size == 4 {
                 if address == 0x11978 {
@@ -342,6 +389,25 @@ mod tests {
         }
         w.write(0x11978, 0, 4).unwrap().unwrap();
         w.read(0x11978, 4).unwrap().unwrap()
+    }
+    #[test]
+    fn bluetooth_rf_table_retains_every_word_and_checks_its_capacity() {
+        let mut w = Wireless::default();
+        w.write(0x2fc40, 0xfcfc, 4).unwrap().unwrap();
+        assert_eq!(w.read(0x2fc40, 4).unwrap().unwrap(), 0xfcfc);
+        assert!(w.read(0x2fc44, 4).is_none());
+        w.write(0x2fd98, 0, 4).unwrap().unwrap();
+        for i in 0..128 {
+            w.write(0x2fd9c, i ^ 0x13579bdf, 4).unwrap().unwrap();
+        }
+        for i in 0..128 {
+            assert_eq!(w.bt_table[i], i as u32 ^ 0x13579bdf);
+        }
+        assert!(w.write(0x2fd9c, 0, 4).unwrap().is_err());
+        assert!(w.read(0x2fd9c, 4).unwrap().is_err());
+        w.write(0x2fd98, 0, 4).unwrap().unwrap();
+        w.write(0x2fd9c, 7, 4).unwrap().unwrap();
+        assert_eq!(w.bt_table[0], 7);
     }
     #[test]
     fn filter_calibration_completes_with_measured_results_and_can_restart() {
