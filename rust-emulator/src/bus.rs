@@ -107,6 +107,9 @@ pub struct Bus {
 }
 
 impl Bus {
+    pub(crate) fn core_control(&self, core: usize) -> u32 {
+        self.cache.core_control(core)
+    }
     pub(crate) fn load_flash(&mut self, bytes: &[u8], key: u16) {
         self.nor.load(bytes, key);
         // SPL handoff values measured before peripheral initialization.
@@ -293,6 +296,13 @@ impl Bus {
 
     pub fn write(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
         Self::check(address, size, "write")?;
+        if let Some(offset) = Self::offset(address, size, RAM, self.ram.len()) {
+            self.guards
+                .check_write(address, size)
+                .map_err(|reason| Self::fault(address, size, "write", reason))?;
+            self.ram[offset..offset + size].copy_from_slice(&value.to_le_bytes()[..size]);
+            return Ok(());
+        }
         if let Some(result) = self.devices.write_uart(address, value, size, &self.ram) {
             return result.map_err(|reason| Self::fault(address, size, "write", reason));
         }
@@ -475,27 +485,12 @@ impl Bus {
         self.pending_irq_for(icfg, 0)
     }
     pub(crate) fn pending_irq_for(&self, icfg: u32, core: usize) -> Option<usize> {
-        let mut candidate = self.devices.pending_irq_for(icfg, core);
-        for (source, pending) in [
-            (crate::lcd::IRQ, self.lcd.pending_irq()),
-            (crate::audio::IRQ, self.audio.pending_irq()),
-            (crate::shift_spi::IRQ, self.shift_spi.pending_irq()),
-            (40, self.wireless.clock_pending_irq()),
-            (41, self.wireless.slot_pending_irq()),
-        ] {
-            if let Some(priority) = pending
-                .then(|| self.devices.irq_priority_for(source, icfg, core))
-                .flatten()
-            {
-                if candidate.is_none_or(|current| {
-                    let current_priority =
-                        self.devices.irq_priority_for(current, icfg, core).unwrap();
-                    priority > current_priority || priority == current_priority && source < current
-                }) {
-                    candidate = Some(source);
-                }
-            }
-        }
-        candidate
+        let sources = self.devices.pending_sources(core)
+            | ((self.lcd.pending_irq() as u128) << crate::lcd::IRQ)
+            | ((self.audio.pending_irq() as u128) << crate::audio::IRQ)
+            | ((self.shift_spi.pending_irq() as u128) << crate::shift_spi::IRQ)
+            | ((self.wireless.clock_pending_irq() as u128) << 40)
+            | ((self.wireless.slot_pending_irq() as u128) << 41);
+        self.devices.select_irq(sources, icfg, core)
     }
 }

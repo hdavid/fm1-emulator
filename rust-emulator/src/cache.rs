@@ -18,6 +18,9 @@ impl Default for Cache {
     }
 }
 impl Cache {
+    pub(crate) fn core_control(&self, core: usize) -> u32 {
+        self.cores[core]
+    }
     fn offset(a: u32, n: usize, base: u32, len: usize) -> Option<usize> {
         let offset = a.checked_sub(base)? as usize;
         (offset.checked_add(n)? <= len).then_some(offset)

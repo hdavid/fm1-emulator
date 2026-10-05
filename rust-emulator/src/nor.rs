@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // SPI0 serial NOR. Application ELF supplies decrypted XIP separately.
-use std::collections::BTreeMap;
 
 enum Pending {
     Program(usize, Vec<u8>),
@@ -8,7 +7,7 @@ enum Pending {
 }
 
 pub struct Nor {
-    regs: BTreeMap<u32, u32>,
+    regs: [u32; 14],
     command: Vec<u8>,
     selected: bool,
     pub bytes: Vec<u8>,
@@ -23,7 +22,7 @@ pub struct Nor {
 impl Default for Nor {
     fn default() -> Self {
         Self {
-            regs: BTreeMap::from([(0x40200, 1), (0x4020c, 0x4000), (0x5101c, 32), (0x40300, 1)]),
+            regs: [1, 0, 0, 0x4000, 1, 0, 0, 0, 0, 0, 32, 0, 0, 0],
             command: vec![],
             selected: false,
             bytes: vec![255; 1024 * 1024],
@@ -44,8 +43,7 @@ impl Nor {
         crate::package::sfc(&mut decoded, key);
         self.decoded = Some(decoded);
         self.key = key;
-        self.regs
-            .extend([(0x40200, 0x809803b5), (0x40204, 1), (0x40208, 0x8e17)]);
+        self.regs[..3].copy_from_slice(&[0x809803b5, 1, 0x8e17]);
     }
     pub fn packaged(&self) -> bool {
         self.decoded.is_some()
@@ -95,25 +93,8 @@ impl Nor {
     }
 
     pub fn read(&self, a: u32) -> Option<u32> {
-        matches!(
-            a,
-            0x40200
-                | 0x40204
-                | 0x40208
-                | 0x4020c
-                | 0x40300
-                | 0x40304
-                | 0x40308
-                | 0x4030c
-                | 0x40310
-                | 0x40314
-                | 0x5101c
-                | 0x11c00
-                | 0x11c04
-                | 0x11c08
-        )
-        .then(|| {
-            let value = *self.regs.get(&a).unwrap_or(&0);
+        Self::register_index(a).map(|index| {
+            let value = self.regs[index];
             // Bit 31 is transaction busy, not retained configuration. The
             // functional bus completes each access before a following read.
             if a == 0x40200 {
@@ -122,6 +103,15 @@ impl Nor {
                 value
             }
         })
+    }
+    fn register_index(a: u32) -> Option<usize> {
+        match a {
+            0x40200..=0x4020c if a & 3 == 0 => Some(((a - 0x40200) / 4) as usize),
+            0x40300..=0x40314 if a & 3 == 0 => Some(4 + ((a - 0x40300) / 4) as usize),
+            0x5101c => Some(10),
+            0x11c00..=0x11c08 if a & 3 == 0 => Some(11 + ((a - 0x11c00) / 4) as usize),
+            _ => None,
+        }
     }
     pub fn chip_select(&mut self, selected: bool) {
         if self.selected != selected {
@@ -240,10 +230,9 @@ impl Nor {
                 }
                 _ => return Some(Err("unimplemented SPI NOR command")),
             }
-            self.regs
-                .insert(0x11c00, self.read(0x11c00).unwrap() | 0x8000);
+            self.regs[11] |= 0x8000;
         }
-        self.regs.insert(a, value);
+        self.regs[Self::register_index(a).unwrap()] = value;
         Some(Ok(()))
     }
 }

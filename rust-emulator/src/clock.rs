@@ -7,6 +7,7 @@ pub(crate) struct Clock {
     usb_phy: [u32; 6],
     instruction_phase: u64,
     phase_hz: u32,
+    issue_clock: Option<(u32, u32)>,
 }
 impl Default for Clock {
     fn default() -> Self {
@@ -16,6 +17,7 @@ impl Default for Clock {
             usb_phy: [0, 0x8881c3, 0, 0, 0x6003f, 0],
             instruction_phase: 0,
             phase_hz: 360_000_000,
+            issue_clock: None,
         }
     }
 }
@@ -46,7 +48,14 @@ impl Clock {
         sys / (((self.system[1] >> 16) & 3) + 1) / (((self.system[1] >> 8) & 7) + 1)
     }
     pub(crate) fn instruction_ticks(&mut self, clk_con3: u32) -> u32 {
-        let hz = self.system_hz(clk_con3).max(1);
+        let hz = match self.issue_clock {
+            Some((selector, hz)) if selector == clk_con3 => hz,
+            _ => {
+                let hz = self.system_hz(clk_con3).max(1);
+                self.issue_clock = Some((clk_con3, hz));
+                hz
+            }
+        };
         if hz != self.phase_hz {
             self.instruction_phase = self.instruction_phase * hz as u64 / self.phase_hz as u64;
             self.phase_hz = hz;
@@ -54,6 +63,13 @@ impl Clock {
         // One nominal CPU issue per step. Latencies/cache stalls are not
         // cycle accurate; an instruction is no longer one full OSC cycle.
         self.instruction_phase += 24_000_000;
+        if self.instruction_phase < hz as u64 {
+            return 0;
+        }
+        if self.instruction_phase < 2 * hz as u64 {
+            self.instruction_phase -= hz as u64;
+            return 1;
+        }
         let ticks = self.instruction_phase / hz as u64;
         self.instruction_phase %= hz as u64;
         ticks as u32
@@ -90,6 +106,7 @@ impl Clock {
             _ => return None,
         };
         *r = v;
+        self.issue_clock = None;
         Some(())
     }
 }
@@ -117,6 +134,21 @@ mod tests {
         }
         // Half an oscillator tick is retained across 192 -> 360 MHz.
         for _ in 0..7 {
+            assert_eq!(c.instruction_ticks(6), 0);
+        }
+        assert_eq!(c.instruction_ticks(6), 1);
+    }
+    #[test]
+    fn changing_the_pll_updates_issue_time_without_changing_the_selector() {
+        let mut c = Clock::default();
+        for _ in 0..14 {
+            assert_eq!(c.instruction_ticks(6), 0);
+        }
+        // PLL goes from 540 to 480 MHz; selector 6 now supplies 320 MHz.
+        // Retain 14/15 of the old oscillator tick across the clock change.
+        c.write(0x119ac, 238).unwrap();
+        assert_eq!(c.instruction_ticks(6), 1);
+        for _ in 0..13 {
             assert_eq!(c.instruction_ticks(6), 0);
         }
         assert_eq!(c.instruction_ticks(6), 1);

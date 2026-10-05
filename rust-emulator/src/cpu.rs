@@ -296,7 +296,7 @@ impl Cpu {
     }
 
     pub fn step(&mut self) -> Result<&'static str, Fault> {
-        let control = self.read(0x1eee004, 4)?;
+        let control = self.bus.core_control(1);
         if control & 2 != 0 {
             self.secondary = None;
         }
@@ -310,7 +310,7 @@ impl Cpu {
         }
         let secondary_running = control & 0x18 == 8 && self.secondary.is_some();
         if secondary_running
-            && (self.read(0x1eee000, 4)? & 16 != 0
+            && (self.bus.core_control(0) & 16 != 0
                 || self.secondary.as_ref().is_some_and(|core| core.bus_locked))
         {
             return self.step_secondary(true);

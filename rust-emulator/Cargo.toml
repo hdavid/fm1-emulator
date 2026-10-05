@@ -6,6 +6,10 @@ license = "GPL-3.0-only"
 description = "Incremental pi32v2 interpreter for unchanged FM-1 application firmware"
 default-run = "fm1-emu"
 
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
 [features]
 gui = ["dep:eframe"]
 

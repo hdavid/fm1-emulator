@@ -398,37 +398,45 @@ impl Devices {
         self.pending_irq_for(icfg, 0)
     }
     pub(crate) fn pending_irq_for(&self, icfg: u32, core: usize) -> Option<usize> {
+        self.select_irq(self.pending_sources(core), icfg, core)
+    }
+    pub(crate) fn pending_sources(&self, core: usize) -> u128 {
         let tick = if core == 0 {
             &self.tick
         } else {
             &self.tick_secondary
         };
-        [
-            (TICK_IRQ, tick.pending),
-            (24, self.adc.pending_irq()),
-            (20, self.uart.pending_irq()),
-            (44, self.rc_measurement.pending),
-            (62, self.timer4.pending),
-            (TIMER5_IRQ, self.timer5.pending),
-        ]
-        .into_iter()
-        .chain(
-            self.startup_timers
-                .iter()
-                .enumerate()
-                .map(|(i, timer)| (4 + i, timer.pending)),
-        )
-        .chain((0..8).map(|bit| (120 + bit, self.software & (1 << bit) != 0)))
-        .filter(|(source, pending)| {
-            *pending && self.irq_priority_for(*source, icfg, core).is_some()
-        })
-        .max_by_key(|(source, _)| {
-            (
-                self.irq_priority_for(*source, icfg, core).unwrap(),
-                std::cmp::Reverse(*source),
-            )
-        })
-        .map(|(source, _)| source)
+        let mut sources = ((tick.pending as u128) << TICK_IRQ)
+            | ((self.adc.pending_irq() as u128) << 24)
+            | ((self.uart.pending_irq() as u128) << 20)
+            | ((self.rc_measurement.pending as u128) << 44)
+            | ((self.timer4.pending as u128) << 62)
+            | ((self.timer5.pending as u128) << TIMER5_IRQ)
+            | ((self.software as u128) << 120);
+        for (index, timer) in self.startup_timers.iter().enumerate() {
+            sources |= (timer.pending as u128) << (4 + index);
+        }
+        sources
+    }
+    pub(crate) fn select_irq(&self, mut sources: u128, icfg: u32, core: usize) -> Option<usize> {
+        if icfg & 0x100 == 0 {
+            return None;
+        }
+        let mut candidate = None;
+        let mut highest = 0;
+        while sources != 0 {
+            let source = sources.trailing_zeros() as usize;
+            sources &= sources - 1;
+            if let Some(priority) = self.irq_priority_for(source, icfg, core) {
+                // Visit sources in ascending order to retain the lowest ID
+                // when equally ranked interrupts are pending together.
+                if candidate.is_none() || priority > highest {
+                    candidate = Some(source);
+                    highest = priority;
+                }
+            }
+        }
+        candidate
     }
     pub fn irq_priority(&self, source: usize, icfg: u32) -> Option<u32> {
         self.irq_priority_for(source, icfg, 0)
@@ -444,6 +452,34 @@ impl Devices {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn simultaneous_interrupts_respect_ties_masks_and_independent_cores() {
+        let mut d = Devices::default();
+        d.tick.pending = true;
+        d.tick_secondary.pending = true;
+        d.timer5.pending = true;
+        d.write(IRQ_CONFIG, 7 << 12, 4).unwrap().unwrap(); // Tick: priority 3.
+        d.write(IRQ_CONFIG + 7 * 4, 7 << 28, 4).unwrap().unwrap(); // Timer5: priority 3.
+        d.write(IRQ_CONFIG + 0x200, 11 << 12, 4).unwrap().unwrap(); // Secondary tick: priority 5.
+        d.write(IRQ_CONFIG + 0x200 + 7 * 4, 13 << 28, 4)
+            .unwrap()
+            .unwrap(); // Secondary timer5: priority 6.
+        assert_eq!(d.pending_irq_for(0x100, 0), Some(TICK_IRQ));
+        assert_eq!(d.pending_irq_for(0x100, 1), Some(TIMER5_IRQ));
+        assert_eq!(d.pending_irq_for(0, 0), None);
+        d.write(0x1eef1a8, 4, 4).unwrap().unwrap();
+        assert_eq!(d.pending_irq_for(0x100, 0), None);
+        d.tick_secondary.pending = false;
+        d.write(IRQ_CONFIG + 0x200 + 7 * 4, 12 << 28, 4)
+            .unwrap()
+            .unwrap(); // Pending timer5 is now disabled.
+        assert_eq!(d.pending_irq_for(0x100, 1), None);
+        d.write(IRQ_CONFIG + 15 * 4, 15 << 28, 4).unwrap().unwrap(); // Software7 at priority 7.
+        d.write(0x1eef1a0, 128, 4).unwrap().unwrap();
+        assert_eq!(d.pending_irq_for(0x100, 0), Some(127));
+        d.write(0x1eef1a4, 128, 4).unwrap().unwrap();
+        assert_eq!(d.pending_irq_for(0x100, 0), None);
+    }
     #[test]
     fn peripheral_timer_accumulates_fractional_clock_ticks_across_rate_changes() {
         let mut t = Timer::default();
