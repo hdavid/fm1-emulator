@@ -5,6 +5,7 @@ pub const SPI: u32 = 0x11d00;
 pub const IOMAP: u32 = 0x51020;
 pub const WIDTH: usize = 240;
 pub const HEIGHT: usize = 240;
+const GRAM_HEIGHT: usize = 320;
 
 pub struct Lcd {
     pub pixels: Vec<u32>,
@@ -21,6 +22,9 @@ pub struct Lcd {
     bgr: bool,
     registers: [u32; 5],
     iomap: u32,
+    gram: Vec<u32>,
+    view_row: usize,
+    panel_configuration: [Vec<u8>; 256],
 }
 
 impl Default for Lcd {
@@ -33,13 +37,16 @@ impl Default for Lcd {
             command: 0,
             args: Vec::new(),
             columns: [0, WIDTH - 1],
-            rows: [0, HEIGHT - 1],
+            rows: [0, GRAM_HEIGHT - 1],
             cursor: [0, 0],
             high_byte: None,
             format: 0,
             bgr: false,
             registers: [0; 5],
             iomap: 0,
+            gram: vec![0; WIDTH * GRAM_HEIGHT],
+            view_row: 0,
+            panel_configuration: std::array::from_fn(|_| Vec::new()),
         }
     }
 }
@@ -111,10 +118,13 @@ impl Lcd {
                 0x01 => {
                     // Software reset affects the panel, not the host SPI registers.
                     self.pixels.fill(0);
+                    self.gram.fill(0);
+                    self.view_row = 0;
+                    self.panel_configuration.iter_mut().for_each(Vec::clear);
                     self.display_on = false;
                     self.sleeping = true;
                     self.columns = [0, WIDTH - 1];
-                    self.rows = [0, HEIGHT - 1];
+                    self.rows = [0, GRAM_HEIGHT - 1];
                     self.format = 0;
                     self.bgr = false;
                 }
@@ -126,6 +136,7 @@ impl Lcd {
                 // Inversion is the panel's electrical drive mode. RGB565 values
                 // represent visible colors for the FM-1's normal INVON setup.
                 0x13 | 0x20 | 0x21 | 0x2a | 0x2b | 0x36 | 0x3a => (),
+                c if Self::configuration_length(c).is_some() => (),
                 _ => return Err("unsupported LCD command"),
             }
         } else if self.command == 0x2c {
@@ -144,7 +155,13 @@ impl Lcd {
                     | (((g << 2) | (g >> 4)) << 8)
                     | (b << 3)
                     | (b >> 2);
-                self.pixels[self.cursor[1] * WIDTH + self.cursor[0]] = rgb;
+                self.gram[self.cursor[1] * WIDTH + self.cursor[0]] = rgb;
+                if let Some(y) = self.cursor[1]
+                    .checked_sub(self.view_row)
+                    .filter(|y| *y < HEIGHT)
+                {
+                    self.pixels[y * WIDTH + self.cursor[0]] = rgb;
+                }
                 self.pixels_written += 1;
                 self.cursor[0] += 1;
                 if self.cursor[0] > self.columns[1] {
@@ -167,21 +184,58 @@ impl Lcd {
                     if self.args.len() == 4 {
                         let start = u16::from_be_bytes([self.args[0], self.args[1]]) as usize;
                         let end = u16::from_be_bytes([self.args[2], self.args[3]]) as usize;
-                        if start > end || end >= WIDTH {
-                            return Err("LCD window outside 240x240 panel");
+                        let limit = if self.command == 0x2a {
+                            WIDTH
+                        } else {
+                            GRAM_HEIGHT
+                        };
+                        if start > end || end >= limit {
+                            // ST7789 CASET/RASET ignore out-of-range addresses.
+                            // The stock clear routine sends column end=240;
+                            // retain the previous valid column window (0..239).
+                            return Ok(());
                         }
                         if self.command == 0x2a {
                             self.columns = [start, end];
                         } else {
                             self.rows = [start, end];
+                            if self.pixels_written == 0 && end - start + 1 == HEIGHT {
+                                // Present the guest's initial full-panel window:
+                                // stock uses rows 40..279, Felucca uses 0..239.
+                                // This is a functional viewport; panel gate-line
+                                // placement still needs physical verification.
+                                self.view_row = start;
+                            }
                         }
                     }
                 }
                 0x3a if self.args.len() == 1 && byte == 0x55 => self.format = byte,
                 0x36 if self.args.len() == 1 && byte & !8 == 0 => self.bgr = byte & 8 != 0,
+                c if Self::configuration_length(c).is_some() => {
+                    if self.args.len() > Self::configuration_length(c).unwrap() {
+                        return Err("too many LCD configuration parameters");
+                    }
+                    if c == 0xe7 && byte & 0x10 != 0 {
+                        return Err("LCD dual data lane mode is not implemented");
+                    }
+                    self.panel_configuration[c as usize].clone_from(&self.args);
+                }
                 _ => return Err("unsupported LCD data or pixel orientation"),
             }
         }
         Ok(())
+    }
+
+    fn configuration_length(command: u8) -> Option<usize> {
+        // ST7789V datasheet (Sitronix, v1.3), table 2. Preserve electrical,
+        // gamma and brightness settings; analog panel response is not modeled.
+        // https://dl.espressif.com/dl/schematics/LCD_ST7789.pdf
+        Some(match command {
+            0xb2 => 5,
+            0xb7 | 0xbb | 0xc0 | 0xc2 | 0xc3 | 0xc4 | 0xc6 | 0xe7 | 0x51 => 1,
+            0xd0 => 2,
+            0xe0 | 0xe1 => 14,
+            _ => return None,
+        })
     }
 }

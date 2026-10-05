@@ -103,7 +103,10 @@ fn invalid_dma_and_unsupported_commands_fault() {
     for byte in [0, 0, 0] {
         write(&mut bus, SPI + 8, byte);
     }
-    assert!(bus.write(SPI + 8, 240, 4).is_err());
+    write(&mut bus, SPI + 8, 240); // Invalid CASET is ignored by the controller.
+    cmd(&mut bus, 0x2c);
+    data(&mut bus, &[0xf8, 0]);
+    assert_eq!(bus.lcd.pixels[0], 0xff0000);
 }
 
 #[test]
@@ -121,4 +124,63 @@ fn lcd_dma_can_read_flash_constants_at_a_byte_aligned_address() {
     write(&mut bus, SPI + 12, XIP + 4);
     assert!(bus.write(SPI + 16, 2, 4).is_err());
     assert_eq!(bus.lcd.pixels_written, 2);
+}
+
+#[test]
+fn stock_panel_setup_and_offset_windows_draw_guest_pixels() {
+    let mut bus = init();
+    // Stock initialization uses a 240-row window in 320-row ST7789 RAM.
+    cmd(&mut bus, 0x2b);
+    data(&mut bus, &[0, 40, 1, 23]);
+    for (command, parameters) in [
+        (0xb2, vec![12, 12, 12, 0, 51]),
+        (0xb7, vec![86]),
+        (0xbb, vec![24]),
+        (0xc0, vec![44]),
+        (0xc2, vec![1]),
+        (0xc3, vec![31]),
+        (0xc4, vec![32]),
+        (0xc6, vec![15]),
+        (0xd0, vec![166, 161]),
+        (
+            0xe0,
+            vec![208, 13, 20, 11, 11, 7, 58, 68, 80, 8, 19, 19, 45, 50],
+        ),
+        (
+            0xe1,
+            vec![208, 13, 20, 11, 11, 7, 58, 68, 80, 8, 19, 19, 45, 50],
+        ),
+        (0xe7, vec![0]),
+        (0x51, vec![255]),
+    ] {
+        cmd(&mut bus, command);
+        data(&mut bus, &parameters);
+    }
+    assert_eq!(bus.lcd.pixels_written, 0);
+    cmd(&mut bus, 0x2a);
+    data(&mut bus, &[0, 7, 0, 7]);
+    for (row, color) in [(40, [0xf8, 0]), (279, [7, 0xe0]), (39, [0xff, 0xff])] {
+        cmd(&mut bus, 0x2b);
+        data(
+            &mut bus,
+            &[(row >> 8) as u8, row as u8, (row >> 8) as u8, row as u8],
+        );
+        cmd(&mut bus, 0x2c);
+        data(&mut bus, &color);
+    }
+    assert_eq!(bus.lcd.pixels[7], 0xff0000);
+    assert_eq!(bus.lcd.pixels[239 * 240 + 7], 0x00ff00);
+    assert!(bus
+        .lcd
+        .pixels
+        .iter()
+        .all(|p| matches!(*p, 0 | 0xff0000 | 0x00ff00)));
+    cmd(&mut bus, 0xe7);
+    write(&mut bus, 0x50080, 0x100);
+    assert!(bus.write(SPI + 8, 0x10, 4).is_err());
+    cmd(&mut bus, 0xc3);
+    data(&mut bus, &[31]);
+    assert!(bus.write(SPI + 8, 32, 4).is_err());
+    cmd(&mut bus, 1);
+    assert!(bus.lcd.pixels.iter().all(|p| *p == 0));
 }
