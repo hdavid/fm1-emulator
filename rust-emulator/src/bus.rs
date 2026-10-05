@@ -470,6 +470,13 @@ impl Bus {
             .instruction_ticks(self.audio.read(0x10014).unwrap())
     }
 
+    /// Queue USB-MIDI packets for the firmware (host to device). They are
+    /// delivered once the MIDI host has configured the device, one bulk
+    /// packet (up to 16 events) whenever its OUT endpoint buffer is free.
+    pub fn usb_midi_send(&mut self, packets: &[crate::usb_midi::Packet]) {
+        self.usb.midi_send(packets);
+    }
+
     pub fn advance_usb(&mut self, ticks: u32) -> Result<(), AccessFault> {
         self.usb
             .advance(ticks, &mut self.ram)
