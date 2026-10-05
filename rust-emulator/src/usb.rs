@@ -93,6 +93,16 @@ mod tests {
     }
 
     #[test]
+    fn a_configuration_without_a_cdc_console_skips_the_line_state() {
+        // A firmware whose USB configuration has no CDC interface (e.g. USB
+        // audio in its place) enumerates; only the line-state request goes.
+        let usb = Usb::default();
+        assert_eq!(usb.cdc_interface, None);
+        assert_eq!(usb.setup(4), Ok(None));
+        assert!(usb.setup(3).unwrap().is_some());
+    }
+
+    #[test]
     fn cdc_out_discovers_its_endpoint_and_preserves_packets_until_guest_ack() {
         let (mut usb, mut ram) = configured();
         let bytes: Vec<_> = (0..70).collect();
@@ -193,7 +203,6 @@ mod tests {
     #[test]
     fn a_device_without_the_console_skips_the_line_state_for_the_midi_host() {
         let mut usb = Usb::default();
-        assert!(usb.setup(4).is_err(), "the CDC host needs its interface");
         usb.enable_midi_host();
         assert_eq!(usb.setup(4), Ok(None));
         assert_eq!(usb.setup(5), Ok(None), "no product string index");
@@ -306,7 +315,7 @@ impl Usb {
         }
     }
     /// The SETUP packet of `phase`, or None for a request this device does
-    /// not need (only skipped by the MIDI host: no CDC, or no product string).
+    /// not need (no CDC console: no line state; no product string to read).
     fn setup(&self, phase: usize) -> Result<Option<[u8; 8]>, &'static str> {
         Ok(Some(match phase {
             0 => [0x80, 6, 0, 1, 0, 0, 18, 0],
@@ -315,8 +324,9 @@ impl Usb {
             3 => [0, 9, 1, 0, 0, 0, 0, 0],
             4 => match self.cdc_interface {
                 Some(interface) => [0x21, 0x22, 1, 0, interface, 0, 0, 0],
-                None if self.midi.enabled => return Ok(None),
-                None => return Err("USB configuration has no CDC interface"),
+                // No console in this configuration (e.g. USB audio in its
+                // place): there is no line state to set.
+                None => return Ok(None),
             },
             _ if self.midi.product_index == 0 => return Ok(None),
             _ => [0x80, 6, self.midi.product_index, 3, 0x09, 0x04, 255, 0],
