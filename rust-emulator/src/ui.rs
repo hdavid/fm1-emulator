@@ -60,6 +60,26 @@ const KNOB_KEYS: [(egui::Key, egui::Key); 8] = [
 const DETENT_PX: f32 = 12.;
 /// Encoder clicks per turn as drawn (the pointer moves 15 degrees a click).
 const DETENT_ANGLE: f32 = std::f32::consts::TAU / 24.;
+/// Where to draw the 240x240 LCD inside `area` (points) so no guest pixel is
+/// dropped: never fewer than 240 physical pixels (nearest-neighbour
+/// downscaling skips rows and columns: "TRACK" read "IRALK"), an integer
+/// scale when it fills at least 3/4 of the area, and snapped to the pixel grid.
+fn lcd_rect(area: Rect, pixels_per_point: f32) -> Rect {
+    const LCD: f32 = 240.;
+    let available = area.width().min(area.height()) * pixels_per_point;
+    let whole = (available / LCD).floor();
+    let pixels = if available < LCD {
+        LCD
+    } else if whole * LCD >= 0.75 * available {
+        whole * LCD
+    } else {
+        available.floor()
+    };
+    let size = pixels / pixels_per_point;
+    let min = ((area.center() - vec2(size, size) / 2.) * pixels_per_point).round() / pixels_per_point;
+    Rect::from_min_size(min, vec2(size, size))
+}
+
 /// MASTER pointer: -135..+135 degrees over the ADC range 0..=1023.
 fn master_angle(master: u16) -> f32 {
     (master as f32 / 1023. - 0.5) * 1.5 * std::f32::consts::PI
@@ -443,9 +463,10 @@ impl Emulator {
         c.box_at([290., 52., 270., 272.], 34., Color32::from_gray(8));
         c.box_at([310., 72., 230., 230.], 3., Color32::BLACK);
         if let Some(texture) = &self.texture {
+            let fit = lcd_rect(c.rect([315., 77., 220., 220.]), ui.ctx().pixels_per_point());
             c.painter.image(
                 texture.id(),
-                c.rect([315., 77., 220., 220.]),
+                fit,
                 Rect::from_min_max(pos2(0., 0.), pos2(1., 1.)),
                 Color32::WHITE,
             );
@@ -851,5 +872,21 @@ mod tests {
         // MASTER is a pot: a big clockwise turn pins it at full scale.
         drag(&mut app, 0, 300);
         assert_eq!(app.master, 1023);
+    }
+    #[test]
+    fn the_lcd_is_never_downscaled_and_sits_on_the_pixel_grid() {
+        let area = |side: f32| Rect::from_min_size(pos2(10.3, 20.7), vec2(side, side));
+        // 1x display, 220-point box: drawn at 240 pixels, not squeezed to 220.
+        assert_eq!(lcd_rect(area(220.), 1.).width(), 240.);
+        // Retina, 220 points = 440 px: 1x would fill only 55%, so use all 440.
+        assert_eq!(lcd_rect(area(220.), 2.).width(), 220.);
+        // Retina, 250 points = 500 px: 2x (480 px) fills 96%: integer scale.
+        assert_eq!(lcd_rect(area(250.), 2.).width(), 240.);
+        for ppp in [1., 1.5, 2.] {
+            let r = lcd_rect(area(233.), ppp);
+            assert!(r.width() * ppp >= 240.);
+            assert_eq!((r.min.x * ppp).fract(), 0.);
+            assert_eq!((r.min.y * ppp).fract(), 0.);
+        }
     }
 }
