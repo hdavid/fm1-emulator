@@ -35,6 +35,7 @@ pub struct Bus {
     cache: crate::cache::Cache,
     crc: crate::crc::Crc,
     clock: crate::clock::Clock,
+    resample: crate::resample::Resampler,
     code: crate::code_cache::CodeCache,
     /// NOR generation the code cache was last synchronized with.
     nor_generation: u64,
@@ -73,6 +74,7 @@ impl Bus {
             cache: Default::default(),
             crc: Default::default(),
             clock: Default::default(),
+            resample: Default::default(),
             code: Default::default(),
             nor_generation: 0,
             mmio_stats: Default::default(),
@@ -163,6 +165,18 @@ impl Bus {
             }
             if let Some(value) = self.crc.read(address) {
                 return Ok(value);
+            }
+            if let Some(value) = self.resample.read(address & !3) {
+                return if size == 4 {
+                    Ok(value)
+                } else {
+                    Err(Self::fault(
+                        address,
+                        size,
+                        operation,
+                        "JL_SRC registers require word accesses",
+                    ))
+                };
             }
             if let Some(value) = self.cache.read(address, size) {
                 return Ok(value);
@@ -288,6 +302,19 @@ impl Bus {
         }
         if self.crc.write(address, value).is_some() {
             return Ok(());
+        }
+        if self.resample.read(address & !3).is_some() {
+            if size != 4 {
+                return Err(Self::fault(
+                    address,
+                    size,
+                    "write",
+                    "JL_SRC registers require word accesses",
+                ));
+            }
+            if let Some(result) = self.resample.write(address, value) {
+                return result.map_err(|reason| Self::fault(address, size, "write", reason));
+            }
         }
         if let Some(result) = self.audio.write(address, value) {
             return result.map_err(|reason| Self::fault(address, size, "write", reason));

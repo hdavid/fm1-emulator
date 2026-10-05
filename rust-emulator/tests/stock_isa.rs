@@ -149,7 +149,11 @@ fn unsigned_compare_branches_take_an_unsigned_ten_bit_immediate() {
         let mut c = cpu(&[0xf9f1, 0x81fc]);
         c.r[1] = elapsed;
         c.step().unwrap();
-        assert_eq!(c.pc, if taken { XIP - 4 } else { XIP + 4 }, "r1 = {elapsed}");
+        assert_eq!(
+            c.pc,
+            if taken { XIP - 4 } else { XIP + 4 },
+            "r1 = {elapsed}"
+        );
     }
 }
 
@@ -209,7 +213,11 @@ fn signed_greater_than_register_conditional_guards_its_then_block() {
         }
         assert_eq!(c.pc, XIP + 10, "r5 = {r5:#x}");
         let stored = c.bus.read(RAM + 6, 2).unwrap();
-        assert_eq!(stored, if taken { r5 & 0xffff } else { 0x7777 }, "r5 = {r5:#x}");
+        assert_eq!(
+            stored,
+            if taken { r5 & 0xffff } else { 0x7777 },
+            "r5 = {r5:#x}"
+        );
     }
 }
 

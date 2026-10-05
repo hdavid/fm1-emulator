@@ -703,7 +703,11 @@ impl Cpu {
                         self.sr[index] = self.pop()?;
                     }
                 }
-                name = if h == 0x0488 { "pop_rets" } else { "pop_irq_frame" };
+                name = if h == 0x0488 {
+                    "pop_rets"
+                } else {
+                    "pop_irq_frame"
+                };
             }
             Op::CallRel32 => {
                 // Vendor startup uses a signed byte displacement after a 6-byte call.

@@ -64,7 +64,9 @@ fn run() -> Result<(), String> {
     // aligned 32-bit word at ADDRESS (first 400 changes).
     let memwatch: Option<u32> = env::var("FM1_MEMWATCH")
         .ok()
-        .map(|a| u32::from_str_radix(a.trim_start_matches("0x"), 16).map_err(|_| "invalid FM1_MEMWATCH"))
+        .map(|a| {
+            u32::from_str_radix(a.trim_start_matches("0x"), 16).map_err(|_| "invalid FM1_MEMWATCH")
+        })
         .transpose()?
         .map(|a| a & !3);
     let mut memwatch_value = memwatch.and_then(|a| cpu.bus.read(a, 4).ok());
@@ -226,7 +228,11 @@ fn run() -> Result<(), String> {
     for (pc, op, word, registers) in recent {
         if recent_count > 12 {
             let list: Vec<_> = registers.iter().map(|r| format!("{r:x}")).collect();
-            eprintln!("  {}: {word:04x} {op} [{}]", location(&firmware.symbols, pc), list.join(" "));
+            eprintln!(
+                "  {}: {word:04x} {op} [{}]",
+                location(&firmware.symbols, pc),
+                list.join(" ")
+            );
         } else {
             eprintln!("  {}: {op}", location(&firmware.symbols, pc));
         }
