@@ -279,6 +279,11 @@ impl Cpu {
         Ok(value)
     }
 
+    /// The primary core is inside an interrupt handler (until its `rti`).
+    pub fn in_interrupt(&self) -> bool {
+        self.in_interrupt
+    }
+
     pub fn step(&mut self) -> Result<&'static str, Fault> {
         self.step_cores().map_err(|fault| *fault)
     }
