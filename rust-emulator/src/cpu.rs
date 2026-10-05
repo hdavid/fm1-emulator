@@ -469,6 +469,7 @@ impl Cpu {
         self.bus
             .advance_audio(OSC_TICKS_PER_INSTRUCTION)
             .map_err(|fault| Fault::Access { pc, fault })?;
+        self.bus.advance_uart1(OSC_TICKS_PER_INSTRUCTION);
         self.bus.spi2.advance(OSC_TICKS_PER_INSTRUCTION);
         self.bus.lcd.advance(OSC_TICKS_PER_INSTRUCTION);
         Ok(())
