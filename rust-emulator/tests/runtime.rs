@@ -81,6 +81,33 @@ fn register_list_stores_linked_list_fields_without_advancing_the_base() {
 }
 
 #[test]
+fn stock_fifo_consumption_subtracts_the_register_from_both_counts() {
+    // Unchanged stock at 0x0202834e: [r6+24] -= r12; [r6+20] -= r12.
+    let mut c = cpu(&[0xe868, 0x6c1a, 0xe868, 0x6c16]);
+    c.r[6] = RAM;
+    c.r[12] = 4;
+    c.sr[5] = 0x12345678;
+    c.bus.write(RAM + 24, 4, 4).unwrap();
+    c.bus.write(RAM + 20, 8, 4).unwrap();
+    c.step().unwrap();
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 24, 4).unwrap(), 0);
+    assert_eq!(c.bus.read(RAM + 20, 4).unwrap(), 4);
+    assert_eq!(c.r[6], RAM);
+    assert_eq!(c.r[12], 4);
+    assert_eq!(c.sr[5], 0x12345678);
+    // Both directions wrap as 32-bit memory operations.
+    for (word, incoming, expected) in [(0x6c18, u32::MAX, 3), (0x6c1a, 1, 0xfffffffd)] {
+        let mut c = cpu(&[0xe868, word]);
+        c.r[6] = RAM;
+        c.r[12] = 4;
+        c.bus.write(RAM + 24, incoming, 4).unwrap();
+        c.step().unwrap();
+        assert_eq!(c.bus.read(RAM + 24, 4).unwrap(), expected);
+    }
+}
+
+#[test]
 fn flash_identification_shifts_the_jedec_word_in_memory() {
     let mut c = cpu(&[0xe86c, 0x581e]); // [r5+28] >>= 8
     c.r[5] = RAM;

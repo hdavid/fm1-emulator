@@ -178,10 +178,23 @@ pub(crate) fn execute(
                 },
             )?;
             op = "memory_shift";
-        } else if h == 0xe868 {
+        } else if h == 0xe868 && matches!(x & 3, 0 | 2) {
             let addr = cpu.r[d] + (x & 252);
-            cpu.write(addr, cpu.read(addr, 4)?.wrapping_add(cpu.r[c]))?;
-            op = "memory_add_register";
+            let value = cpu.read(addr, 4)?;
+            let operand = cpu.r[c];
+            cpu.write(
+                addr,
+                if x & 2 != 0 {
+                    value.wrapping_sub(operand)
+                } else {
+                    value.wrapping_add(operand)
+                },
+            )?;
+            op = if x & 2 != 0 {
+                "memory_subtract_register"
+            } else {
+                "memory_add_register"
+            };
         } else if h & 0xfff8 == 0xed50 || h & 0xfff8 == 0xed58 {
             let store = x & 1 != 0;
             let high = if store {
