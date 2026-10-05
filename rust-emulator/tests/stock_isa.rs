@@ -298,3 +298,38 @@ fn pair_store_with_low_bits_three_writes_the_base_back() {
     assert_eq!(c.bus.read(RAM + 0x12c, 4).unwrap(), 0);
     assert_eq!(c.r[1], RAM + 0x120);
 }
+
+#[test]
+fn multiply_accumulate_adds_the_signed_product_to_the_pair() {
+    // Felucca 0.9-beta 0x020108cc (VOICE formant resonators, int64 sums):
+    // e1fc 50a0 = r5:r4 += r10 * r0. x bit 12 set selects signed, as for
+    // e1f8; the pair is (x >> 12) & 14.
+    let mut c = cpu(&[0xe1fc, 0x50a0]);
+    c.r[4] = 0x2000_0000;
+    c.r[5] = 0;
+    c.r[10] = 0xffff_fffe; // -2
+    c.r[0] = 0x4000_0000;
+    c.step().unwrap();
+    // 0x20000000 - 0x80000000 = -0x60000000
+    assert_eq!((c.r[4], c.r[5]), (0xa000_0000, 0xffff_ffff));
+    assert_eq!(c.pc, XIP + 4);
+}
+
+#[test]
+fn long_divide_with_bit_12_set_is_signed() {
+    // Felucca 0.9-beta 0x02010524 / Jangada 0x020127be (eng_formant.c:
+    // b = ((int64_t)b * (int32_t)(f0 + (f0 >> 4))) / f): e1f6 3620 =
+    // r3:r2 = r3:r2 / r6, signed (bit 12, as for e1f8 and e1fc).
+    let mut c = cpu(&[0xe1f6, 0x3620]);
+    c.r[2] = 0xffff_ff00; // -256
+    c.r[3] = 0xffff_ffff;
+    c.r[6] = 16;
+    c.step().unwrap();
+    assert_eq!((c.r[2], c.r[3]), (0xffff_fff0, 0xffff_ffff)); // -16
+    let mut c = cpu(&[0xe1f6, 0x3620]);
+    c.r[2] = 0x0016_0434;
+    c.r[3] = 0;
+    c.r[6] = 0xffff_fffe; // -2
+    c.step().unwrap();
+    assert_eq!((c.r[2], c.r[3]), (0xfff4_fde6, 0xffff_ffff));
+}

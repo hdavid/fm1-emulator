@@ -347,16 +347,37 @@ fn execute_wide(
             cpu.r[pair + 1] = (product >> 32) as u32;
             name = "multiply_long";
         }
+        Op::MultiplyAccumulateLong => {
+            // rD+1:rD += rS * rC (64-bit); x bit 12 selects signed as for e1f8.
+            let pair = d & 14;
+            let product = if x & 0x1000 != 0 {
+                (cpu.r[s] as i32 as i64).wrapping_mul(cpu.r[c] as i32 as i64) as u64
+            } else {
+                cpu.r[s] as u64 * cpu.r[c] as u64
+            };
+            let sum = ((cpu.r[pair + 1] as u64) << 32 | cpu.r[pair] as u64).wrapping_add(product);
+            cpu.r[pair] = sum as u32;
+            cpu.r[pair + 1] = (sum >> 32) as u32;
+            name = "multiply_accumulate_long";
+        }
         Op::DivideLong => {
             // rD+1:rD = (rS+1:rS) / rC, unsigned 64-by-32 division. The stock
             // microsecond conversion divides by 1000000 then rebuilds the
             // remainder from both quotient words.
+            // x bit 12 selects the signed form (Felucca's formant filter:
+            // an int64 divided by an int32).
+            let pair = d & 14;
             let dividend = cpu.r[s] as u64 | ((cpu.r[s + 1] as u64) << 32);
-            let quotient = dividend
-                .checked_div(cpu.r[c] as u64)
-                .ok_or(Fault::Unsupported { pc, word: h as u16 })?;
-            cpu.r[d] = quotient as u32;
-            cpu.r[d + 1] = (quotient >> 32) as u32;
+            let quotient = if x & 0x1000 != 0 {
+                (dividend as i64)
+                    .checked_div(cpu.r[c] as i32 as i64)
+                    .map(|q| q as u64)
+            } else {
+                dividend.checked_div(cpu.r[c] as u64)
+            }
+            .ok_or(Fault::Unsupported { pc, word: h as u16 })?;
+            cpu.r[pair] = quotient as u32;
+            cpu.r[pair + 1] = (quotient >> 32) as u32;
             name = "divide_long";
         }
         Op::CarryArithmetic => {

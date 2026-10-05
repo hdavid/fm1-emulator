@@ -87,6 +87,7 @@ pub(crate) enum Op {
     SubtractPackedImmediate,
     ReverseSubtract,
     MultiplyLong,
+    MultiplyAccumulateLong,
     DivideLong,
     CarryArithmetic,
     MultiplyExtended,
@@ -318,8 +319,10 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         ReverseSubtract
     } else if h == 0xe1f8 && x & 15 == 0 {
         MultiplyLong
-    } else if h == 0xe1f6 && x & 15 == 0 && (x >> 12) & 1 == 0 && (x >> 4) & 1 == 0 {
-        // d & 1 == 0 && s & 1 == 0 with d = x >> 12, s = (x >> 4) & 15.
+    } else if h == 0xe1fc && x & 15 == 0 {
+        MultiplyAccumulateLong
+    } else if h == 0xe1f6 && x & 15 == 0 && (x >> 4) & 1 == 0 {
+        // s & 1 == 0 with s = (x >> 4) & 15; x bit 12 (d's low bit) is signed.
         DivideLong
     } else if h == 0xe0b8 && matches!(x & 15, 0 | 2) {
         CarryArithmetic
