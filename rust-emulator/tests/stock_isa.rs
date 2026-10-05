@@ -313,3 +313,25 @@ fn register_repeat_with_a_zero_count_skips_its_block() {
     assert_eq!(c.pc, XIP + 6);
     assert_eq!(c.r[1], RAM);
 }
+
+#[test]
+fn register_shift_covers_both_left_forms_and_arithmetic_right() {
+    // Felucca 0.9-beta 0x02011b36 (a synth engine's DSP): e1c8 2253 =
+    // r2 = r5 >>> r2 (arithmetic). Quarkslab pi32v2: imm1619 0 and 1 lsl,
+    // 2 lsr, 3 asr.
+    let mut c = cpu(&[0xe1c8, 0x2253]);
+    c.r[5] = 0xffff_f000; // -4096
+    c.r[2] = 4;
+    c.step().unwrap();
+    assert_eq!(c.r[2], 0xffff_ff00); // -256
+    let mut c = cpu(&[0xe1c8, 0x2251]); // r2 = r5 << r2
+    c.r[5] = 3;
+    c.r[2] = 4;
+    c.step().unwrap();
+    assert_eq!(c.r[2], 48);
+    let mut c = cpu(&[0xe1c8, 0x2253]); // shifts past 31 keep the sign
+    c.r[5] = 0x8000_0000;
+    c.r[2] = 40;
+    c.step().unwrap();
+    assert_eq!(c.r[2], 0xffff_ffff);
+}
