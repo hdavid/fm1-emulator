@@ -4,6 +4,19 @@
 // RF transmission, reception,
 // LO frequency counting and serial-data DMA are not modeled. The PLL
 // comparator uses measured nominal thresholds for this FM-1.
+// Explicitly observed setup words in analog initialization and the stock
+// controller initializer at 0x02072326. Packet state and event registers are
+// deliberately excluded; a configuration latch does not simulate a radio.
+const BT_CONFIGURATION: &[u32] = &[
+    0x28000, 0x28008, 0x2800c, 0x28010, 0x28014, 0x28018, 0x28034, 0x20000, 0x2000c, 0x20018,
+    0x2002c, 0x20058, 0x2005c, 0x2007c, 0x20080, 0x20084, 0x200f0, 0x200f4, 0x20120, 0x20124,
+    0x20128, 0x2012c, 0x20130, 0x20134, 0x20138, 0x20150, 0x20154, 0x20158, 0x2015c, 0x20160,
+    0x20164, 0x20168, 0x2fc00, 0x2fc04, 0x2fc08, 0x2fc0c, 0x2fc10, 0x2fc14, 0x2fc18, 0x2fc1c,
+    0x2fc20, 0x2fc24, 0x2fc28, 0x2fc40, 0x2fc44, 0x2fc48, 0x2fc70, 0x2fc78, 0x2fc7c, 0x2fc80,
+    0x2fc84, 0x2fc88, 0x2fc98, 0x2fc9c, 0x2fca0, 0x2fcbc, 0x2fd40, 0x2fd80, 0x2fd84, 0x2fd88,
+    0x2fd8c, 0x2fd90, 0x2fd94, 0x2fd98, 0x2fd9c,
+];
+
 pub(crate) struct Wireless {
     registers: [u32; 26],
     radio_configuration: [u32; 2],
@@ -15,7 +28,7 @@ pub(crate) struct Wireless {
     sample_result: u32,
     filter_ticks: u32,
     filter_result: u8,
-    bt_configuration: [u32; 29],
+    bt_configuration: [u32; BT_CONFIGURATION.len()],
     bt_table: [u32; 128],
     bt_table_position: usize,
 }
@@ -32,7 +45,7 @@ impl Default for Wireless {
             sample_result: 0,
             filter_ticks: 0,
             filter_result: 0,
-            bt_configuration: [0; 29],
+            bt_configuration: [0; BT_CONFIGURATION.len()],
             bt_table: [0; 128],
             bt_table_position: 0,
         }
@@ -42,14 +55,7 @@ impl Wireless {
     // Vendor analog.c and the stock RF initialization routine. These are
     // configuration words; controller packet scheduling is still unsupported.
     fn bt_index(address: u32) -> Option<usize> {
-        [
-            0x20000, 0x2fc00, 0x2fc04, 0x2fc08, 0x2fc0c, 0x2fc10, 0x2fc14, 0x2fc18, 0x2fc1c,
-            0x2fc20, 0x2fc24, 0x2fc28, 0x2fc40, 0x2fc48, 0x2fc70, 0x2fc78, 0x2fc7c, 0x2fc88,
-            0x2fc98, 0x2fc9c, 0x2fca0, 0x2fd80, 0x2fd84, 0x2fd88, 0x2fd8c, 0x2fd90, 0x2fd94,
-            0x2fd98, 0x2fd9c,
-        ]
-        .iter()
-        .position(|a| *a == address)
+        BT_CONFIGURATION.iter().position(|a| *a == address)
     }
     pub(crate) fn advance(&mut self, ticks: u32) {
         self.filter_ticks = self.filter_ticks.saturating_sub(ticks);
@@ -391,11 +397,30 @@ mod tests {
         w.read(0x11978, 4).unwrap().unwrap()
     }
     #[test]
+    fn bluetooth_controller_keeps_dma_base_and_independent_channel_offsets() {
+        let mut w = Wireless::default();
+        // Stock initialization installs the base pointer, then packs per-channel
+        // relative offsets. Subsequent base reads must preserve the RAM address.
+        w.write(0x2fc44, 0x01c0a05c, 4).unwrap().unwrap();
+        let offsets = 0x0ee00ee0;
+        for addr in [0x20160, 0x2015c, 0x20130, 0x2012c] {
+            w.write(addr, offsets, 4).unwrap().unwrap();
+        }
+        w.write(0x20138, 0x14050770, 4).unwrap().unwrap();
+        w.write(0x20168, 0x14050770, 4).unwrap().unwrap();
+        assert_eq!(w.read(0x2fc44, 4).unwrap().unwrap(), 0x01c0a05c);
+        assert_eq!(w.read(0x20130, 4).unwrap().unwrap(), offsets);
+        assert_eq!(w.read(0x20138, 4).unwrap().unwrap(), 0x14050770);
+        assert!(w.read(0x2013c, 4).is_none());
+        assert!(w.write(0x2fc44, 0, 2).unwrap().is_err());
+        assert_eq!(w.read(0x2fc44, 4).unwrap().unwrap(), 0x01c0a05c);
+    }
+    #[test]
     fn bluetooth_rf_table_retains_every_word_and_checks_its_capacity() {
         let mut w = Wireless::default();
         w.write(0x2fc40, 0xfcfc, 4).unwrap().unwrap();
         assert_eq!(w.read(0x2fc40, 4).unwrap().unwrap(), 0xfcfc);
-        assert!(w.read(0x2fc44, 4).is_none());
+        assert!(w.read(0x2fc4c, 4).is_none());
         w.write(0x2fd98, 0, 4).unwrap().unwrap();
         for i in 0..128 {
             w.write(0x2fd9c, i ^ 0x13579bdf, 4).unwrap().unwrap();
