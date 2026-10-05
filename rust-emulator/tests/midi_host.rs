@@ -100,3 +100,28 @@ fn an_editor_sysex_request_gets_its_reply_back_over_usb() {
     assert_eq!(info.last(), Some(&0xF7));
     assert!(info.len() > 20, "INFO carries a version and engine names");
 }
+
+#[test]
+#[ignore = "requires MIDI_FWSC; run in release mode with --ignored"]
+fn sysex_bytes_sent_as_single_byte_packets_are_kept() {
+    // macOS sends some bytes inside a long SysEx as CIN 0xF single bytes
+    // (its packet lists split); the request must still be assembled.
+    let mut cpu = boot();
+    let mut decoder = Decoder::default();
+    received(&mut cpu, &mut decoder);
+    cpu.bus.usb_midi_send(&[
+        [0x04, 0xF0, 0x7D, 0x46],
+        [0x0F, 0x4C, 0, 0],
+        [0x0F, 0x01, 0, 0],
+        [0x05, 0xF7, 0, 0],
+    ]);
+    let mut replies = Vec::new();
+    for _ in 0..40 {
+        cpu.run_steps(1_000_000).unwrap();
+        replies.extend(received(&mut cpu, &mut decoder));
+        if replies.iter().any(|m| m.starts_with(&[0xF0, 0x7D, 0x46, 0x4C, 1])) {
+            return;
+        }
+    }
+    panic!("no INFO reply to a request with CIN 0xF bytes; got {replies:02x?}");
+}
