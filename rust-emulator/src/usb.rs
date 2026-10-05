@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// USB0 register bridge and a small USB host for the CDC console.
-use crate::RAM;
+// USB0 register bridge and a small USB host for the CDC console and, when
+// enabled, USB-MIDI.
+use crate::{usb_midi::Packet, RAM};
 use std::collections::VecDeque;
+
+/// Packets kept from the device when nobody drains them (oldest dropped).
+const MIDI_RECEIVED_MAX: usize = 4096;
 #[derive(Default)]
 pub struct Usb {
     regs: [u32; 16],
@@ -23,6 +27,35 @@ pub struct Usb {
     pub serial: VecDeque<u8>,
     pub setups: u64,
     pub packets: u64,
+    midi: MidiHost,
+    /// USB-MIDI packets the device sent on its MIDI IN endpoint.
+    pub midi_received: VecDeque<Packet>,
+}
+/// The optional MIDI side of the host model (off unless enabled, so the CDC
+/// enumeration every existing check was measured with stays byte for byte).
+#[derive(Default)]
+struct MidiHost {
+    enabled: bool,
+    /// Device endpoints: bulk OUT (host to device) and bulk IN.
+    out_ep: Option<usize>,
+    in_ep: Option<usize>,
+    product_index: u8,
+    product: Option<String>,
+    to_device: VecDeque<Packet>,
+}
+/// A string descriptor (UTF-16LE after the 2-byte header) as text.
+fn string_descriptor(d: &[u8]) -> Option<String> {
+    let n = (*d.first()? as usize).min(d.len());
+    if n < 2 || d[1] != 3 {
+        return None;
+    }
+    let units: Vec<u16> = d[2..n]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
+        .collect();
+    Some(String::from_utf16_lossy(&units))
 }
 
 #[cfg(test)]
@@ -107,6 +140,74 @@ mod tests {
     }
 
     #[test]
+    fn midi_host_finds_the_streaming_endpoints_and_moves_packets_both_ways() {
+        let mut usb = Usb::default();
+        usb.enable_midi_host();
+        usb.io = 0x40;
+        usb.regs[0] = 4;
+        usb.attached = true;
+        usb.phase = 2;
+        // The configuration of the CDC test above: MIDI streaming OUT 1 and,
+        // here, a MIDI IN 0x81 next to the CDC OUT 2 / IN 3.
+        usb.response = vec![
+            9, 4, 1, 0, 2, 1, 3, 0, 0, 7, 5, 1, 2, 64, 0, 0, 7, 5, 0x81, 2, 64, 0, 0, 9, 4, 2, 0,
+            0, 2, 2, 1, 0, 9, 4, 3, 0, 2, 10, 0, 0, 0, 7, 5, 2, 2, 32, 0, 0, 7, 5, 0x83, 2, 64, 0,
+            0,
+        ];
+        usb.complete();
+        assert_eq!((usb.midi.out_ep, usb.midi.in_ep), (Some(1), Some(1)));
+        assert_eq!(usb.cdc_out, Some((2, 32)));
+        assert!(
+            !usb.midi_ready(),
+            "the product string request is still to come"
+        );
+        usb.phase = 6;
+        assert!(usb.midi_ready());
+        let mut ram = vec![0; 256];
+        usb.regs[8] = RAM + 128; // EP1 RX DMA.
+        usb.endpoints[1][3] = 0xff;
+        let packets: Vec<_> = (0..20u8).map(|i| [0x09, 0x90, i, 100]).collect();
+        usb.midi_send(&packets);
+        usb.advance(1, &mut ram).unwrap();
+        assert_eq!(&ram[128..132], &[0x09, 0x90, 0, 100]);
+        assert_eq!((usb.endpoints[1][4] & 1, usb.endpoints[1][6]), (1, 64));
+        assert_eq!(usb.sie[4], 1 << 1);
+        usb.advance(1, &mut ram).unwrap();
+        assert_eq!(usb.midi_pending(), 4, "a held packet waits for the guest");
+        usb.endpoints[1][4] = 0; // Guest clears RxPktRdy.
+        usb.advance(1, &mut ram).unwrap();
+        assert_eq!(&ram[128..132], &[0x09, 0x90, 16, 100]);
+        assert_eq!((usb.midi_pending(), usb.endpoints[1][6]), (0, 16));
+        // Device to host: the guest arms its MIDI IN endpoint.
+        usb.regs[7] = RAM + 192; // EP1 TX DMA.
+        usb.regs[3] = 8;
+        ram[192..200].copy_from_slice(&[0x0b, 0xb0, 7, 64, 0x0f, 0xf8, 0, 0]);
+        usb.index = 1;
+        usb.write_inner(0x11804, 17 << 8 | 1, &mut ram).unwrap();
+        assert_eq!(
+            usb.midi_received.drain(..).collect::<Vec<_>>(),
+            [[0x0b, 0xb0, 7, 64], [0x0f, 0xf8, 0, 0]]
+        );
+    }
+
+    #[test]
+    fn a_device_without_the_console_skips_the_line_state_for_the_midi_host() {
+        let mut usb = Usb::default();
+        assert!(usb.setup(4).is_err(), "the CDC host needs its interface");
+        usb.enable_midi_host();
+        assert_eq!(usb.setup(4), Ok(None));
+        assert_eq!(usb.setup(5), Ok(None), "no product string index");
+        usb.midi.product_index = 2;
+        assert_eq!(usb.setup(5), Ok(Some([0x80, 6, 2, 3, 9, 4, 255, 0])));
+        assert_eq!(
+            string_descriptor(&[
+                16, 3, b'F', 0, b'e', 0, b'l', 0, b'u', 0, b'c', 0, b'c', 0, b'a', 0
+            ]),
+            Some("Felucca".into())
+        );
+    }
+
+    #[test]
     fn host_input_is_bounded_and_failed_enqueue_keeps_existing_bytes() {
         let (mut usb, mut ram) = configured();
         assert!(usb.receive_serial(&vec![42; 4096]));
@@ -149,35 +250,128 @@ impl Usb {
         ram.get_mut(start..start + n).ok_or("USB DMA exceeds SRAM")
     }
     fn complete(&mut self) {
-        if self.phase == 2 {
-            let mut i = 0;
-            let mut cdc_data = false;
-            while i + 2 <= self.response.len() {
-                let n = self.response[i] as usize;
-                if n < 2 || i + n > self.response.len() {
-                    break;
-                }
-                let d = &self.response[i..i + n];
-                if d[1] == 4 && n >= 9 {
-                    if d[5] == 2 {
-                        self.cdc_interface = Some(d[2]);
-                    }
-                    cdc_data = d[5] == 10;
-                }
-                if d[1] == 5 && n >= 7 && cdc_data && d[3] & 3 == 2 {
-                    let endpoint = (d[2] & 15) as usize;
-                    if d[2] & 128 != 0 {
-                        self.cdc_endpoint = Some(endpoint);
-                    } else {
-                        self.cdc_out = Some((endpoint, u16::from_le_bytes([d[4], d[5]]) as usize));
-                    }
-                }
-                i += n;
-            }
+        match self.phase {
+            0 if self.response.len() >= 18 => self.midi.product_index = self.response[15],
+            2 => self.parse_configuration(),
+            5 => self.midi.product = string_descriptor(&self.response),
+            _ => {}
         }
         self.phase += 1;
         self.waiting = false;
         self.deadline = self.ticks + 24000;
+    }
+    /// The CDC data endpoints and the MIDI streaming endpoints (interface
+    /// class 1 subclass 3, bulk) from the configuration descriptor.
+    fn parse_configuration(&mut self) {
+        let mut i = 0;
+        let (mut cdc_data, mut midi_streaming) = (false, false);
+        while i + 2 <= self.response.len() {
+            let n = self.response[i] as usize;
+            if n < 2 || i + n > self.response.len() {
+                break;
+            }
+            let d = &self.response[i..i + n];
+            if d[1] == 4 && n >= 9 {
+                if d[5] == 2 {
+                    self.cdc_interface = Some(d[2]);
+                }
+                cdc_data = d[5] == 10;
+                midi_streaming = d[5] == 1 && d[6] == 3;
+            }
+            if d[1] == 5 && n >= 7 && d[3] & 3 == 2 {
+                let (endpoint, input) = ((d[2] & 15) as usize, d[2] & 128 != 0);
+                if cdc_data && input {
+                    self.cdc_endpoint = Some(endpoint);
+                } else if cdc_data {
+                    self.cdc_out = Some((endpoint, u16::from_le_bytes([d[4], d[5]]) as usize));
+                }
+                if midi_streaming && (1..=3).contains(&endpoint) {
+                    *if input {
+                        &mut self.midi.in_ep
+                    } else {
+                        &mut self.midi.out_ep
+                    } = Some(endpoint);
+                }
+            }
+            i += n;
+        }
+    }
+    /// Requests the host makes: 5 without a MIDI host (up to the CDC line
+    /// state), 6 with one (then the product string).
+    fn last_phase(&self) -> usize {
+        if self.midi.enabled {
+            6
+        } else {
+            5
+        }
+    }
+    /// The SETUP packet of `phase`, or None for a request this device does
+    /// not need (only skipped by the MIDI host: no CDC, or no product string).
+    fn setup(&self, phase: usize) -> Result<Option<[u8; 8]>, &'static str> {
+        Ok(Some(match phase {
+            0 => [0x80, 6, 0, 1, 0, 0, 18, 0],
+            1 => [0, 5, 1, 0, 0, 0, 0, 0],
+            2 => [0x80, 6, 0, 2, 0, 0, 255, 0],
+            3 => [0, 9, 1, 0, 0, 0, 0, 0],
+            4 => match self.cdc_interface {
+                Some(interface) => [0x21, 0x22, 1, 0, interface, 0, 0, 0],
+                None if self.midi.enabled => return Ok(None),
+                None => return Err("USB configuration has no CDC interface"),
+            },
+            _ if self.midi.product_index == 0 => return Ok(None),
+            _ => [0x80, 6, self.midi.product_index, 3, 0x09, 0x04, 255, 0],
+        }))
+    }
+    /// Turn the host into a USB-MIDI host as well: after the CDC requests it
+    /// reads the product string and moves packets on the MIDI endpoints.
+    pub fn enable_midi_host(&mut self) {
+        self.midi.enabled = true;
+    }
+    /// Enumerated, configured, and the device has MIDI endpoints.
+    pub fn midi_ready(&self) -> bool {
+        self.midi.enabled && self.phase >= self.last_phase() && self.midi.out_ep.is_some()
+    }
+    /// The device's product string (iProduct), once the MIDI host read it.
+    pub fn product(&self) -> Option<&str> {
+        self.midi.product.as_deref()
+    }
+    /// Queue packets for the device's MIDI OUT endpoint (host to device).
+    pub fn midi_send(&mut self, packets: &[Packet]) {
+        self.midi.to_device.extend(packets.iter().copied());
+    }
+    /// Packets queued for the device and not yet delivered.
+    pub fn midi_pending(&self) -> usize {
+        self.midi.to_device.len()
+    }
+    /// One bulk OUT packet (at most 64 bytes = 16 events) into the
+    /// endpoint's RX buffer as the controller's DMA does, then RxPktRdy, the
+    /// count and the endpoint's RX interrupt flag. A held packet, a disabled
+    /// or stalled endpoint waits (NAK), as for the CDC console.
+    fn deliver_midi(&mut self, ram: &mut [u8]) -> Result<(), &'static str> {
+        let Some(ep) = self.midi.out_ep else {
+            return Ok(());
+        };
+        if self.regs[0] & (1 << (19 + ep)) != 0
+            || self.endpoints[ep][3] == 0
+            || self.endpoints[ep][4] & 0x21 != 0
+        {
+            return Ok(());
+        }
+        let n = self.midi.to_device.len().min(16);
+        let buffer = Self::dma(ram, self.regs[8 + (ep - 1) * 2], n * 4)?;
+        for (slot, packet) in buffer
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(self.midi.to_device.drain(..n))
+        {
+            slot.copy_from_slice(&packet);
+        }
+        self.endpoints[ep][4] |= 1;
+        self.endpoints[ep][6] = (n * 4) as u8;
+        self.endpoints[ep][7] = 0;
+        self.sie[4] |= 1 << ep;
+        Ok(())
     }
     fn send(&mut self, ep: usize, ram: &mut [u8]) -> Result<(), &'static str> {
         let n = self.regs[2 + ep] as usize;
@@ -195,6 +389,13 @@ impl Usb {
         } else if Some(ep) == self.cdc_endpoint {
             self.serial.extend(bytes.iter().copied());
             self.packets += 1;
+        } else if self.midi.enabled && Some(ep) == self.midi.in_ep {
+            for chunk in bytes.as_chunks::<4>().0 {
+                if self.midi_received.len() == MIDI_RECEIVED_MAX {
+                    self.midi_received.pop_front();
+                }
+                self.midi_received.push_back(*chunk);
+            }
         }
         self.sie[2] |= 1 << ep;
         Ok(())
@@ -261,6 +462,11 @@ impl Usb {
                     } else if r == 17 {
                         if self.index == 0 {
                             if data & 0x20 != 0 {
+                                if self.waiting && self.phase == 5 && self.midi.enabled {
+                                    // No product string: an optional request.
+                                    self.complete();
+                                    return Ok(());
+                                }
                                 return Err("guest stalled host USB control request");
                             }
                             if data & 0x40 != 0 {
@@ -318,25 +524,20 @@ impl Usb {
         if self.phase >= 5 && !self.input.is_empty() {
             self.receive(ram)?;
         }
-        if self.waiting || self.ticks < self.deadline || self.phase >= 5 {
+        if self.midi_ready() && !self.midi.to_device.is_empty() {
+            self.deliver_midi(ram)?;
+        }
+        if self.waiting || self.ticks < self.deadline || self.phase >= self.last_phase() {
             return Ok(());
         }
-        let setup = match self.phase {
-            0 => [0x80, 6, 0, 1, 0, 0, 18, 0],
-            1 => [0, 5, 1, 0, 0, 0, 0, 0],
-            2 => [0x80, 6, 0, 2, 0, 0, 255, 0],
-            3 => [0, 9, 1, 0, 0, 0, 0, 0],
-            _ => [
-                0x21,
-                0x22,
-                1,
-                0,
-                self.cdc_interface
-                    .ok_or("USB configuration has no CDC interface")?,
-                0,
-                0,
-                0,
-            ],
+        let setup = loop {
+            match self.setup(self.phase)? {
+                Some(setup) => break setup,
+                None => self.phase += 1,
+            }
+            if self.phase >= self.last_phase() {
+                return Ok(());
+            }
         };
         Self::dma(ram, self.regs[6], 8)?.copy_from_slice(&setup);
         self.response.clear();
