@@ -139,6 +139,25 @@ mod lock_tests {
     }
 
     #[test]
+    fn subtract_immediate_sets_the_carry_for_a_following_subc() {
+        // r1 = r12 - 0x0; r0 = 0; r0 = r13 - r0 - !c: the compiler's signed 64-bit "x > 0"
+        // (SLOOP clock_sync.c sync_follow); a stale borrow must not leak into the high word.
+        let program = vec![0xf1, 0xe0, 0x00, 0xc0, 0x40, 0x20, 0xb8, 0xe0, 0xd2, 0x00];
+        for (low, high) in [(0xf00u32, 0u32), (0, 0)] {
+            let mut c = Cpu::new(Bus::new(program.clone()).unwrap(), crate::XIP);
+            c.set_carry(false);
+            c.r[12] = low;
+            c.r[13] = high;
+            for _ in 0..3 {
+                c.step().unwrap();
+            }
+            assert_eq!(c.r[1], low);
+            assert_eq!(c.r[0], 0, "the high word: no borrow from subtracting 0");
+            assert!(c.carry());
+        }
+    }
+
+    #[test]
     fn paused_secondary_retains_context_until_resume() {
         let mut c = Cpu::new(Bus::new(vec![0; 32]).unwrap(), crate::XIP);
         let entry = crate::RAM + 512;
@@ -342,6 +361,11 @@ impl Cpu {
     /// PSR bit 1 is the carry flag (Quarkslab pi32v2 PSR: V, C, Z, N).
     pub(crate) fn set_carry(&mut self, carry: bool) {
         self.sr[5] = (self.sr[5] & !2) | (u32::from(carry) << 1);
+    }
+
+    /// PSR N (bit 3), Z (bit 2) and V (bit 0), C kept.
+    pub(crate) fn set_nzv(&mut self, n: bool, z: bool, v: bool) {
+        self.sr[5] = (self.sr[5] & !13) | (u32::from(n) << 3) | (u32::from(z) << 2) | u32::from(v);
     }
 
     pub(crate) fn carry(&self) -> bool {
@@ -700,6 +724,7 @@ impl Cpu {
         self.bus
             .advance_audio(OSC_TICKS_PER_INSTRUCTION)
             .map_err(|fault| Fault::Access { pc, fault })?;
+        self.bus.advance_uart1(OSC_TICKS_PER_INSTRUCTION);
         self.bus.spi2.advance(OSC_TICKS_PER_INSTRUCTION);
         self.bus.lcd.advance(OSC_TICKS_PER_INSTRUCTION);
         Ok(())

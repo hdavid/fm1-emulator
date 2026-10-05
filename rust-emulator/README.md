@@ -8,6 +8,16 @@ The [full Felucca boot investigation](FELUCCA.md) records the verified firmware
 inputs, resolved startup failures, decoder fixes, full boot and note checks. It also
 documents the bounded `diagnose` runner for symbol and peripheral reports.
 
+Timing: `examples/latency.rs` measures, in exact guest time, the input-to-audio
+latency of a Felucca-family package (a key, a USB-MIDI or TRS note-on to the
+first DMA frame out of silence) and, for SLOOP builds with MIDI clock, the
+phase of the step hits against an injected 24 PPQN clock (USB or TRS, jitter,
+tempo ramps) and of the clock the firmware sends. The TRS MIDI IN line (UART1
+RX DMA at 31250 baud: `Bus::uart_midi_send`), an onset probe on the audio DMA
+(`audio.probe`) and send times of USB-MIDI IN packets
+(`usb.midi_received_ticks`) support it. Interrupts do not nest in the model: a
+timer interrupt waits for the audio interrupt to return.
+
 On a fresh checkout, fetch the locked dependency metadata before offline tests:
 
 ```sh

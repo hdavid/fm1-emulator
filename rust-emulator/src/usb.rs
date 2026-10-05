@@ -35,6 +35,10 @@ pub struct Usb {
     audio: AudioHost,
     /// SRAM ranges the host wrote since the last take (code cache).
     dma_writes: Vec<(u32, usize)>,
+    /// When each packet of `midi_received` was sent (oscillator ticks at the
+    /// endpoint write; the host's USB frame scheduling is not modelled). A
+    /// reader that drains `midi_received` drains this too, or clears it.
+    pub midi_received_ticks: VecDeque<u64>,
 }
 /// The optional MIDI side of the host model (off unless enabled, so the CDC
 /// enumeration every baseline was measured with stays byte for byte).
@@ -276,6 +280,10 @@ impl Usb {
                     self.midi_received.pop_front();
                 }
                 self.midi_received.push_back(*chunk);
+                if self.midi_received_ticks.len() >= MIDI_RECEIVED_MAX {
+                    self.midi_received_ticks.pop_front();
+                }
+                self.midi_received_ticks.push_back(self.ticks);
             }
         }
         self.sie[2] |= 1 << ep;

@@ -463,6 +463,7 @@ impl Bus {
             .map_err(|reason| Self::fault(0x13e08, 4, "watchdog", reason))?;
         self.advance_usb(ticks)?;
         self.advance_audio(ticks)?;
+        self.advance_uart1(ticks);
         self.spi2.advance(ticks);
         self.lcd.advance(ticks);
         Ok(())
@@ -476,6 +477,7 @@ impl Bus {
             self.system.ticks_to_event(),
             self.usb.ticks_to_event(),
             self.audio.ticks_to_event(),
+            self.uart1.ticks_to_event(),
             self.spi2.ticks_to_event(),
             self.lcd.ticks_to_event(),
         ]
@@ -675,6 +677,23 @@ impl Bus {
         self.next_event = self.next_event.min(self.now + 1);
     }
 
+    /// MIDI IN on the TRS jack: bytes onto UART1's RX line at 31250 baud.
+    pub fn uart_midi_send(&mut self, bytes: &[u8]) {
+        self.uart1.send(bytes);
+        self.next_event = self.next_event.min(self.now + 1);
+    }
+
+    pub fn advance_uart1(&mut self, ticks: u32) {
+        if let Some(offset) = self.uart1.advance(ticks, &mut self.ram, RAM) {
+            self.code.invalidate_ram(offset, 1);
+        }
+    }
+
+    /// Oscillator ticks since reset (guest time, 24 MHz).
+    pub fn now(&self) -> u64 {
+        self.now
+    }
+
     pub fn screen_visible(&self) -> bool {
         self.lcd.display_on
             && !self.lcd.sleeping
@@ -684,7 +703,7 @@ impl Bus {
 
     pub fn advance_audio(&mut self, ticks: u32) -> Result<(), AccessFault> {
         self.audio
-            .advance(ticks, &self.ram)
+            .advance(ticks, &self.ram, self.synced)
             .map_err(|reason| Self::fault(0x12e1c, 4, "audio DMA", reason))
     }
 

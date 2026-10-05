@@ -464,7 +464,12 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
             name = "reverse_bytes";
         }
         Op::SubtractPackedImmediate => {
-            cpu.r[n] = cpu.r[d].wrapping_sub(packed(x));
+            // The compiler's signed 64-bit compare with a constant subtracts the low word with
+            // this (`r1 = r12 - 0x0`), then the high word with subc: it sets the carry out
+            // (no borrow) like the register subtract forms.
+            let (lhs, rhs) = (cpu.r[d], packed(x));
+            cpu.r[n] = lhs.wrapping_sub(rhs);
+            cpu.set_carry(lhs >= rhs);
             name = "subtract_packed_immediate";
         }
         Op::ReverseSubtract => {
@@ -522,19 +527,27 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
             name = "divide_long";
         }
         Op::CarryArithmetic => {
-            // addc/subc: carry in from PSR.C, carry out to PSR.C.
+            // addc/subc: carry in from PSR.C, carry out to PSR.C; N, Z and V
+            // of the 32-bit result too: the compiler's signed 64-bit compare
+            // subtracts the low words, subc's the high words and tests
+            // N != V (sextra of PSR bits 3 and 0 right after the subc).
             let (lhs, rhs) = (cpu.r[s] as u64, cpu.r[c] as u64);
-            if x & 2 == 0 {
+            let (a, b) = (cpu.r[s], cpu.r[c]);
+            let (result, overflow) = if x & 2 == 0 {
                 let sum = lhs + rhs + u64::from(cpu.carry());
                 cpu.r[d] = sum as u32;
                 cpu.set_carry(sum >> 32 != 0);
                 name = "add_with_carry";
+                (sum as u32, !(a ^ b) & (a ^ sum as u32))
             } else {
                 let borrow = u64::from(!cpu.carry());
-                cpu.r[d] = lhs.wrapping_sub(rhs + borrow) as u32;
+                let diff = lhs.wrapping_sub(rhs + borrow) as u32;
+                cpu.r[d] = diff;
                 cpu.set_carry(lhs >= rhs + borrow);
                 name = "subtract_with_carry";
-            }
+                (diff, (a ^ b) & (a ^ diff))
+            };
+            cpu.set_nzv(result >> 31 != 0, result == 0, overflow >> 31 != 0);
         }
         Op::MultiplyExtended => {
             cpu.r[d] = cpu.r[s].wrapping_mul(cpu.r[c]);
