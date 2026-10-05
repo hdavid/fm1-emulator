@@ -2,6 +2,7 @@
 // Static scan for pi32v2 instructions the interpreter does not decode.
 //
 //   op_scan FIRMWARE LISTING [--base HEX] [--tsv FILE] [--min-run N]
+//           [--check-against ELF] [--classes FILE]
 //
 // LISTING is the JieLi objdump -d output for FIRMWARE (scripts/op-scan.sh
 // makes it): of the ELF itself (addresses as listed, --base 0), or of the
@@ -10,7 +11,10 @@
 // interpreter's decoder (`fm1_emu::describe`) and executed once on a scratch
 // CPU; the report lists, grouped by encoding, the ones it decodes as
 // Unsupported, rejects when executing, gives another length than objdump, or
-// that a conditional block would skip with another length.
+// that a conditional block would skip with another length; and, the other
+// way round, code objdump itself cannot decode (vendor-unknown) or decodes
+// without a meaning (`??`, vendor-ambiguous) where the interpreter executes
+// something anyway.
 //
 // Code or data: for an ELF, an instruction is code when it lies inside an
 // STT_FUNC symbol's range. Without symbols (.fwsc, raw images) it is
@@ -18,8 +22,17 @@
 // call targets, tbb/tbh tables, and pointers to function prologues found in
 // the image or in 32-bit immediates), "clean" when it is not reachable but
 // lies in a run of at least --min-run instructions objdump decodes with no
-// <unknown>, and "data" otherwise.
+// <unknown>, and "data" otherwise. Code startup copies to RAM is found by
+// booting the image (--boot-steps) and matching RAM against it
+// (ram_copy.rs); branches and pointers into it are followed. Measured with
+// --classes against the ELFs of four SLOOP builds (their own listings):
+// every reachable instruction is an ELF instruction, reachable covers 99.5%
+// of them, clean runs are 0.7% code and data 0%. --classes FILE writes every
+// decoded instruction's address and class.
+mod ram_copy;
+
 use fm1_emu::{bus::Bus, cpu::Cpu, cpu::Fault, describe, firmware::Firmware, RAM, XIP};
+use ram_copy::Copies;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::{env, fmt::Write as _, fs, path::Path, process::ExitCode};
 
@@ -37,7 +50,7 @@ impl Class {
         match self {
             Class::Function => "code (in STT_FUNC)",
             Class::Reachable => "code (reachable)",
-            Class::Clean => "likely code (clean run, unreached)",
+            Class::Clean => "unreached clean run (mostly data)",
             Class::Outside => "outside any STT_FUNC (data in .text?)",
             Class::Data => "likely data",
         }
@@ -226,9 +239,11 @@ fn elf_functions(data: &[u8]) -> Vec<(u32, u32, String)> {
 fn annotated_target(text: &str, base: u32) -> Option<u32> {
     let end = text.rfind(" >")?;
     let start = text[..end].rfind(": ")? + 2;
-    u32::from_str_radix(text[start..end].trim(), 16)
+    // A target below the listing's start prints as 64-bit two's complement
+    // (`ffffffffffc61b3e`): flash code calling RAM code in an image.
+    u64::from_str_radix(text[start..end].trim(), 16)
         .ok()
-        .map(|t| t.wrapping_add(base))
+        .map(|t| (t as u32).wrapping_add(base))
 }
 
 fn ends_flow(text: &str) -> bool {
@@ -247,12 +262,33 @@ fn is_prologue(text: &str) -> bool {
 }
 
 /// Instruction lines by address.
+/// The halfwords of the image at `address` (up to three).
+fn image_words(image: &[u8], address: u32) -> Vec<u16> {
+    let start = address.wrapping_sub(XIP) as usize;
+    image
+        .get(start..image.len().min(start + 6))
+        .unwrap_or(&[])
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
+        .collect()
+}
+
+/// Bytes the interpreter advances over the instruction at `address`.
+fn interpreted_length(image: &[u8], address: u32) -> Option<u32> {
+    describe(&image_words(image, address)).length
+}
+
+/// Listing lines by address: instructions, and the halfwords objdump could
+/// not decode (a flow that runs into one is followed by the interpreter's
+/// length).
 fn instruction_index(listing: &Listing) -> HashMap<u32, usize> {
     listing
         .lines
         .iter()
         .enumerate()
-        .filter(|(_, l)| l.kind == Kind::Instruction)
+        .filter(|(_, l)| matches!(l.kind, Kind::Instruction | Kind::Unknown))
         .map(|(i, l)| (l.address, i))
         .collect()
 }
@@ -265,9 +301,12 @@ fn roots(
     index: &HashMap<u32, usize>,
     image: &[u8],
     entry: u32,
+    copies: &Copies,
 ) -> (Vec<u32>, Vec<u32>) {
     let (mut strong, mut weak) = (vec![entry], Vec::new());
     let mut pointer = |value: u32| {
+        // A pointer to RAM code points at its copy in the image.
+        let value = copies.to_image(value).unwrap_or(value);
         let Some(&i) = index.get(&value) else { return };
         let after_end = i > 0 && {
             let previous = &listing.lines[i - 1];
@@ -339,6 +378,7 @@ fn closure(
     index: &HashMap<u32, usize>,
     image: &[u8],
     base: u32,
+    copies: &Copies,
     starts: &[u32],
     seen: &BTreeSet<usize>,
 ) -> (BTreeSet<usize>, bool) {
@@ -369,7 +409,7 @@ fn closure(
             }
             if text.contains("goto") || text.starts_with("call") {
                 if let Some(t) = annotated_target(text, base) {
-                    work.push_back(t);
+                    work.push_back(copies.branch(line.address, t));
                 }
             }
             if text.starts_with("tbb ") || text.starts_with("tbh ") {
@@ -378,7 +418,19 @@ fn closure(
             if !line.nested && ends_flow(text) {
                 break;
             }
-            let next = line.address + line.bytes.len() as u32;
+            let length = if line.kind == Kind::Unknown {
+                // objdump cannot decode it (stock RAM code has FPU bundles,
+                // f53f, it does not know): follow the interpreter's length
+                // if it has one; the report flags it as vendor-unknown.
+                suspicious = true;
+                match interpreted_length(image, line.address) {
+                    Some(length) => length,
+                    None => break,
+                }
+            } else {
+                line.bytes.len() as u32
+            };
+            let next = line.address + length;
             match index.get(&next) {
                 Some(&n) => i = n,
                 None => {
@@ -393,12 +445,26 @@ fn closure(
 
 /// Recursive descent: everything reached from the strong roots, plus each
 /// weak root's own closure when that does not look like data.
-fn reachable(listing: &Listing, image: &[u8], base: u32, entry: u32) -> BTreeSet<usize> {
+fn reachable(
+    listing: &Listing,
+    image: &[u8],
+    base: u32,
+    entry: u32,
+    copies: &Copies,
+) -> BTreeSet<usize> {
     let index = instruction_index(listing);
-    let (strong, weak) = roots(listing, &index, image, entry);
-    let (mut seen, _) = closure(listing, &index, image, base, &strong, &BTreeSet::new());
+    let (strong, weak) = roots(listing, &index, image, entry, copies);
+    let (mut seen, _) = closure(
+        listing,
+        &index,
+        image,
+        base,
+        copies,
+        &strong,
+        &BTreeSet::new(),
+    );
     for root in weak {
-        let (reached, suspicious) = closure(listing, &index, image, base, &[root], &seen);
+        let (reached, suspicious) = closure(listing, &index, image, base, copies, &[root], &seen);
         if !suspicious {
             seen.extend(reached);
         }
@@ -493,11 +559,19 @@ fn check_against(
     elf: &str,
     listing: &Listing,
     class_of: &dyn Fn(usize, u32) -> Class,
+    copies: &Copies,
 ) -> Result<(), String> {
-    let functions = elf_functions(&fs::read(elf).map_err(|e| e.to_string())?);
+    let mut functions = elf_functions(&fs::read(elf).map_err(|e| e.to_string())?);
     if functions.is_empty() {
         return Err("no STT_FUNC symbols".into());
     }
+    // RAM functions, where the image (and so the listing) holds them.
+    for f in &mut functions {
+        if let Some(lma) = copies.to_image(f.0) {
+            *f = (lma, lma + (f.1 - f.0), f.2.clone());
+        }
+    }
+    functions.sort();
     let mut table: BTreeMap<Class, (usize, usize)> = BTreeMap::new();
     let mut in_functions = 0;
     let mut stray: Vec<(u32, u32, usize)> = Vec::new();
@@ -566,6 +640,8 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut positional = Vec::new();
     let (mut base, mut tsv, mut min_run, mut check) = (0u32, None, 32usize, None);
+    let mut classes_path: Option<String> = None;
+    let mut boot_steps = ram_copy::BOOT_STEPS;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -578,11 +654,13 @@ fn main() -> ExitCode {
             "--tsv" => tsv = it.next().cloned(),
             "--min-run" => min_run = it.next().and_then(|v| v.parse().ok()).unwrap_or(32),
             "--check-against" => check = it.next().cloned(),
+            "--classes" => classes_path = it.next().cloned(),
+            "--boot-steps" => boot_steps = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             _ => positional.push(a.clone()),
         }
     }
     if positional.len() != 2 {
-        eprintln!("usage: op_scan FIRMWARE LISTING [--base HEX] [--tsv FILE] [--min-run N] [--check-against ELF]");
+        eprintln!("usage: op_scan FIRMWARE LISTING [--base HEX] [--tsv FILE] [--min-run N] [--check-against ELF] [--classes FILE] [--boot-steps N]");
         return ExitCode::FAILURE;
     }
     let firmware_path = Path::new(&positional[0]);
@@ -609,10 +687,22 @@ fn main() -> ExitCode {
     };
     let functions = elf_functions(&raw);
     let by_symbols = !functions.is_empty();
+    // RAM code of a symbol-less image (an ELF lists it at its RAM addresses).
+    let copies = if by_symbols || boot_steps == 0 {
+        Copies::default()
+    } else {
+        match Copies::find(&firmware, boot_steps) {
+            Ok(copies) => copies,
+            Err(e) => {
+                eprintln!("op_scan: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    };
     let reach = if by_symbols {
         BTreeSet::new()
     } else {
-        reachable(&listing, &firmware.image, base, firmware.entry)
+        reachable(&listing, &firmware.image, base, firmware.entry, &copies)
     };
     let clean = if by_symbols {
         BTreeSet::new()
@@ -639,6 +729,8 @@ fn main() -> ExitCode {
         let k = functions.partition_point(|f| f.0 <= address);
         if k > 0 && address < functions[k - 1].1 {
             functions[k - 1].2.clone()
+        } else if let Some(ram) = copies.to_ram(address) {
+            format!("{}, runs at 0x{ram:08x}", listing.labels[label])
         } else {
             listing.labels[label].clone()
         }
@@ -648,12 +740,54 @@ fn main() -> ExitCode {
     let mut totals: BTreeMap<Class, usize> = BTreeMap::new();
     let mut groups: BTreeMap<(Class, &'static str, String), Group> = BTreeMap::new();
     let mut detail = String::new();
+    let mut classes = String::new();
     for (i, line) in listing.lines.iter().enumerate() {
+        let class = class_of(i, line.address);
+        let in_code = matches!(class, Class::Function | Class::Reachable);
+        if line.kind == Kind::Unknown && in_code {
+            // objdump cannot decode a halfword inside code: data in a
+            // function, or a form the vendor tool does not know either (what
+            // the interpreter does there is not backed by objdump).
+            let words = if by_symbols {
+                vec![u16::from_le_bytes([line.bytes[0], line.bytes[1]])]
+            } else {
+                image_words(&firmware.image, line.address)
+            };
+            let d = describe(&words);
+            let hex: Vec<String> = words.iter().map(|w| format!("{w:04x}")).collect();
+            let group = groups
+                .entry((class, "vendor-unknown", format!("{:04x}", words[0])))
+                .or_default();
+            group.count += 1;
+            group.words.insert(words[0]);
+            if group.examples.len() < 3 {
+                group.examples.push(format!(
+                    "0x{:08x} {} ({}; emu {} len {:?})",
+                    line.address,
+                    hex.join(" "),
+                    function_name(line.address, line.label),
+                    d.form,
+                    d.length
+                ));
+            }
+            let _ = writeln!(
+                detail,
+                "{}\t{:08x}\tvendor-unknown\t{}\t{}\t{}\t{:?}\t-\t{}",
+                class.name(),
+                line.address,
+                hex.join(" "),
+                line.text,
+                d.form,
+                d.length,
+                function_name(line.address, line.label)
+            );
+            continue;
+        }
         if line.kind != Kind::Instruction {
             continue;
         }
-        let class = class_of(i, line.address);
         *totals.entry(class).or_default() += 1;
+        let _ = writeln!(classes, "{:08x}\t{}", line.address, class.name());
         let words: Vec<u16> = line
             .bytes
             .as_chunks::<2>()
@@ -678,6 +812,12 @@ fn main() -> ExitCode {
         }
         if line.conditional && d.skip_length != length {
             problems.push("skip-length");
+        }
+        if d.length.is_some() && line.text.contains("??") {
+            // objdump knows the length but not the meaning (e.g. ea1X with
+            // a nonzero low byte, `if (r3 ?? r0) {`): what the interpreter
+            // does there is not backed by the vendor tool.
+            problems.push("vendor-ambiguous");
         }
         let h = words[0] as u32;
         let x = words.get(1).copied().unwrap_or(0) as u32;
@@ -732,6 +872,14 @@ fn main() -> ExitCode {
     for (class, n) in &totals {
         println!("decoded instructions, {}: {n}", class.name());
     }
+    for c in copies.iter() {
+        println!(
+            "RAM copy (after {boot_steps} boot steps): 0x{:08x}-0x{:08x} from image 0x{:08x}",
+            c.vma,
+            c.vma + c.len,
+            c.lma
+        );
+    }
     if groups.is_empty() {
         println!("no gaps");
     }
@@ -751,8 +899,14 @@ fn main() -> ExitCode {
         );
     }
     if let Some(elf) = check {
-        if let Err(e) = check_against(&elf, &listing, &class_of) {
+        if let Err(e) = check_against(&elf, &listing, &class_of, &copies) {
             eprintln!("op_scan: {elf}: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    if let Some(path) = classes_path {
+        if let Err(e) = fs::write(&path, classes) {
+            eprintln!("op_scan: {path}: {e}");
             return ExitCode::FAILURE;
         }
     }
