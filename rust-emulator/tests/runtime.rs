@@ -1349,6 +1349,46 @@ fn stock_protection_setup_acknowledges_events_without_enabling_sdram() {
 }
 
 #[test]
+fn floating_branches_match_the_fm1_994_capture_without_changing_psr() {
+    for (lhs, rhs, greater) in [
+        (0x3e449ba6, 0x3f800000, false),
+        (0x3f800000, 0x3e449ba6, true),
+        (0xbfc00000, 0xbf800000, false),
+        (0xbf800000, 0xbfc00000, true),
+        (0, 0x80000000, false),
+        (0x80000000, 0, false),
+        (0x3fc00000, 0x3fc00000, false),
+        (0xbfc00000, 0x3fc00000, false),
+    ] {
+        for (h, taken) in [(0xee02, greater), (0xee82, !greater)] {
+            let mut c = cpu(&[h, 0x1801]);
+            c.r[1] = lhs;
+            c.r[2] = rhs;
+            c.sr[5] = 15;
+            let registers = c.r;
+            c.step().unwrap();
+            assert_eq!(c.pc, XIP + if taken { 6 } else { 4 });
+            assert_eq!(c.r, registers);
+            assert_eq!(c.sr[5], 15);
+        }
+    }
+    // The stock form uses r14 and a longer displacement; backward offsets
+    // must still be sign-extended as nine-bit halfword displacements.
+    for (x, expected) in [(0xe8a5, XIP + 334), (0xe9fd, XIP - 2)] {
+        let mut c = cpu(&[0xee81, x]);
+        c.r[14] = 0x3e449ba6;
+        c.r[1] = 0x3f800000;
+        c.step().unwrap();
+        assert_eq!(c.pc, expected);
+    }
+    for exceptional in [0x7fc00000, 0x7f800000, 0xff800000] {
+        let mut c = cpu(&[0xee82, 0x1801]);
+        c.r[1] = exceptional;
+        assert!(c.step().is_err());
+    }
+}
+
+#[test]
 fn float_arithmetic_and_conversions_match_the_fm1_986_capture() {
     // Physical results: 2026-10-05, finite cases, interrupts suppressed.
     // The cancellation cases distinguish rounded MAC from a fused operation.

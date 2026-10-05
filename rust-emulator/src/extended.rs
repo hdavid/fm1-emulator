@@ -720,6 +720,24 @@ pub(crate) fn execute(
                 next = next.wrapping_add((signed(x & 511, 9) * 2) as u32);
             }
             op = "branch_compare_immediate";
+        } else if matches!(h & 0xfff0, 0xee00 | 0xee80) && x & 0xe00 == 0x800 {
+            let lhs = f32::from_bits(cpu.r[d]);
+            let rhs = f32::from_bits(cpu.r[n]);
+            if !lhs.is_finite() || !rhs.is_finite() {
+                return Err(Fault::Access {
+                    pc,
+                    fault: crate::bus::AccessFault {
+                        address: pc,
+                        size: 4,
+                        operation: "floating-point branch",
+                        reason: "exceptional floating-point comparison is not implemented",
+                    },
+                });
+            }
+            if if h & 0x80 == 0 { lhs > rhs } else { lhs <= rhs } {
+                next = next.wrapping_add((signed(x & 511, 9) * 2) as u32);
+            }
+            op = "branch_compare_float";
         } else if matches!(
             h & 0xfff0,
             0xe800 | 0xe880 | 0xe900 | 0xe980 | 0xec00 | 0xec80 | 0xed00 | 0xed80 | 0xee00 | 0xee80
