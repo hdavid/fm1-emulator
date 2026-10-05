@@ -218,6 +218,7 @@ pub struct Devices {
     random: Random,
     // WL82.h JL_IOMAP CON2/CON3, used by fm1_uart.h for UART1 RX routing.
     uart_iomap: [u32; 2],
+    uart: crate::uart::Uart,
     irq_config: [[u32; 32]; 2],
     priority_mask: [u32; 2],
     software: u8,
@@ -232,6 +233,9 @@ impl Devices {
         }
     }
     pub fn read(&self, address: u32, size: usize) -> Option<Result<u32, &'static str>> {
+        if let Some(result) = self.uart.read(address, size) {
+            return Some(result);
+        }
         let (core, a) = Self::bank(address);
         let tick = if core == 0 {
             &self.tick
@@ -299,6 +303,9 @@ impl Devices {
         value: u32,
         size: usize,
     ) -> Option<Result<(), &'static str>> {
+        if let Some(result) = self.uart.write(address, value, size) {
+            return Some(result);
+        }
         let (core, a) = Self::bank(address);
         if size != 4 && !(a == TICK_TIMER && size == 1) && self.read(address & !3, 4).is_some() {
             return Some(Err("device registers require word accesses"));

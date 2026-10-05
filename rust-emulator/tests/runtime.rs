@@ -55,6 +55,32 @@ fn leading_zero_count_selects_the_highest_ready_task_priority() {
 }
 
 #[test]
+fn stock_uart_midi_receive_setup_stays_empty_without_input() {
+    let mut c = cpu(&[0]);
+    let start = RAM + 1024;
+    c.bus.write(start, 0x12345678, 4).unwrap();
+    // Stock UART1 setup uses halfword control/divider accesses and an
+    // empty 128-byte DMA receive buffer. RDC must not invent received bytes.
+    c.bus.write(0x12100, 0x3400, 2).unwrap();
+    c.bus.write(0x1211c, start, 4).unwrap();
+    c.bus.write(0x12120, start, 4).unwrap();
+    c.bus.write(0x12124, 128, 4).unwrap();
+    c.bus.write(0x12108, 383, 2).unwrap();
+    c.bus.write(0x12110, 48000, 4).unwrap();
+    c.bus.write(0x12100, 0x6d, 2).unwrap();
+    c.bus.devices.advance(1_000_000);
+    c.bus.write(0x12100, 0x14ed, 4).unwrap();
+    assert_eq!(c.bus.read(0x12100, 2).unwrap(), 0x6d);
+    assert_eq!(c.bus.read(0x12128, 4).unwrap(), 0);
+    assert_eq!(c.bus.read(0x12120, 4).unwrap(), start);
+    assert_eq!(c.bus.read(start, 4).unwrap(), 0x12345678);
+    assert!(c.bus.write(0x12118, 1, 2).is_err());
+    assert!(c.bus.write(0x1210c, 0x90, 1).is_err());
+    assert!(c.bus.write(0x12128, 1, 2).is_err());
+    assert!(c.bus.read(0x1212c, 4).is_err());
+}
+
+#[test]
 fn stock_uart_pin_routing_preserves_the_lcd_and_other_map_bits() {
     // Original startup at 0x02023b6a: clear/select UT1 RX input channel,
     // then route input channel 1 from PH8, using high base register r8.
