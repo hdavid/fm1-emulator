@@ -33,6 +33,11 @@ impl Default for Gpio {
 }
 
 impl Gpio {
+    pub(crate) fn shift_spi(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.shift = (self.shift << 8) | byte as u16;
+        }
+    }
     pub fn press(&mut self, column: usize, row: usize, pressed: bool) -> Result<(), &'static str> {
         if column >= self.matrix.len() || row >= 6 {
             return Err("matrix key must be COLUMN:ROW (columns 0..10, rows 0..5)");

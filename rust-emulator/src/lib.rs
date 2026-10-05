@@ -11,6 +11,7 @@ pub mod firmware;
 pub mod gpio;
 pub mod lcd;
 mod package;
+mod shift_spi;
 mod wireless;
 
 pub const XIP: u32 = 0x0200_0120;

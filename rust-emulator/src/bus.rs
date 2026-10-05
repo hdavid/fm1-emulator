@@ -36,6 +36,7 @@ pub struct Bus {
     crc: crate::crc::Crc,
     clock: crate::clock::Clock,
     wireless: crate::wireless::Wireless,
+    shift_spi: crate::shift_spi::ShiftSpi,
 }
 
 impl Bus {
@@ -66,6 +67,7 @@ impl Bus {
             crc: Default::default(),
             clock: Default::default(),
             wireless: Default::default(),
+            shift_spi: Default::default(),
         })
     }
 
@@ -130,6 +132,18 @@ impl Bus {
         } else if let Some(offset) = Self::offset(address, size, RAM, self.ram.len()) {
             &self.ram[offset..offset + size]
         } else {
+            if let Some(value) = self.shift_spi.read(address & !3) {
+                return if size == 4 {
+                    Ok(value)
+                } else {
+                    Err(Self::fault(
+                        address,
+                        size,
+                        operation,
+                        "SPI registers require word accesses",
+                    ))
+                };
+            }
             if let Some(result) = self.wireless.read(address, size) {
                 return result.map_err(|reason| Self::fault(address, size, operation, reason));
             }
@@ -208,6 +222,40 @@ impl Bus {
 
     pub fn write(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
         Self::check(address, size, "write")?;
+        if self.shift_spi.read(address & !3).is_some() {
+            if size != 4 {
+                return Err(Self::fault(
+                    address,
+                    size,
+                    "write",
+                    "SPI registers require word accesses",
+                ));
+            }
+            if self.shift_spi.write(address, value) {
+                let single = [value as u8];
+                let bytes = if address == crate::shift_spi::BASE + 8 {
+                    &single[..]
+                } else {
+                    let source = self.shift_spi.dma_address();
+                    let length = self.shift_spi.dma_length();
+                    let offset =
+                        Self::offset(source, length, RAM, self.ram.len()).ok_or_else(|| {
+                            Self::fault(
+                                source,
+                                length,
+                                "DMA read",
+                                "matrix SPI DMA source must be in SRAM",
+                            )
+                        })?;
+                    &self.ram[offset..offset + length]
+                };
+                let iomap = self.lcd.read(crate::lcd::IOMAP).unwrap();
+                self.shift_spi
+                    .start(bytes, iomap)
+                    .map_err(|reason| Self::fault(address, size, "write", reason))?;
+            }
+            return Ok(());
+        }
         if let Some(result) = self.wireless.write(address, value, size) {
             return result.map_err(|reason| Self::fault(address, size, "write", reason));
         }
@@ -298,8 +346,11 @@ impl Bus {
     }
     pub(crate) fn advance_devices(&mut self, ticks: u32) {
         let clk_con3 = self.audio.read(0x10014).unwrap();
-        self.devices
-            .advance_with_timer_clock(ticks, self.clock.timer_hz(clk_con3));
+        let peripheral_hz = self.clock.timer_hz(clk_con3);
+        self.devices.advance_with_timer_clock(ticks, peripheral_hz);
+        if let Some(bytes) = self.shift_spi.advance(ticks, peripheral_hz) {
+            self.devices.gpio.shift_spi(&bytes);
+        }
     }
 
     pub fn advance_usb(&mut self, ticks: u32) -> Result<(), AccessFault> {
@@ -325,17 +376,22 @@ impl Bus {
         self.pending_irq_for(icfg, 0)
     }
     pub(crate) fn pending_irq_for(&self, icfg: u32, core: usize) -> Option<usize> {
-        let timer = self.devices.pending_irq_for(icfg, core);
-        let audio_priority = self.devices.irq_priority_for(crate::audio::IRQ, icfg, core);
-        if self.audio.pending_irq() {
-            if let Some(priority) = audio_priority {
-                if timer.is_none_or(|source| {
-                    priority > self.devices.irq_priority_for(source, icfg, core).unwrap()
+        let mut candidate = self.devices.pending_irq_for(icfg, core);
+        for (source, pending) in [
+            (crate::audio::IRQ, self.audio.pending_irq()),
+            (crate::shift_spi::IRQ, self.shift_spi.pending_irq()),
+        ] {
+            if let Some(priority) = pending
+                .then(|| self.devices.irq_priority_for(source, icfg, core))
+                .flatten()
+            {
+                if candidate.is_none_or(|current| {
+                    priority > self.devices.irq_priority_for(current, icfg, core).unwrap()
                 }) {
-                    return Some(crate::audio::IRQ);
+                    candidate = Some(source);
                 }
             }
         }
-        timer
+        candidate
     }
 }
