@@ -250,6 +250,45 @@ pub(crate) fn execute(
         } else if h & 0xfff0 == 0xe0a0 {
             cpu.r[n] = packed(x).wrapping_sub(cpu.r[d]);
             op = "reverse_subtract";
+        } else if h == 0xe1f8 && x & 15 == 0 {
+            // rD+1:rD = rS * rC (64-bit product). x bit 12 selects signed;
+            // the stock 64-bit multiply uses bit 12 clear for its unsigned
+            // low*low partial product (Quarkslab lists the opposite sense
+            // for mul/mul.z but muladd uses this one).
+            let pair = d & 14;
+            let product = if x & 0x1000 != 0 {
+                (cpu.r[s] as i32 as i64).wrapping_mul(cpu.r[c] as i32 as i64) as u64
+            } else {
+                cpu.r[s] as u64 * cpu.r[c] as u64
+            };
+            cpu.r[pair] = product as u32;
+            cpu.r[pair + 1] = (product >> 32) as u32;
+            op = "multiply_long";
+        } else if h == 0xe1f6 && x & 15 == 0 && d & 1 == 0 && s & 1 == 0 {
+            // rD+1:rD = (rS+1:rS) / rC, unsigned 64-by-32 division. The stock
+            // microsecond conversion divides by 1000000 then rebuilds the
+            // remainder from both quotient words.
+            let dividend = cpu.r[s] as u64 | ((cpu.r[s + 1] as u64) << 32);
+            let quotient = dividend
+                .checked_div(cpu.r[c] as u64)
+                .ok_or(Fault::Unsupported { pc, word: h as u16 })?;
+            cpu.r[d] = quotient as u32;
+            cpu.r[d + 1] = (quotient >> 32) as u32;
+            op = "divide_long";
+        } else if h == 0xe0b8 && matches!(x & 15, 0 | 2) {
+            // addc/subc: carry in from PSR.C, carry out to PSR.C.
+            let (lhs, rhs) = (cpu.r[s] as u64, cpu.r[c] as u64);
+            if x & 2 == 0 {
+                let sum = lhs + rhs + u64::from(cpu.carry());
+                cpu.r[d] = sum as u32;
+                cpu.set_carry(sum >> 32 != 0);
+                op = "add_with_carry";
+            } else {
+                let borrow = u64::from(!cpu.carry());
+                cpu.r[d] = lhs.wrapping_sub(rhs + borrow) as u32;
+                cpu.set_carry(lhs >= rhs + borrow);
+                op = "subtract_with_carry";
+            }
         } else if h == 0xe1f0 && x & 15 == 0 {
             cpu.r[d] = cpu.r[s].wrapping_mul(cpu.r[c]);
             op = "multiply_extended";
@@ -323,11 +362,16 @@ pub(crate) fn execute(
             )?;
             op = "memory_bit";
         } else if h == 0xe0b4 && matches!(x & 15, 0 | 2) {
-            cpu.r[d] = if x & 2 == 0 {
-                cpu.r[s].wrapping_add(cpu.r[c])
+            // Carry out feeds a following addc/subc (64-bit arithmetic).
+            let (lhs, rhs) = (cpu.r[s], cpu.r[c]);
+            if x & 2 == 0 {
+                let (sum, carry) = lhs.overflowing_add(rhs);
+                cpu.r[d] = sum;
+                cpu.set_carry(carry);
             } else {
-                cpu.r[s].wrapping_sub(cpu.r[c])
-            };
+                cpu.r[d] = lhs.wrapping_sub(rhs);
+                cpu.set_carry(lhs >= rhs);
+            }
             op = if x & 2 == 0 {
                 "add_extended"
             } else {

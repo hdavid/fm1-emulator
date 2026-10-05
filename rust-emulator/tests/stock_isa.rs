@@ -71,3 +71,55 @@ fn word_indexed_load_and_store_keep_their_register_index() {
     c.step().unwrap();
     assert_eq!(c.bus.read(RAM + 0x10c, 4).unwrap(), 0x1234_5678);
 }
+
+#[test]
+fn long_multiply_low_partial_product_is_unsigned_by_default() {
+    // 0x020021da: r1:r0 = r0 * r1, bytes f8 e1 10 00.
+    let mut c = cpu(&[0xe1f8, 0x0010]);
+    c.r[0] = 0xffff_fffe;
+    c.r[1] = 3;
+    c.step().unwrap();
+    assert_eq!((c.r[0], c.r[1]), (0xffff_fffa, 2));
+    let mut c = cpu(&[0xe1f8, 0x1010]); // bit 12: signed
+    c.r[0] = 0xffff_fffe; // -2
+    c.r[1] = 3;
+    c.step().unwrap();
+    assert_eq!((c.r[0], c.r[1]), (0xffff_fffa, 0xffff_ffff));
+    let mut c = cpu(&[0xe1f8, 0x6420]); // r7:r6 = r2 * r4
+    c.r[2] = 0x1234_5678;
+    c.r[4] = 1_000_000;
+    c.step().unwrap();
+    let product = 0x1234_5678u64 * 1_000_000;
+    assert_eq!((c.r[6], c.r[7]), (product as u32, (product >> 32) as u32));
+}
+
+#[test]
+fn long_divide_and_carry_chain_rebuild_a_64_bit_remainder() {
+    // Stock sequence at 0x020021e4..0x020021f8 (microsecond conversion):
+    // r3:r2 = r1:r0 / r4; r5 = r3*r4; r7:r6 = r2*r4; r7 += r5;
+    // r4 = r0 - r6; r5 = r1 - r7 - !C.
+    let n: u64 = 0x0000_0123_8765_4321;
+    let mut c = cpu(&[
+        0xe1f6, 0x2400, 0xe1f0, 0x5430, 0xe1f8, 0x6420, 0x1857, 0x1f84, 0xe0b8, 0x5712,
+    ]);
+    c.r[0] = n as u32;
+    c.r[1] = (n >> 32) as u32;
+    c.r[4] = 1_000_000;
+    for _ in 0..6 {
+        c.step().unwrap();
+    }
+    assert_eq!(c.r[2] as u64 | (c.r[3] as u64) << 32, n / 1_000_000);
+    assert_eq!(c.r[4] as u64 | (c.r[5] as u64) << 32, n % 1_000_000);
+}
+
+#[test]
+fn add_with_carry_propagates_the_low_word_carry() {
+    let mut c = cpu(&[0x1c10, 0xe0b8, 0x5230]); // r0 = r1 + r0 ; r5 = r3 + r2 + C
+    c.r[0] = 0xffff_ffff;
+    c.r[1] = 2;
+    c.r[2] = 7;
+    c.r[3] = 1;
+    c.step().unwrap();
+    c.step().unwrap();
+    assert_eq!((c.r[0], c.r[5]), (1, 9));
+}

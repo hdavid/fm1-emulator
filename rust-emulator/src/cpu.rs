@@ -213,6 +213,15 @@ impl Cpu {
             .map_err(|fault| Fault::Access { pc: self.pc, fault })
     }
 
+    /// PSR bit 1 is the carry flag (Quarkslab pi32v2 PSR: V, C, Z, N).
+    pub(crate) fn set_carry(&mut self, carry: bool) {
+        self.sr[5] = (self.sr[5] & !2) | (u32::from(carry) << 1);
+    }
+
+    pub(crate) fn carry(&self) -> bool {
+        self.sr[5] & 2 != 0
+    }
+
     fn push(&mut self, value: u32) -> Result<(), Fault> {
         let address = self.sr[14].wrapping_sub(4);
         self.write(address, value)?;
@@ -467,11 +476,17 @@ impl Cpu {
             op = "mov_reg";
         } else if matches!(h & 0xfe00, 0x1c00 | 0x1e00) {
             let c = (((h >> 7) & 3) * 2 + ((h >> 3) & 1)) as usize;
+            // These forms produce the carry consumed by addc/subc in the
+            // compiler's 64-bit arithmetic (C = carry out / no borrow).
+            let (lhs, rhs) = (self.r[b], self.r[c]);
             if h & 0xfe00 == 0x1e00 {
-                self.r[a] = self.r[b].wrapping_sub(self.r[c]);
+                self.r[a] = lhs.wrapping_sub(rhs);
+                self.set_carry(lhs >= rhs);
                 op = "sub";
             } else {
-                self.r[a] = self.r[b].wrapping_add(self.r[c]);
+                let (sum, carry) = lhs.overflowing_add(rhs);
+                self.r[a] = sum;
+                self.set_carry(carry);
                 op = "add";
             }
         } else if h & 0xe0c0 == 0x20c0 {
