@@ -21,6 +21,7 @@ pub mod profile;
 pub mod radio;
 mod resample;
 mod rng;
+mod simd;
 pub mod spi2;
 pub mod uart1;
 pub mod ui_knobs;
