@@ -51,6 +51,11 @@ impl Encoders {
         self.pending[e] = (self.pending[e] + detents).clamp(-MAX_PENDING, MAX_PENDING);
     }
 
+    /// Whether a detent is still queued or being played out.
+    pub fn busy(&self) -> bool {
+        self.pending.iter().any(|&p| p != 0) || self.phase.iter().any(|&p| p != 0)
+    }
+
     /// Advance with `scans(column)`, the guest's read count per matrix
     /// column so far; returns each encoder's (A, B) contacts.
     pub fn update(&mut self, scans: impl Fn(usize) -> u32) -> [(bool, bool); 7] {
@@ -85,12 +90,6 @@ impl Encoders {
 #[cfg(test)]
 mod tests {
     use super::{knob::*, *};
-
-    impl Encoders {
-        fn busy(&self) -> bool {
-            self.pending.iter().any(|&p| p != 0) || self.phase.iter().any(|&p| p != 0)
-        }
-    }
 
     /// Felucca's quadrature decoder (fm1_enc.h) without detent learning: rest
     /// at 00, a step on returning to it after >= 2 net transitions, and its

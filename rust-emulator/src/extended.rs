@@ -262,15 +262,18 @@ fn execute_wide(
             name = "halfword_extended";
         }
         Op::HalfwordPostincrement => {
-            let increment = ((x >> 8) & 15) * 16 + (x & 15);
+            // x bit 0 selects the store (as in the edd8 register forms); the
+            // increment is even.
+            let store = x & 1 != 0;
+            let increment = ((x >> 8) & 15) * 16 + (x & 14);
             let address = cpu.r[s];
             mem = Some((
                 d,
                 s,
                 address,
                 2,
-                false,
-                h & 4 != 0,
+                store,
+                !store && h & 4 != 0,
                 Some(address.wrapping_add(increment)),
             ));
             name = "halfword_postincrement";
@@ -375,12 +378,20 @@ fn execute_wide(
             // rD+1:rD = (rS+1:rS) / rC, unsigned 64-by-32 division. The stock
             // microsecond conversion divides by 1000000 then rebuilds the
             // remainder from both quotient words.
+            // x bit 12 selects the signed form (Felucca's formant filter:
+            // an int64 divided by an int32).
+            let pair = d & 14;
             let dividend = cpu.r[s] as u64 | ((cpu.r[s + 1] as u64) << 32);
-            let quotient = dividend
-                .checked_div(cpu.r[c] as u64)
-                .ok_or(Fault::Unsupported { pc, word: h as u16 })?;
-            cpu.r[d] = quotient as u32;
-            cpu.r[d + 1] = (quotient >> 32) as u32;
+            let quotient = if x & 0x1000 != 0 {
+                (dividend as i64)
+                    .checked_div(cpu.r[c] as i32 as i64)
+                    .map(|q| q as u64)
+            } else {
+                dividend.checked_div(cpu.r[c] as u64)
+            }
+            .ok_or(Fault::Unsupported { pc, word: h as u16 })?;
+            cpu.r[pair] = quotient as u32;
+            cpu.r[pair + 1] = (quotient >> 32) as u32;
             name = "divide_long";
         }
         Op::CarryArithmetic => {
@@ -596,6 +607,9 @@ fn execute_wide(
             };
             name = "logic_three";
         }
+        // Register lists transfer the lowest register at the base address and
+        // ascend (struct fields: Felucca's gr_grain_t {z, pos}, the stock
+        // linked-list nodes {next, prev}); the base register is unchanged.
         Op::StoreRegisterList => {
             // Lowest register at the lowest address (Felucca fm1_fault_c's
             // {r5, r1} = [r4+] reads magic into r1; stock list_add_tail).
@@ -650,6 +664,10 @@ fn execute_wide(
             } else {
                 cpu.r[reg] = cpu.read(addr, 4)?;
                 cpu.r[reg + 1] = cpu.read(addr + 4, 4)?;
+            }
+            if x & 3 == 3 {
+                // x & 3 == 3: a store that writes the address back to the base.
+                cpu.r[s] = addr;
             }
             name = "memory_pair";
         }
