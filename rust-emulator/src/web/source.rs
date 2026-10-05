@@ -117,8 +117,18 @@ impl Source {
         Ok(Self::Zip(strip_single_folder(files)))
     }
 
-    /// The bytes of a clean relative path (see `clean_path`).
+    /// The bytes of a clean relative path (see `clean_path`). The root page
+    /// is `index.html`, or `editor.html` (the Felucca-family `web/` folder,
+    /// served as it is with `--ui`).
     pub fn get(&self, path: &str) -> Option<Vec<u8>> {
+        let file = self.file(path);
+        if file.is_none() && path == "index.html" {
+            return self.file("editor.html");
+        }
+        file
+    }
+
+    fn file(&self, path: &str) -> Option<Vec<u8>> {
         match self {
             Self::Zip(files) => files.get(path).cloned(),
             Self::Dir(root) => {

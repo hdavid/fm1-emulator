@@ -144,6 +144,20 @@ fn path_traversal_and_foreign_hosts_are_rejected() {
 }
 
 #[test]
+fn a_felucca_web_folder_is_served_from_its_editor_html() {
+    let dir = scratch("editor");
+    std::fs::write(dir.join("editor.html"), PAGE).unwrap();
+    let source = Source::open(&dir).unwrap();
+    assert!(source.has_index());
+    let (server, _) = start(Some(source));
+    let (status, _, body) = get(&server, "/");
+    assert_eq!(status, 200);
+    assert!(String::from_utf8(body)
+        .unwrap()
+        .contains("requestMIDIAccess"));
+}
+
+#[test]
 fn without_a_sidecar_the_server_explains_itself() {
     let (server, _) = start(None);
     let (status, _, body) = get(&server, "/");

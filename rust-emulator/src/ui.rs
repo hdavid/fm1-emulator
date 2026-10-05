@@ -4,6 +4,7 @@ use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Rect, Sense, Strok
 use fm1_emu::bus::Bus;
 use fm1_emu::{cpu::Cpu, firmware::Firmware};
 mod ui_audio;
+mod ui_web;
 use fm1_emu::ui_knobs;
 use std::{
     io::{self, Write},
@@ -123,6 +124,8 @@ struct Emulator {
     /// Guest speed against real time (24 M oscillator ticks/s), sampled each second.
     speed: Option<f64>,
     speed_mark: (Instant, u64),
+    /// The firmware's web editor and its MIDI bridge (off without one).
+    web: ui_web::WebEditor,
 }
 impl Emulator {
     fn new(path: PathBuf) -> Self {
@@ -145,6 +148,7 @@ impl Emulator {
             speed: None,
             speed_mark: (Instant::now(), 0),
             cpu_mhz: 24,
+            web: ui_web::WebEditor::disabled("No web editor"),
         };
         app.knob_angle[0] = master_angle(app.master);
         app.reset();
@@ -168,7 +172,8 @@ impl Emulator {
             cpu.set_cpu_mhz(self.cpu_mhz)?;
             Ok(cpu)
         }) {
-            Ok(cpu) => {
+            Ok(mut cpu) => {
+                self.web.attach(&mut cpu.bus);
                 self.cpu = Some(cpu);
                 self.fault = None;
             }
@@ -192,6 +197,7 @@ impl Emulator {
                 }
             }
             cpu.bus.devices.adc.master = self.master;
+            self.web.pump(&mut cpu.bus);
             if !self.paused && self.fault.is_none() {
                 // Keep the UI responsive even if guest code spins forever.
                 // While the guest streams audio to a host device, its pace is
@@ -247,6 +253,7 @@ impl Emulator {
                     self.fault = Some(format!("USB serial stdout: {error}"));
                 }
             }
+            self.web.pump(&mut cpu.bus);
             let visible = cpu.bus.screen_visible();
             let pixels = cpu
                 .bus
@@ -617,6 +624,16 @@ impl eframe::App for Emulator {
                         if ui.button("Restart").clicked() {
                             self.reset();
                         }
+                        let editor = ui.add_enabled(self.web.active(), egui::Button::new("Open editor"));
+                        let editor = match (self.web.url(), self.web.unavailable()) {
+                            (Some(url), _) => editor.on_hover_text(format!("Open {url} in the default browser")),
+                            (None, reason) => editor.on_disabled_hover_text(reason.unwrap_or_default()),
+                        };
+                        if editor.clicked() {
+                            if let Err(error) = self.web.open_in_browser() {
+                                eprintln!("{error}");
+                            }
+                        }
                         let before = self.cpu_mhz;
                         egui::ComboBox::from_id_salt("cpu_mhz")
                             .selected_text(format!("CPU {} MHz", self.cpu_mhz))
@@ -665,6 +682,13 @@ impl eframe::App for Emulator {
                     (None, None) => String::from("no audio"),
                 };
                 ui.weak(format!("Guest speed {speed} · {audio} · below 100% the sound breaks up"));
+                ui.horizontal(|ui| {
+                    if self.web.active() {
+                        let lit = if self.web.busy() { ACCENT } else { Color32::from_gray(70) };
+                        ui.colored_label(lit, "●").on_hover_text("MIDI traffic");
+                    }
+                    ui.weak(self.web.status());
+                });
             }
         });
         // Use input from the previous rendered frame, then collect this frame's
@@ -685,22 +709,35 @@ impl eframe::App for Emulator {
         ctx.request_repaint_after(Duration::from_millis(16));
     }
 }
-fn main() -> eframe::Result {
-    let mut args = std::env::args_os().skip(1);
-    let Some(path) = args.next() else {
-        eprintln!("usage: emulator <application.elf|application.bin>");
-        std::process::exit(2);
-    };
-    let mut cpu_mhz = 24;
-    for arg in args {
-        match arg.to_str().and_then(|a| a.strip_prefix("--cpu-mhz=")).map(str::parse) {
-            Some(Ok(mhz)) if mhz > 0 && mhz % 24 == 0 => cpu_mhz = mhz,
-            _ => {
-                eprintln!("usage: fm1-ui FIRMWARE [--cpu-mhz=N] (N a multiple of 24)");
-                std::process::exit(2);
-            }
+const USAGE: &str = "usage: fm1-ui FIRMWARE [--cpu-mhz=N] [--ui DIR]\n  \
+    N: a multiple of 24\n  \
+    DIR: web editor files to serve (default: FIRMWARE-ui.zip next to FIRMWARE.fwsc)";
+
+/// The command line: firmware, CPU clock and the web editor override.
+fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(PathBuf, u32, Option<PathBuf>), String> {
+    let mut args = args.into_iter();
+    let path = args.next().ok_or("no firmware given")?;
+    let (mut cpu_mhz, mut ui) = (24, None);
+    while let Some(arg) = args.next() {
+        if let Some(mhz) = arg.strip_prefix("--cpu-mhz=") {
+            cpu_mhz = mhz.parse().ok().filter(|m| *m > 0 && m % 24 == 0).ok_or("bad --cpu-mhz")?;
+        } else if let Some(dir) = arg.strip_prefix("--ui=") {
+            ui = Some(PathBuf::from(dir));
+        } else if arg == "--ui" {
+            ui = Some(PathBuf::from(args.next().ok_or("--ui needs a directory")?));
+        } else {
+            return Err(format!("unknown argument {arg}"));
         }
     }
+    Ok((PathBuf::from(path), cpu_mhz, ui))
+}
+
+fn main() -> eframe::Result {
+    let args = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned());
+    let (path, cpu_mhz, ui) = parse_args(args).unwrap_or_else(|error| {
+        eprintln!("fm1-ui: {error}\n{USAGE}");
+        std::process::exit(2);
+    });
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180., 830.])
@@ -713,11 +750,14 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            let mut app = Emulator::new(PathBuf::from(path));
-            if cpu_mhz != app.cpu_mhz {
-                app.cpu_mhz = cpu_mhz;
-                app.reset();
+            let mut app = Emulator::new(path.clone());
+            app.web = ui_web::WebEditor::new(&path, ui.as_deref(), fm1_emu::web::ADDRESS);
+            match app.web.url() {
+                Some(url) => eprintln!("fm1-ui: web editor at {url}"),
+                None => eprintln!("fm1-ui: {}", app.web.unavailable().unwrap_or_default()),
             }
+            app.cpu_mhz = cpu_mhz;
+            app.reset();
             match ui_audio::HostAudio::open() {
                 Ok(audio) => app.audio = Some(audio),
                 Err(error) => app.audio_error = Some(error),
@@ -748,6 +788,18 @@ mod tests {
                 egui::CentralPanel::default().show(ctx, |ui| app.panel(ui));
             },
         );
+    }
+    #[test]
+    fn the_command_line_takes_a_clock_and_a_ui_directory() {
+        let args = |a: &[&str]| parse_args(a.iter().map(|s| s.to_string()));
+        assert_eq!(args(&["f.fwsc"]), Ok((PathBuf::from("f.fwsc"), 24, None)));
+        let ui = Some(PathBuf::from("web"));
+        assert_eq!(args(&["f.fwsc", "--ui", "web", "--cpu-mhz=48"]), Ok((PathBuf::from("f.fwsc"), 48, ui.clone())));
+        assert_eq!(args(&["f.fwsc", "--ui=web"]), Ok((PathBuf::from("f.fwsc"), 24, ui)));
+        assert!(args(&["f.fwsc", "--ui"]).is_err());
+        assert!(args(&["f.fwsc", "--cpu-mhz=25"]).is_err());
+        assert!(args(&["f.fwsc", "--bogus"]).is_err());
+        assert!(args(&[]).is_err());
     }
     #[test]
     fn keyboard_events_reach_guest_pixels_and_focus_loss_releases_keys() {
