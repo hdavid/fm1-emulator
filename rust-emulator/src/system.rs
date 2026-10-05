@@ -11,6 +11,8 @@ pub struct System {
     registers: [u8; 2048],
     pub watchdog_feeds: u64,
     pub watchdog_ticks: u64,
+    /// Diagnostics only (diagnose FM1_WATCHDOG_OFF=1): count but never expire.
+    pub watchdog_expiry_disabled: bool,
 }
 impl Default for System {
     fn default() -> Self {
@@ -27,6 +29,7 @@ impl Default for System {
             registers,
             watchdog_feeds: 0,
             watchdog_ticks: 0,
+            watchdog_expiry_disabled: false,
         }
     }
 }
@@ -118,7 +121,7 @@ impl System {
         if wdt & 0x10 != 0 {
             self.watchdog_ticks += ticks as u64;
             let timeout = 24_000_000u64 * (1u64 << (wdt & 15).saturating_sub(10));
-            if self.watchdog_ticks >= timeout {
+            if self.watchdog_ticks >= timeout && !self.watchdog_expiry_disabled {
                 return Err("watchdog expired");
             }
         }

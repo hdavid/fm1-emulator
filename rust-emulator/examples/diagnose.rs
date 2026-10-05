@@ -34,6 +34,10 @@ fn run() -> Result<(), String> {
     let firmware = Firmware::load(Path::new(&args[0]))?;
     let mut cpu = Cpu::new(firmware.bus()?, firmware.entry);
     cpu.r[0] = 0x01c7_fe08;
+    // Optional: FM1_WATCHDOG_OFF=1 keeps counting watchdog ticks but never
+    // resets. Diagnostic experiments only; the output says so.
+    let watchdog_off = env::var("FM1_WATCHDOG_OFF").is_ok_and(|v| v == "1");
+    cpu.bus.system.watchdog_expiry_disabled = watchdog_off;
     let mut recent = VecDeque::new();
     // Optional: FM1_RECENT=N keeps N completed instructions with registers.
     let recent_count: usize = env::var("FM1_RECENT")
@@ -157,6 +161,9 @@ fn run() -> Result<(), String> {
         "audio: {} stereo frames, {} DMA halves; ADC: {} conversions",
         cpu.bus.audio.frames, cpu.bus.audio.halves, cpu.bus.devices.adc.conversions
     );
+    if watchdog_off {
+        eprintln!("EXPERIMENT: watchdog expiry disabled (FM1_WATCHDOG_OFF=1)");
+    }
     let radio = cpu.bus.radio.accesses.get();
     if radio > 0 {
         eprintln!("STUB radio (JL_WL, no RF emulated): {radio} register accesses");

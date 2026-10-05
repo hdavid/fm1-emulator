@@ -103,6 +103,7 @@ pub(crate) enum Op {
     BytePreincrement,
     ShiftExtended,
     ShiftPair,
+    ShiftPairRegister,
     BranchLong,
     LogicThree,
     StoreRegisterList,
@@ -353,6 +354,10 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         // Only the forms seen in the stock and Felucca images: an even
         // pair and a zero middle nibble.
         ShiftPair
+    } else if h == 0xe1d8 && x & 0x10fc == 0 {
+        // As e1c8 (amount in rC, mode in bits 0-1) on the pair rD+1:rD;
+        // only the even-pair, zero-source forms seen in the stock image.
+        ShiftPairRegister
     } else if h & 0xff80 == 0xff00 && matches!(h & 15, 0 | 1 | 2 | 3 | 8 | 9 | 10 | 11 | 12 | 13) {
         BranchLong
     } else if h == 0xe190 && x & 15 <= 3 {

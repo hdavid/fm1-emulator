@@ -305,6 +305,24 @@ fn pair_shifts_sign_extend_and_scale_sixty_four_bit_products() {
 }
 
 #[test]
+fn pair_shift_by_register_normalises_a_double_mantissa() {
+    // FM-1_093 unsigned-to-double at 0x02045210: e1d8 4700 = r5:r4 <<= r7
+    // with r7 = 52 - (bit length 6 of 48) + 1 = 47, after which
+    // e100 63ff adds the 1023 exponent bias and e1d0 0304 does r1:r0 <<= 52.
+    let mut c = cpu(&[0xe1d8, 0x4700]);
+    c.r[4] = 48;
+    c.r[5] = 0;
+    c.r[7] = 47;
+    c.step().unwrap();
+    assert_eq!(((c.r[5] as u64) << 32) | c.r[4] as u64, 48u64 << 47);
+    let mut c = cpu(&[0xe1d8, 0x4702]); // r5:r4 >>= r7 (logical)
+    c.r[5] = 0x8000_0000;
+    c.r[7] = 36;
+    c.step().unwrap();
+    assert_eq!((c.r[5], c.r[4]), (0, 0x0800_0000));
+}
+
+#[test]
 fn register_repeat_with_a_zero_count_skips_its_block() {
     let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);
     c.r[1] = RAM;

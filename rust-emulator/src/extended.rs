@@ -510,6 +510,20 @@ fn execute_wide(
             cpu.r[d + 1] = (value >> 32) as u32;
             name = "shift_pair";
         }
+        Op::ShiftPairRegister => {
+            // rD+1:rD shifted in place by rC (stock unsigned-to-double:
+            // e1d8 4700 normalises the mantissa by 47 for the value 48).
+            let shift = cpu.r[c];
+            let pair = (cpu.r[d] as u64) | ((cpu.r[d + 1] as u64) << 32);
+            let value = match x & 3 {
+                0 | 1 => pair.checked_shl(shift).unwrap_or(0),
+                2 => pair.checked_shr(shift).unwrap_or(0),
+                _ => ((pair as i64) >> shift.min(63)) as u64,
+            };
+            cpu.r[d] = value as u32;
+            cpu.r[d + 1] = (value >> 32) as u32;
+            name = "shift_pair_register";
+        }
         Op::BranchLong => {
             let value = match h & 0x60 {
                 0 => x & 4095,
