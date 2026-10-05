@@ -16,6 +16,48 @@ fn seconds(step: &str, text: &str) -> Result<f64, String> {
     text.parse().map_err(|_| format!("bad {step}"))
 }
 
+/// Run `seconds` of guest time and write the audio DMA output to a 24-bit
+/// stereo 44.1 kHz WAV (exactly the samples the guest produced).
+fn record(player: &mut Player, seconds: f64, path: &str) -> Result<(), String> {
+    let mut frames: Vec<[i32; 2]> = vec![];
+    player.cpu.bus.audio.samples.clear();
+    let slices = (seconds / 0.25).ceil().max(1.0) as u32;
+    for _ in 0..slices {
+        player.run_seconds(seconds / slices as f64)?;
+        frames.extend(player.cpu.bus.audio.samples.drain(..));
+    }
+    let data = frames.len() as u32 * 6;
+    let mut out = Vec::with_capacity(44 + data as usize);
+    for (tag, value) in [(b"RIFF", 36 + data), (b"WAVE", 0)] {
+        out.extend_from_slice(tag);
+        if tag == b"RIFF" {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    out.extend_from_slice(b"fmt ");
+    for v in [16u32] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in [1u16, 2] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in [44_100u32, 44_100 * 6] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in [6u16, 24] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data.to_le_bytes());
+    for [l, r] in &frames {
+        out.extend_from_slice(&l.to_le_bytes()[..3]);
+        out.extend_from_slice(&r.to_le_bytes()[..3]);
+    }
+    std::fs::write(path, out).map_err(|error| format!("{path}: {error}"))?;
+    println!("  wrote {} frames to {path}", frames.len());
+    Ok(())
+}
+
 fn main() -> Result<(), String> {
     let args: Vec<String> = env::args().skip(1).collect();
     let (firmware, steps) = args
@@ -48,6 +90,19 @@ fn main() -> Result<(), String> {
             }
             ["release"] => {
                 player.held = [false; 41];
+                Ok(())
+            }
+            ["wav", s, path] => record(&mut player, seconds(step, s)?, path),
+            ["halves", base, words] => {
+                // Non-zero words in each half of a DMA double buffer.
+                let base = u32::from_str_radix(base.trim_start_matches("0x"), 16).map_err(|_| format!("bad {step}"))?;
+                let words: u32 = words.parse().map_err(|_| format!("bad {step}"))?;
+                for half in 0..2 {
+                    let nonzero = (0..words)
+                        .filter(|w| player.cpu.bus.read(base + (half * words + w) * 4, 4).unwrap_or(0) != 0)
+                        .count();
+                    println!("  half {half}: {nonzero} of {words} words non-zero");
+                }
                 Ok(())
             }
             ["level", s] => player.level(seconds(step, s)?).map(|level| {

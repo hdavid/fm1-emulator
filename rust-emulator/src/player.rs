@@ -97,7 +97,8 @@ impl Player {
     }
 
     pub fn run_seconds(&mut self, seconds: f64) -> Result<(), String> {
-        self.run((seconds * RATE) as u64)
+        // Guest seconds: oscillator ticks times the CPU clock multiple.
+        self.run((seconds * RATE * self.cpu.instructions_per_tick as f64) as u64)
     }
 
     /// Run `seconds` of guest time and measure the audio produced, in slices
