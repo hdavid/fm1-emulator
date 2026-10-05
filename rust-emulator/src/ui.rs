@@ -170,6 +170,8 @@ impl Emulator {
             let mut cpu = Cpu::new(firmware.bus()?, firmware.entry);
             cpu.r[0] = 0x01c7fe08;
             cpu.set_cpu_mhz(self.cpu_mhz)?;
+            // FM1_NESTED_IRQ=1: interrupt nesting (USB audio builds; off for the baselines).
+            cpu.nested_irqs = std::env::var("FM1_NESTED_IRQ").is_ok_and(|v| v == "1");
             Ok(cpu)
         }) {
             Ok(mut cpu) => {

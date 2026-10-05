@@ -68,6 +68,8 @@ fn main() -> Result<(), String> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(40);
     let mut player = Player::boot(Path::new(firmware), trace)?;
+    // Optional: FM1_NESTED_IRQ=1 enables interrupt nesting (USB audio builds).
+    player.cpu.nested_irqs = env::var("FM1_NESTED_IRQ").is_ok_and(|v| v == "1");
     // Optional: FM1_CPU_MHZ=N emulates an N MHz CPU (default 24, real time).
     if let Ok(mhz) = env::var("FM1_CPU_MHZ") {
         player.cpu.set_cpu_mhz(mhz.parse().map_err(|_| "invalid FM1_CPU_MHZ")?)?;
