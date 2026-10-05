@@ -37,6 +37,7 @@ pub struct Bus {
     clock: crate::clock::Clock,
     resample: crate::resample::Resampler,
     rng: crate::rng::Rng,
+    pub radio: crate::radio::Radio,
     code: crate::code_cache::CodeCache,
     /// NOR generation the code cache was last synchronized with.
     nor_generation: u64,
@@ -77,6 +78,7 @@ impl Bus {
             clock: Default::default(),
             resample: Default::default(),
             rng: Default::default(),
+            radio: Default::default(),
             code: Default::default(),
             nor_generation: 0,
             mmio_stats: Default::default(),
@@ -167,6 +169,17 @@ impl Bus {
             }
             if let Some(value) = self.crc.read(address) {
                 return Ok(value);
+            }
+            if crate::radio::Radio::contains(address) {
+                return match (size, self.radio.read(address)) {
+                    (4, Some(value)) => Ok(value),
+                    _ => Err(Self::fault(
+                        address,
+                        size,
+                        operation,
+                        "JL_WL stub requires word accesses",
+                    )),
+                };
             }
             if crate::rng::Rng::contains(address & !3) {
                 return match (size, self.rng.read(address)) {
@@ -314,6 +327,18 @@ impl Bus {
             return Ok(());
         }
         if self.crc.write(address, value).is_some() {
+            return Ok(());
+        }
+        if crate::radio::Radio::contains(address) {
+            if size != 4 {
+                return Err(Self::fault(
+                    address,
+                    size,
+                    "write",
+                    "JL_WL stub requires word accesses",
+                ));
+            }
+            self.radio.write(address, value);
             return Ok(());
         }
         if crate::rng::Rng::contains(address & !3) {

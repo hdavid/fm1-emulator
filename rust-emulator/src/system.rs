@@ -107,6 +107,12 @@ impl System {
         }
         Some(Ok(()))
     }
+    /// Oscillator ticks until the enabled watchdog expires, if enabled.
+    pub fn watchdog_timeout(&self) -> Option<u64> {
+        let wdt = self.registers[0x80];
+        (wdt & 0x10 != 0).then(|| 24_000_000u64 * (1u64 << (wdt & 15).saturating_sub(10)))
+    }
+
     pub fn advance(&mut self, ticks: u32) -> Result<(), &'static str> {
         let wdt = self.registers[0x80];
         if wdt & 0x10 != 0 {

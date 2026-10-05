@@ -13,6 +13,7 @@ pub mod firmware;
 pub mod gpio;
 pub mod lcd;
 mod package;
+pub mod radio;
 pub mod png;
 mod resample;
 mod rng;

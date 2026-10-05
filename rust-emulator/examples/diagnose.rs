@@ -147,11 +147,20 @@ fn run() -> Result<(), String> {
         "interrupts: {}; USB: {} host setups, {} packets, {} CDC bytes",
         cpu.irq_entries, cpu.bus.usb.setups, cpu.bus.usb.packets, serial_bytes
     );
-    eprintln!("watchdog: {} feeds", cpu.bus.system.watchdog_feeds);
+    eprintln!(
+        "watchdog: {} feeds; timeout {:?} ticks, {} since the last feed",
+        cpu.bus.system.watchdog_feeds,
+        cpu.bus.system.watchdog_timeout(),
+        cpu.bus.system.watchdog_ticks
+    );
     eprintln!(
         "audio: {} stereo frames, {} DMA halves; ADC: {} conversions",
         cpu.bus.audio.frames, cpu.bus.audio.halves, cpu.bus.devices.adc.conversions
     );
+    let radio = cpu.bus.radio.accesses.get();
+    if radio > 0 {
+        eprintln!("STUB radio (JL_WL, no RF emulated): {radio} register accesses");
+    }
     if let Some(&address) = firmware.symbols.get("felucca_dbg") {
         // Existing guest diagnostics from Felucca's audio.c; no guest hooks.
         if cpu.bus.read(address, 4).ok() == Some(0x44424731) {

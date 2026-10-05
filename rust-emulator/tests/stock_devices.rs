@@ -46,3 +46,18 @@ fn random_number_generator_returns_fresh_words_and_is_read_only() {
     assert!(b.write(0x13b00, 0, 4).is_err());
     assert!(b.read(0x13b00, 2).is_err());
 }
+
+#[test]
+fn radio_stub_retains_registers_and_completes_rf_port_writes() {
+    // STUB (radio.rs): JL_WL, JL_ANA WLA_CON1.. and the BT core window keep
+    // written values; the RF port at 0x3101c drops its bit-17 busy flag.
+    let mut b = bus();
+    b.write(0x14040, 0x1234, 4).unwrap();
+    assert_eq!(b.read(0x14040, 4).unwrap(), 0x1234);
+    assert_eq!(b.read(0x11930, 4).unwrap(), 0);
+    b.write(0x30f04, 7, 4).unwrap();
+    assert_eq!(b.read(0x30f04, 4).unwrap(), 7);
+    b.write(0x3101c, 0x000a_1600, 4).unwrap();
+    assert_eq!(b.read(0x3101c, 4).unwrap(), 0x0008_1600);
+    assert!(b.radio.accesses.get() >= 6);
+}
