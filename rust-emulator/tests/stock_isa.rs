@@ -214,6 +214,23 @@ fn signed_greater_than_register_conditional_guards_its_then_block() {
 }
 
 #[test]
+fn special_register_pop_with_only_the_rets_bit_restores_rets() {
+    // FM-1_093 variadic wrapper at 0x0200322a: push {r3..r0}; push rets; ...
+    // call; sp += 16; 0488; sp += 16; rts. 0x0480 | mask pops special
+    // registers by bitmap (0x04a9 = {psr, rets, reti}: bits 5, 3, 0), so
+    // 0x0488 is pop {rets}.
+    let mut c = cpu(&[0x0488, 0x0000]);
+    c.sr[14] = RAM + 0x100;
+    c.sr[5] = 0x55;
+    c.bus.write(RAM + 0x100, 0x0200_3334, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.sr[3], 0x0200_3334);
+    assert_eq!(c.sr[14], RAM + 0x104);
+    assert_eq!(c.sr[5], 0x55);
+    assert_eq!(c.pc, XIP + 2);
+}
+
+#[test]
 fn register_repeat_with_a_zero_count_skips_its_block() {
     let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);
     c.r[1] = RAM;

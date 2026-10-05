@@ -696,12 +696,14 @@ impl Cpu {
                 name = "push_irq_frame";
             }
             Op::PopIrqFrame => {
-                if h == 0x04a9 {
-                    self.sr[0] = self.pop()?;
+                // 0x0480 | mask: pop the special registers whose bits are set,
+                // lowest index first (0x04a9 = {reti, rets, psr}, 0x0488 = rets).
+                for index in [0, 3, 5] {
+                    if h & (1 << index) != 0 {
+                        self.sr[index] = self.pop()?;
+                    }
                 }
-                self.sr[3] = self.pop()?;
-                self.sr[5] = self.pop()?;
-                name = "pop_irq_frame";
+                name = if h == 0x0488 { "pop_rets" } else { "pop_irq_frame" };
             }
             Op::CallRel32 => {
                 // Vendor startup uses a signed byte displacement after a 6-byte call.

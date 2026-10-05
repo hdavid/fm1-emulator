@@ -205,7 +205,7 @@ pub(crate) fn decode(h: u32) -> Op {
         MoveStackPointer
     } else if matches!(h, 0x04e8 | 0x04e9) {
         PushIrqFrame
-    } else if matches!(h, 0x04a8 | 0x04a9) {
+    } else if matches!(h, 0x04a8 | 0x04a9 | 0x0488) {
         PopIrqFrame
     } else if h == 0xff80 {
         CallRel32
