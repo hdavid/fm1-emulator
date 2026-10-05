@@ -378,3 +378,227 @@ fn memory_mask_offsets_are_signed_and_xor_is_an_operation() {
     c.step().unwrap();
     assert_eq!(c.bus.read(RAM + 0x80, 4).unwrap(), 0x3e00);
 }
+
+// Compare-branches and conditional blocks.
+
+#[test]
+fn unsigned_compare_branches_take_an_unsigned_ten_bit_immediate() {
+    // SLOOP 2.2 fm1_delay_us at 0x02017002: f9f1 81fc = jb r1, #960, pc - 4
+    // (loop while elapsed TIMER4 ticks < 960). Sign-extending made it
+    // r1 < 0xffffffc0: a wait that never ended.
+    for (elapsed, taken) in [(959u32, true), (960, false), (49_799_320, false)] {
+        let mut c = cpu(&[0xf9f1, 0x81fc]);
+        c.r[1] = elapsed;
+        c.step().unwrap();
+        assert_eq!(
+            c.pc,
+            if taken { XIP - 4 } else { XIP + 4 },
+            "r1 = {elapsed}"
+        );
+    }
+}
+
+#[test]
+fn float_compare_branches_cover_the_equality_and_unsigned_rows() {
+    // Vendor objdump with x bit 11: e801 2804 is iff (r2 == r1) goto 8, and
+    // e881 / e901 / e981 / ec01 / ec81 are u!=, u>=, <, u> and <= (the
+    // ED00-EE80 rows are already measured). Negative operands show the float
+    // ordering, which integer order would invert. Unordered operands still
+    // fault, as for the measured forms.
+    for (h, lhs, rhs, taken) in [
+        (0xe801u16, -0.0f32, 0.0f32, true),
+        (0xe801, 1.0, 2.0, false),
+        (0xe881, 1.0, 2.0, true),
+        (0xe881, -0.0, 0.0, false),
+        (0xe901, -1.0, -2.0, true),
+        (0xe901, -2.0, -1.0, false),
+        (0xe981, -2.0, -1.0, true),
+        (0xe981, -1.0, -1.0, false),
+        (0xec01, -1.0, -2.0, true),
+        (0xec01, -1.0, -1.0, false),
+        (0xec81, -1.0, -1.0, true),
+        (0xec81, -1.0, -2.0, false),
+    ] {
+        let mut c = cpu(&[h, 0x2804]);
+        c.r[2] = lhs.to_bits();
+        c.r[1] = rhs.to_bits();
+        c.step().unwrap();
+        assert_eq!(
+            c.pc,
+            if taken { XIP + 4 + 8 } else { XIP + 4 },
+            "{h:04x} {lhs} {rhs}"
+        );
+    }
+    let mut c = cpu(&[0xe801, 0x2804]);
+    c.r[2] = f32::NAN.to_bits();
+    c.r[1] = 1.0f32.to_bits();
+    assert!(c.step().is_err());
+}
+
+#[test]
+fn signed_less_equal_packed_conditional_runs_its_arm_at_the_bound() {
+    // 0x020035d2 (fx.c gain_next, MUTE_STEP 4096): r3 = |to - a|, then
+    // `ifs (r3 <= #0x1000) { r4 = r1 }`, bytes a3 ee 80 0d, 14 16.
+    for (distance, taken) in [(4096u32, true), (4097, false), (0xffff_f000, true)] {
+        let mut c = cpu(&[0xeea3, 0x0d80, 0x1614, 0x0000]);
+        c.r[3] = distance;
+        c.r[1] = 0;
+        c.r[4] = 0x1234;
+        c.step().unwrap();
+        if taken {
+            assert_eq!(c.pc, XIP + 4, "distance {distance:#x}");
+            c.step().unwrap();
+            assert_eq!(c.r[4], 0, "distance {distance:#x}");
+        } else {
+            assert_eq!(c.pc, XIP + 6, "distance {distance:#x}");
+            assert_eq!(c.r[4], 0x1234);
+        }
+    }
+}
+
+#[test]
+fn punch_filter_sweeps_floor_at_their_packed_bounds() {
+    // 0x02006ee0 / 0x02006f04 (punch.c): cut = cut > (34 << 8) ? cut - 96 :
+    // 34 << 8, and the HPF one at 88 << 8. The packed immediates 0d08 and
+    // 0cb0 decode to 0x2200 and 0x5800, the values the arms then load.
+    for (words, bound) in [
+        ([0xeea2, 0x0d08, 0xe041, 0x2200], 0x2200u32),
+        ([0xeea2, 0x0cb0, 0xe041, 0x5800], 0x5800),
+    ] {
+        let mut c = cpu(&words);
+        c.r[2] = bound;
+        c.r[1] = bound - 96;
+        c.step().unwrap();
+        c.step().unwrap();
+        assert_eq!(c.r[1], bound);
+        let mut c = cpu(&words);
+        c.r[2] = bound + 1;
+        c.r[1] = 7;
+        c.step().unwrap();
+        assert_eq!(c.pc, XIP + 8);
+        assert_eq!(c.r[1], 7);
+    }
+}
+
+/// Where a one-instruction conditional block `[h, x, r1 = 1]` continues.
+fn conditional_target(h: u16, x: u16, register: usize, value: u32) -> u32 {
+    let mut c = cpu(&[h, x, 0x2141, 0x2140]);
+    c.r[register] = value;
+    c.step().unwrap();
+    c.pc - XIP
+}
+
+#[test]
+fn conditional_blocks_compare_with_packed_immediates() {
+    // ota_session (Felucca/Jangada/SLOOP): ec23 0ba0 `if (r3 > 81920) {`.
+    for (value, enters) in [(81921, true), (81920, false), (0xffff_ffff, true)] {
+        let expected = if enters { 4 } else { 6 };
+        assert_eq!(conditional_target(0xec23, 0x0ba0, 3, value), expected);
+    }
+    // e9a3 0ba0 `if (r3 < 81920) {` (unsigned).
+    for (value, enters) in [(81919, true), (81920, false), (0xffff_ffff, false)] {
+        let expected = if enters { 4 } else { 6 };
+        assert_eq!(conditional_target(0xe9a3, 0x0ba0, 3, value), expected);
+    }
+    // FM-1_093 0x020a3008: ee21 0e5e `ifs (r1 > 3552) {` (signed).
+    for (value, enters) in [(3553, true), (3552, false), (-5i32 as u32, false)] {
+        let expected = if enters { 4 } else { 6 };
+        assert_eq!(conditional_target(0xee21, 0x0e5e, 1, value), expected);
+    }
+}
+
+#[test]
+fn conditional_blocks_skip_six_byte_compare_branches_whole() {
+    // e820 0001 `if (r0 == 1) {` around ff00 0000 0002
+    // `if (r0 == 0) goto 4` (6 bytes in objdump), then r1 = 1; r0 = 1.
+    let mut c = cpu(&[0xe820, 0x0001, 0xff00, 0x0000, 0x0002, 0x2141, 0x2140]);
+    c.r[0] = 5;
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 10);
+    c.step().unwrap();
+    assert_eq!(c.r[1], 1);
+}
+
+/// Where a one-instruction register conditional block `[h, x, r1 = 1]`
+/// continues with rN (h & 15) = `lhs` and rC (x >> 8 & 15) = `rhs`: 4 when
+/// it enters the block, 6 when it skips it.
+fn register_conditional_target(h: u16, x: u16, lhs: u32, rhs: u32) -> u32 {
+    let mut c = cpu(&[h, x, 0x2141, 0x2140]);
+    c.r[((x >> 8) & 15) as usize] = rhs;
+    c.r[(h & 15) as usize] = lhs;
+    c.step().unwrap();
+    c.pc - XIP
+}
+
+#[test]
+fn register_conditional_blocks_with_x_bit_7_compare_floats() {
+    // Vendor objdump -mattr=+fprev1: register conditional blocks whose x has
+    // bit 7 set (bit 6 clear) are `iff`, IEEE single compares, in every row
+    // (the ED1X-EE9X rows are already measured). Stock RAM code: ed11 0080
+    // iff (r1 >= r0) {, ed92 8b80 iff (r2 u< r11) {. Unordered operands
+    // fault, as for the measured rows.
+    let f = |v: f32| v.to_bits();
+    let cases: [(u16, f32, f32, bool); 10] = [
+        // (h with rN = r3, lhs, rhs, enters)
+        (0xe813, -0.0, 0.0, true),  // iff (r3 == r0)
+        (0xe893, 1.0, 1.0, false),  // iff (r3 u!= r0)
+        (0xe913, -1.0, -2.0, true), // iff (r3 u>= r0)
+        (0xe993, -2.0, -1.0, true), // iff (r3 < r0)
+        (0xec13, -1.0, -2.0, true), // iff (r3 u> r0)
+        (0xec93, -2.0, -2.0, true), // iff (r3 <= r0)
+        (0xed13, -1.0, -2.0, true), // iff (r3 >= r0)
+        (0xed93, -2.0, -1.0, true), // iff (r3 u< r0)
+        (0xee13, -1.0, -2.0, true), // iff (r3 > r0)
+        (0xee93, -2.0, -1.0, true), // iff (r3 u<= r0)
+    ];
+    for (h, lhs, rhs, enters) in cases {
+        let target = if enters { 4 } else { 6 };
+        assert_eq!(
+            register_conditional_target(h, 0x0080, f(lhs), f(rhs)),
+            target,
+            "{h:04x} {lhs} {rhs}"
+        );
+        let mut c = cpu(&[h, 0x0080, 0x2141, 0x2140]);
+        c.r[3] = f32::NAN.to_bits();
+        assert!(c.step().is_err(), "{h:04x} NaN");
+    }
+    // The low bits of x do not matter (objdump: 0081, 0090 and 00a0 too).
+    assert_eq!(
+        register_conditional_target(0xed13, 0x0090, f(-1.0), f(-2.0)),
+        4
+    );
+    // ed92 8b80: iff (r2 u< r11) { compares r2 with r11.
+    assert_eq!(
+        register_conditional_target(0xed92, 0x0b80, f(-3.0), f(-1.0)),
+        4
+    );
+    assert_eq!(
+        register_conditional_target(0xed92, 0x0b80, f(1.0), f(-1.0)),
+        6
+    );
+}
+
+#[test]
+fn register_bit_test_block_with_x_low_bits_is_a_float_not_equal() {
+    // objdump -mattr=+fprev1, ea13 x: 0000 if ((r3 & r0) == 0) {,
+    // 0080 if ((r3 & r0) != 0) {, 0081-00bf iff (r3 != r0) { (ordered).
+    let f = |v: f32| v.to_bits();
+    assert_eq!(register_conditional_target(0xea13, 0x0000, 2, 1), 4);
+    assert_eq!(register_conditional_target(0xea13, 0x0080, 3, 1), 4);
+    assert_eq!(register_conditional_target(0xea13, 0x0080, 2, 1), 6);
+    assert_eq!(
+        register_conditional_target(0xea13, 0x0081, f(1.0), f(2.0)),
+        4
+    );
+    assert_eq!(
+        register_conditional_target(0xea13, 0x0081, f(-0.0), f(0.0)),
+        6
+    );
+}
+
+#[test]
+fn register_conditional_blocks_with_x_bits_7_and_6_are_unsupported() {
+    // objdump (with or without the FPU): e813 00c0 is <unknown instruction>.
+    let mut c = cpu(&[0xe813, 0x00c0, 0x2141, 0x2140]);
+    assert!(c.step().is_err());
+}

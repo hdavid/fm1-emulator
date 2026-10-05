@@ -477,30 +477,27 @@ impl Cpu {
     }
 
     pub(crate) fn conditional(&mut self, test: bool, counts: u32) -> Result<u32, Fault> {
+        fn skip_length(h: u32) -> u32 {
+            // FF00-FF7F are the six-byte compare-branches (vendor objdump), as
+            // the 32-bit moves and the 32-bit call.
+            if matches!(h & 0xffe0, 0xffc0 | 0xffe0) || h == 0xff80 || h & 0xff80 == 0xff00 {
+                6
+            } else if h >> 13 == 7 {
+                4
+            } else {
+                2
+            }
+        }
         let mut cursor = self.pc + 4;
         let mut then_end = cursor;
         let then_count = (counts >> 14) + 1;
         let else_count = (counts >> 12) & 3;
         for i in 0..then_count + else_count {
             let h = self.read(cursor, 2)?;
-            let length = if matches!(h & 0xffe0, 0xffc0 | 0xffe0) || h == 0xff80 {
-                6
-            } else if h >> 13 == 7 {
-                4
-            } else {
-                2
-            };
-            cursor += length;
+            cursor += skip_length(h);
             // A parallel pair counts as one conditional instruction bundle.
             if h >> 13 == 6 || h & 0xf800 == 0xf000 {
-                let following = self.read(cursor, 2)?;
-                cursor += if matches!(following & 0xffe0, 0xffc0 | 0xffe0) || following == 0xff80 {
-                    6
-                } else if following >> 13 == 7 {
-                    4
-                } else {
-                    2
-                };
+                cursor += skip_length(self.read(cursor, 2)?);
             }
             if i + 1 == then_count {
                 then_end = cursor;

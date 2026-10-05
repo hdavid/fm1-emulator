@@ -55,6 +55,21 @@ fn pair_access(cpu: &mut Cpu, address: u32, d: usize, store: bool) -> Result<(),
     Ok(())
 }
 
+/// IEEE single test of a register conditional block with x bit 7 (vendor
+/// objdump -mattr=+fprev1 prints `iff`; the order of the compare-branches).
+/// Unordered operands are rejected by the caller.
+fn float_condition(kind: u32, lhs: f32, rhs: f32) -> bool {
+    match kind {
+        0x81 => lhs == rhs,
+        0x89 => lhs != rhs,
+        0x91 | 0xd1 => lhs >= rhs,
+        0x99 | 0xd9 => lhs < rhs,
+        0xa1 => lhs != rhs,
+        0xc1 | 0xe1 => lhs > rhs,
+        _ => lhs <= rhs,
+    }
+}
+
 pub(crate) fn execute(
     cpu: &mut Cpu,
     h: u32,
@@ -783,10 +798,12 @@ pub(crate) fn execute(
                     } else {
                         packed(x)
                     };
-                    let test = if matches!(kind, 0xd1 | 0xd9 | 0xe1 | 0xe9) && x & 128 != 0 {
-                        // Vendor r3: bit 7 changes these register comparisons from
-                        // signed integers to floating point (iff). Stock voice pitch
-                        // calculation compares negative floats with this block form.
+                    // Vendor r3: x bit 7 changes the register comparisons from
+                    // integers to floating point (iff). Stock voice pitch
+                    // calculation compares negative floats with this block form.
+                    // EA1X with x = 0080 stays the integer bit test != 0.
+                    let float = kind & 7 == 1 && x & 128 != 0 && !(kind == 0xa1 && x & 0x7f == 0);
+                    let test = if float {
                         let lhs = f32::from_bits(lhs);
                         let rhs = f32::from_bits(rhs);
                         if !lhs.is_finite() || !rhs.is_finite() {
@@ -801,18 +818,13 @@ pub(crate) fn execute(
                                 },
                             });
                         }
-                        match kind {
-                            0xd1 => lhs >= rhs,
-                            0xd9 => lhs < rhs,
-                            0xe1 => lhs > rhs,
-                            _ => lhs <= rhs,
-                        }
+                        float_condition(kind, lhs, rhs)
                     } else {
                         match kind {
                             0x81..=0x83 => lhs == rhs,
                             0x89..=0x8b => lhs != rhs,
                             0x91..=0x93 => lhs >= rhs,
-                            0x99 | 0x9b => lhs < rhs,
+                            0x99..=0x9b => lhs < rhs,
                             0xa1 => {
                                 if x & 128 == 0 {
                                     lhs & rhs == 0
@@ -822,7 +834,7 @@ pub(crate) fn execute(
                             }
                             0xa2 => lhs & rhs == 0,
                             0xa3 => lhs & rhs != 0,
-                            0xc1 | 0xc3 => lhs > rhs,
+                            0xc1..=0xc3 => lhs > rhs,
                             0xc9..=0xcb => lhs <= rhs,
                             0xd1..=0xd3 => (lhs as i32) >= (rhs as i32),
                             0xd9..=0xdb => (lhs as i32) < (rhs as i32),
@@ -890,15 +902,20 @@ pub(crate) fn execute(
                 }
                 Wide::BranchCompareImmediate => {
                     let kind = (h >> 7) & 63;
-                    let immediate = signed((((h >> 4) & 7) << 7) | (x >> 9), 10) as u32;
+                    // The ordered unsigned forms take an unsigned imm10 (SLOOP's
+                    // fm1_delay_us: F9F1 81FC is jb r1, #960); equality and the
+                    // signed forms sign-extend it (Baud Girl: F874 FC04 is je
+                    // against -2).
+                    let raw = (((h >> 4) & 7) << 7) | (x >> 9);
+                    let immediate = signed(raw, 10) as u32;
                     let v = cpu.r[n];
                     let test = match kind {
                         0x30 => v == immediate,
                         0x31 => v != immediate,
-                        0x32 => v >= immediate,
-                        0x33 => v < immediate,
-                        0x38 => v > immediate,
-                        0x39 => v <= immediate,
+                        0x32 => v >= raw,
+                        0x33 => v < raw,
+                        0x38 => v > raw,
+                        0x39 => v <= raw,
                         0x3a => (v as i32) >= signed(immediate, 10),
                         0x3b => (v as i32) < signed(immediate, 10),
                         0x3c => (v as i32) > signed(immediate, 10),
@@ -923,10 +940,14 @@ pub(crate) fn execute(
                             },
                         });
                     }
+                    // Vendor objdump: E800 ==, E880 !=, E900 >=, E980 <, EC00 >,
+                    // EC80 <=, then the measured ED00-EE80 forms.
                     let test = match h & 0xfff0 {
-                        0xed00 => lhs >= rhs,
-                        0xed80 => lhs < rhs,
-                        0xee00 => lhs > rhs,
+                        0xe800 => lhs == rhs,
+                        0xe880 => lhs != rhs,
+                        0xe900 | 0xed00 => lhs >= rhs,
+                        0xe980 | 0xed80 => lhs < rhs,
+                        0xec00 | 0xee00 => lhs > rhs,
                         _ => lhs <= rhs,
                     };
                     if test {
