@@ -60,7 +60,7 @@ const SPAN: u32 = 6;
 pub(crate) struct CodeCache {
     entries: Box<[Entry; 1 << BITS]>,
     epoch: u32,
-    ram_pages: Vec<bool>,
+    ram_pages: Box<[bool; RAM_SIZE >> PAGE_SHIFT]>,
 }
 
 impl Default for CodeCache {
@@ -71,7 +71,7 @@ impl Default for CodeCache {
                 .try_into()
                 .unwrap_or_else(|_| unreachable!()),
             epoch: 1,
-            ram_pages: vec![false; RAM_SIZE >> PAGE_SHIFT],
+            ram_pages: Box::new([false; RAM_SIZE >> PAGE_SHIFT]),
         }
     }
 }
@@ -141,6 +141,16 @@ impl CodeCache {
             if self.ram_pages[page] {
                 self.invalidate_page(page);
             }
+        }
+    }
+
+    /// An aligned SRAM store of at most 4 bytes at `offset` (relative to
+    /// RAM, in range): it lies within one page.
+    #[inline(always)]
+    pub fn invalidate_ram_store(&mut self, offset: usize) {
+        let page = offset >> PAGE_SHIFT;
+        if self.ram_pages[page] {
+            self.invalidate_page(page);
         }
     }
 

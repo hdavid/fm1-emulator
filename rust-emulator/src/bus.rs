@@ -420,7 +420,7 @@ impl Bus {
                 2 => self.ram[offset..offset + 2].copy_from_slice(&(value as u16).to_le_bytes()),
                 _ => self.ram[offset] = value as u8,
             }
-            self.code.invalidate_ram(offset, size);
+            self.code.invalidate_ram_store(offset);
             return Ok(());
         }
         self.write_slow(address, value, size)
