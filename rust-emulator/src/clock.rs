@@ -8,6 +8,9 @@ pub(crate) struct Clock {
     instruction_phase: u64,
     phase_hz: u32,
     issue_clock: Option<(u32, u32)>,
+    /// Instructions per second of guest time when set, instead of the
+    /// firmware's system clock (an opt-in for real-time playback).
+    pub(crate) issue_override: Option<u32>,
 }
 impl Default for Clock {
     fn default() -> Self {
@@ -18,6 +21,7 @@ impl Default for Clock {
             instruction_phase: 0,
             phase_hz: 360_000_000,
             issue_clock: None,
+            issue_override: None,
         }
     }
 }
@@ -48,8 +52,9 @@ impl Clock {
         sys / (((self.system[1] >> 16) & 3) + 1) / (((self.system[1] >> 8) & 7) + 1)
     }
     pub(crate) fn instruction_ticks(&mut self, clk_con3: u32) -> u32 {
-        let hz = match self.issue_clock {
-            Some((selector, hz)) if selector == clk_con3 => hz,
+        let hz = match (self.issue_override, self.issue_clock) {
+            (Some(hz), _) => hz.max(1),
+            (None, Some((selector, hz))) if selector == clk_con3 => hz,
             _ => {
                 let hz = self.system_hz(clk_con3).max(1);
                 self.issue_clock = Some((clk_con3, hz));
