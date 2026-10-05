@@ -643,15 +643,21 @@ pub(crate) fn execute(
             )
         {
             let kind = (h >> 7) & 63;
-            let immediate = signed((((h >> 4) & 7) << 7) | (x >> 9), 10) as u32;
+            // The ordered unsigned forms (jae jb ja jbe) take an unsigned imm10
+            // (SLOOP's fm1_delay_us: jb r1, #960); equality (je jne) and the
+            // signed forms sign-extend it (Baud Girl 0x02001820: je against
+            // -2, f874 fc04). Quarkslab's spec lists je as unsigned too; the
+            // stock-toolchain code says otherwise.
+            let raw = (((h >> 4) & 7) << 7) | (x >> 9);
+            let immediate = signed(raw, 10) as u32;
             let v = cpu.r[n];
             let test = match kind {
                 0x30 => v == immediate,
                 0x31 => v != immediate,
-                0x32 => v >= immediate,
-                0x33 => v < immediate,
-                0x38 => v > immediate,
-                0x39 => v <= immediate,
+                0x32 => v >= raw,
+                0x33 => v < raw,
+                0x38 => v > raw,
+                0x39 => v <= raw,
                 0x3a => (v as i32) >= signed(immediate, 10),
                 0x3b => (v as i32) < signed(immediate, 10),
                 0x3c => (v as i32) > signed(immediate, 10),

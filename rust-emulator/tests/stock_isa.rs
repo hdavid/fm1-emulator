@@ -139,3 +139,28 @@ fn stack_adjust_by_signed_thirteen_bit_immediate_allocates_and_frees_frames() {
         assert_eq!(c.pc, XIP + 4);
     }
 }
+
+#[test]
+fn unsigned_compare_branches_take_an_unsigned_ten_bit_immediate() {
+    // SLOOP 2.2 fm1_delay_us at 0x02017002: f9f1 81fc = jb r1, #960, pc - 4
+    // (loop while elapsed TIMER4 ticks < 960). Sign-extending made it
+    // r1 < 0xffffffc0: a wait that never ended.
+    for (elapsed, taken) in [(959u32, true), (960, false), (49_799_320, false)] {
+        let mut c = cpu(&[0xf9f1, 0x81fc]);
+        c.r[1] = elapsed;
+        c.step().unwrap();
+        assert_eq!(c.pc, if taken { XIP - 4 } else { XIP + 4 }, "r1 = {elapsed}");
+    }
+}
+
+#[test]
+fn equality_compare_branches_sign_extend_their_immediate() {
+    // Baud Girl FM-1_093 0x02001820: f874 fc04 = je r?, #-2, pc + 8 with the
+    // register holding 0xfffffffe; an unsigned imm10 (1022) sent the boot
+    // down a path that read address 0.
+    let mut c = cpu(&[0xf874, 0xfc04]);
+    let n = (0xf874 & 15) as usize;
+    c.r[n] = 0xffff_fffe;
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 4 + 8);
+}
