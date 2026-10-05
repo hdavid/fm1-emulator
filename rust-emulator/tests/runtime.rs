@@ -724,6 +724,34 @@ fn immediate_repeat_clears_twenty_words_and_copies_multiword_blocks() {
 }
 
 #[test]
+fn conditional_finishes_and_skips_else_before_an_interrupt_enters() {
+    // FM-1_988: pending software IRQ observes the final then-arm value,
+    // and RETI points past the skipped else instruction.
+    use fm1_emu::devices::IRQ_CONFIG;
+    let mut c = cpu(&[0xe8a3, 0x9000, 0x60a3, 0x2241, 0x2341, 0x3e79, 0x0081]);
+    c.r[2] = 0x1eef1a0;
+    c.r[3] = 1;
+    c.sr[14] = RAM + 256;
+    c.sr[13] = RAM + 512;
+    c.sr[11] = 0x100;
+    c.bus.write(0x01c7fe00 + 120 * 4, XIP + 12, 4).unwrap();
+    c.bus.write(IRQ_CONFIG + 15 * 4, 5, 4).unwrap();
+    c.interrupts_enabled = true;
+    c.step().unwrap();
+    c.step().unwrap(); // Pending inside the then arm.
+    c.step().unwrap();
+    assert_eq!(c.irq_entries, 0);
+    c.step().unwrap();
+    assert_eq!(c.r[1], 3);
+    assert_eq!(c.irq_entries, 1);
+    assert_eq!(c.sr[0], XIP + 12);
+    c.bus.write(0x1eef1a4, 1, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 12);
+    assert_eq!(c.r[1], 3);
+}
+
+#[test]
 fn repeat_finishes_before_dispatching_a_pending_interrupt() {
     use fm1_emu::devices::{IRQ_CONFIG, TIMER5};
     for repeat in [0x8200, 0x0303] {

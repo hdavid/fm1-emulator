@@ -339,6 +339,14 @@ impl Cpu {
         } else {
             self.execute(h)?
         };
+        // FM-1_988: conditional bundles finish and skip their unselected
+        // arm before a pending interrupt can enter.
+        if let Some((at, end)) = self.predicate_skip {
+            if self.pc == at {
+                self.pc = end;
+                self.predicate_skip = None;
+            }
+        }
         if let Some(mut repeat) = self.repeat {
             if self.pc == repeat.end {
                 if let Some((register, count)) = repeat.register {
@@ -782,7 +790,11 @@ impl Cpu {
     }
 
     fn dispatch_interrupt(&mut self) -> Result<(), Fault> {
-        if !self.interrupts_enabled || self.in_interrupt || self.repeat.is_some() {
+        if !self.interrupts_enabled
+            || self.in_interrupt
+            || self.repeat.is_some()
+            || self.predicate_skip.is_some()
+        {
             return Ok(());
         }
         if let Some(source) = self.bus.pending_irq_for(self.sr[11], self.sr[6] as usize) {
