@@ -802,13 +802,25 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
         }
         Op::BranchLong => {
             let value = match h & 0x60 {
+                // ==, != and the signed orderings sign-extend the literal
+                // (objdump: ff00 0fff = if (r0 == -1), ff0a 0fff = ifs
+                // (r0 >= -1)); unsigned orderings keep all 12 bits (ff02
+                // 0fff = if (r0 >= 4095)).
+                0 if matches!(h & 15, 0 | 1 | 10..=13) => signed(x & 4095, 12) as u32,
                 0 => x & 4095,
                 0x20 => packed(x),
                 0x40 => cpu.r[c],
                 _ => packed(x),
             };
             let lhs = cpu.r[d];
-            let test = if h & 0x60 == 0x60 {
+            let test = if h & 0x60 == 0x40 && x & 0x80 != 0 {
+                // Register form with x bit 7: IEEE single (objdump iff, the
+                // conditions in the order of the four-byte rows; `u` also
+                // holds when unordered). X0X's limiter: ff42 7380.
+                let kind = [0x81, 0x89, 0x91, 0x99, 0, 0, 0, 0, 0xc1, 0xc9, 0xd1, 0xd9, 0xe1, 0xe9]
+                    [(h & 15) as usize];
+                float_condition(kind, f32::from_bits(lhs), f32::from_bits(value))
+            } else if h & 0x60 == 0x60 {
                 if h & 1 == 0 {
                     lhs & value == 0
                 } else {
