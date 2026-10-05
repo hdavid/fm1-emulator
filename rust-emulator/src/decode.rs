@@ -493,11 +493,13 @@ fn wide(h: u32, x: u32) -> Wide {
             | 0x92
             | 0x93
             | 0x99
+            | 0x9a
             | 0x9b
             | 0xa1
             | 0xa2
             | 0xa3
             | 0xc1
+            | 0xc2
             | 0xc3
             | 0xc9
             | 0xca
@@ -512,8 +514,11 @@ fn wide(h: u32, x: u32) -> Wide {
             | 0xe2
             | 0xe3
             | 0xe9
+            | 0xea
             | 0xeb
     ) && h & 0xf000 == 0xe000
+        // Register forms with x bits 7 and 6 set are <unknown> to objdump.
+        && !((h >> 4) & 7 == 1 && x & 0xc0 == 0xc0)
     {
         return Wide::ConditionalBlock;
     }
@@ -544,7 +549,11 @@ fn wide(h: u32, x: u32) -> Wide {
     {
         return Wide::BranchCompareImmediate;
     }
-    if matches!(h & 0xfff0, 0xed00 | 0xed80 | 0xee00 | 0xee80) && x & 0xe00 == 0x800 {
+    if matches!(
+        h & 0xfff0,
+        0xe800 | 0xe880 | 0xe900 | 0xe980 | 0xec00 | 0xec80 | 0xed00 | 0xed80 | 0xee00 | 0xee80
+    ) && x & 0xe00 == 0x800
+    {
         return Wide::BranchCompareFloat;
     }
     if matches!(
