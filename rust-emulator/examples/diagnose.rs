@@ -155,7 +155,10 @@ fn run() -> Result<(), String> {
     }
     stdout.flush().map_err(|e| e.to_string())?;
     eprintln!("application: {}", args[0]);
-    eprintln!("executed: {} instructions", cpu.steps);
+    eprintln!(
+        "executed: {} steps of guest time; CPU0 {} instructions, CPU1 {}",
+        cpu.steps, cpu.core_steps[0], cpu.core_steps[1]
+    );
     eprintln!("stopped: {}", location(&firmware.symbols, cpu.pc));
     if let Some(pc) = cpu.secondary_pc() {
         eprintln!("secondary core: pc {}", location(&firmware.symbols, pc));

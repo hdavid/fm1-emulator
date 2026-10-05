@@ -4,7 +4,7 @@
 // Steps: run:SECONDS (guest time), turn:KNOB:DETENTS (SELECT ALGORITHM
 // PRESETS KNOB1..KNOB4), hold:ID,ID.. / release (matrix key ids, notes 14..40,
 // as fm1-ui's KEYMAP), level:SECONDS (run and print the audio level),
-// png:PATH. Stops on a guest fault and prints the last instructions with
+// png:PATH, cores (instructions per core), words:ADDRESS:N (N words, decimal). Stops on a guest fault and prints the last instructions with
 // registers (PLAY_TRACE=N for the last N, default 40).
 use fm1_emu::{
     player::{knob, Player},
@@ -93,6 +93,28 @@ fn main() -> Result<(), String> {
                 Ok(())
             }
             ["wav", s, path] => record(&mut player, seconds(step, s)?, path),
+            ["cores"] => {
+                // Instructions per core and guest time (steps) so far.
+                let c = &player.cpu;
+                println!(
+                    "  cores: {} steps of guest time; CPU0 {} instructions, CPU1 {}; secondary pc {:?}",
+                    c.steps,
+                    c.core_steps[0],
+                    c.core_steps[1],
+                    c.secondary_pc().map(|pc| format!("0x{pc:08x}"))
+                );
+                Ok(())
+            }
+            ["words", base, words] => {
+                // 32-bit words of guest memory (decimal), e.g. a firmware's counters.
+                let base = u32::from_str_radix(base.trim_start_matches("0x"), 16).map_err(|_| format!("bad {step}"))?;
+                let words: u32 = words.parse().map_err(|_| format!("bad {step}"))?;
+                let values: Vec<String> = (0..words)
+                    .map(|w| player.cpu.bus.read(base + w * 4, 4).map_or("?".into(), |v| v.to_string()))
+                    .collect();
+                println!("  0x{base:08x}: {}", values.join(" "));
+                Ok(())
+            }
             ["halves", base, words] => {
                 // Non-zero words in each half of a DMA double buffer.
                 let base = u32::from_str_radix(base.trim_start_matches("0x"), 16).map_err(|_| format!("bad {step}"))?;
