@@ -394,6 +394,7 @@ impl Cpu {
         self.bus
             .advance_audio(OSC_TICKS_PER_INSTRUCTION)
             .map_err(|fault| Fault::Access { pc, fault })?;
+        self.bus.spi2.advance(OSC_TICKS_PER_INSTRUCTION);
         Ok(())
     }
 
@@ -729,19 +730,21 @@ impl Cpu {
                 name = "move_stack_pointer";
             }
             Op::PushIrqFrame => {
-                self.push(self.sr[5])?;
-                self.push(self.sr[3])?;
-                if h == 0x04e9 {
-                    self.push(self.sr[0])?;
+                // 0x04c0 | mask over {reti 0, rets 3, psr 5}, highest first
+                // (04e9 = {psr, rets, reti}; 04e1 = {psr, reti}).
+                for index in [5, 3, 0] {
+                    if h & (1 << index) != 0 {
+                        self.push(self.sr[index])?;
+                    }
                 }
                 name = "push_irq_frame";
             }
             Op::PopIrqFrame => {
-                if h == 0x04a9 {
-                    self.sr[0] = self.pop()?;
+                for index in [0, 3, 5] {
+                    if h & (1 << index) != 0 {
+                        self.sr[index] = self.pop()?;
+                    }
                 }
-                self.sr[3] = self.pop()?;
-                self.sr[5] = self.pop()?;
                 name = "pop_irq_frame";
             }
             Op::PopSpecial => {

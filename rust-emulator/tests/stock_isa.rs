@@ -482,6 +482,27 @@ fn masked_push_and_pop_with_bit_zero_save_rets_and_return() {
 }
 
 #[test]
+fn special_register_frame_without_rets_saves_psr_and_reti() {
+    // FM-1_093 SPI interrupt handler (flash 0x020887f0, run from RAM):
+    // 04e1; e8d8 01ff; ... e8d4 01ff; 04a1; csync; rti. Bitmap 0x21 =
+    // {reti (bit 0), psr (bit 5)}, the same layout as 04e9/04a9 without rets.
+    let mut c = cpu(&[0x04e1, 0x04a1]);
+    c.sr[14] = RAM + 0x100;
+    c.sr[0] = 0x0200_1234;
+    c.sr[3] = 0x0200_5678;
+    c.sr[5] = 0x2;
+    c.step().unwrap();
+    assert_eq!(c.sr[14], RAM + 0xf8);
+    assert_eq!(c.bus.read(RAM + 0xfc, 4).unwrap(), 0x2);
+    assert_eq!(c.bus.read(RAM + 0xf8, 4).unwrap(), 0x0200_1234);
+    c.sr[0] = 0;
+    c.sr[5] = 0;
+    c.step().unwrap();
+    assert_eq!((c.sr[0], c.sr[3], c.sr[5]), (0x0200_1234, 0x0200_5678, 0x2));
+    assert_eq!(c.sr[14], RAM + 0x100);
+}
+
+#[test]
 fn register_repeat_with_a_zero_count_skips_its_block() {
     let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);
     c.r[1] = RAM;

@@ -208,9 +208,9 @@ pub(crate) fn decode(h: u32) -> Op {
         PopPcRegs
     } else if matches!(h, 0x1440..=0x1443) {
         MoveStackPointer
-    } else if matches!(h, 0x04e8 | 0x04e9) {
+    } else if matches!(h, 0x04e8 | 0x04e9 | 0x04e1) {
         PushIrqFrame
-    } else if matches!(h, 0x04a8 | 0x04a9) {
+    } else if matches!(h, 0x04a8 | 0x04a9 | 0x04a1) {
         PopIrqFrame
     } else if h & 0xfff0 == 0x0480 && h & 15 != 0 {
         PopSpecial

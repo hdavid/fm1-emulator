@@ -500,16 +500,24 @@ impl Bus {
             return None;
         }
         let timer = self.devices.pending_irq_for(icfg, core);
-        let audio_priority = self.devices.irq_priority_for(crate::audio::IRQ, icfg, core);
-        if self.audio.pending_irq() {
-            if let Some(priority) = audio_priority {
-                if timer.is_none_or(|source| {
-                    priority > self.devices.irq_priority_for(source, icfg, core).unwrap()
-                }) {
-                    return Some(crate::audio::IRQ);
+        let mut best = timer.map(|source| {
+            (source, self.devices.irq_priority_for(source, icfg, core).unwrap())
+        });
+        // Peripheral sources outside devices.rs; a strictly higher priority
+        // wins, so the timer keeps ties (unchanged ordering for audio).
+        for (source, pending) in [
+            (crate::audio::IRQ, self.audio.pending_irq()),
+            (crate::spi2::IRQ, self.spi2.pending_irq()),
+        ] {
+            if !pending {
+                continue;
+            }
+            if let Some(priority) = self.devices.irq_priority_for(source, icfg, core) {
+                if best.is_none_or(|(_, highest)| priority > highest) {
+                    best = Some((source, priority));
                 }
             }
         }
-        timer
+        best.map(|(source, _)| source)
     }
 }

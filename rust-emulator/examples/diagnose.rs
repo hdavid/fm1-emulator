@@ -176,6 +176,13 @@ fn run() -> Result<(), String> {
             "STUB SPI2 (no device): {} transfers",
             cpu.bus.spi2.transfers
         );
+        // Optional: FM1_SPI2_LOG=1 lists the first SPI2 transfers.
+        if env::var("FM1_SPI2_LOG").is_ok() {
+            for (index, value, con) in &cpu.bus.spi2.log {
+                let kind = if *index == 2 { "BUF" } else { "DMA CNT" };
+                eprintln!("  SPI2 {kind} {value:#x} (CON {con:#x})");
+            }
+        }
     }
     let radio = cpu.bus.radio.accesses.get();
     if radio > 0 {
