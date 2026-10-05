@@ -63,7 +63,8 @@ and Baud Girl results.
 
 - [ ] Execute native blocks in batches, then broaden JIT coverage; see the [performance plan](rust-emulator/PERFORMANCE.md).
 - [ ] Remaining CPU instructions, peripherals and firmware UI paths.
-- [ ] Host audio playback, rotary controls and USB MIDI.
+- [ ] USB MIDI, and real-time host audio for heavier firmware (playback and
+  rotary controls work; speed is the limit).
 - [ ] Flash persistence, plus fuller encryption, interrupt and timing behavior.
 
 GPL-3.0-only; see [LICENSE](LICENSE). Based on research and components from

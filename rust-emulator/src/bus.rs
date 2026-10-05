@@ -457,6 +457,14 @@ impl Bus {
             self.devices.gpio.shift_spi(&bytes);
         }
     }
+    /// Issue one instruction per `hz` of guest time instead of following the
+    /// firmware's system clock; `None` restores the firmware clock. Timers,
+    /// DMA, USB and the watchdog keep their own clocks, so a lower rate gives
+    /// the guest fewer instructions per second of guest time.
+    pub fn set_instruction_clock(&mut self, hz: Option<u32>) {
+        self.clock.issue_override = hz;
+    }
+
     pub(crate) fn instruction_ticks(&mut self) -> u32 {
         self.clock
             .instruction_ticks(self.audio.read(0x10014).unwrap())

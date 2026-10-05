@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Private GUI worker: one owner of the CPU, and one replaceable UI snapshot.
-use fm1_emu::{cpu::Cpu, firmware::Firmware};
+use super::host_audio::{AudioQueue, TARGET_FRAMES};
+use fm1_emu::{cpu::Cpu, encoders::Encoders, firmware::Firmware};
 use std::{
     io::{self, Read, Write},
     path::PathBuf,
@@ -13,6 +14,8 @@ pub(super) struct Snapshot {
     pub generation: u64,
     pub loaded: bool,
     pub steps: u64,
+    /// Stereo frames the guest has rendered through its audio DMA.
+    pub frames: u64,
     pub fault: Option<String>,
     pub pixels: Option<Vec<u32>>,
 }
@@ -20,6 +23,14 @@ pub(super) struct Snapshot {
 enum Command {
     Restart(u64, PathBuf),
     Input([bool; 41]),
+    /// Queue detents (+ clockwise) on a matrix encoder.
+    Turn(usize, i32),
+    /// The MASTER potentiometer as the ADC reads it (0..=1023).
+    Master(u16),
+    /// Instructions per second of guest time; None follows the firmware.
+    Clock(Option<u32>),
+    /// Where guest audio goes; the worker then paces the guest by it.
+    Audio(Option<AudioQueue>),
     Pause(bool),
     Stop,
     #[cfg(test)]
@@ -37,6 +48,10 @@ pub(super) struct Machine {
     pub cpu: Option<Cpu>,
     pub fault: Option<String>,
     pub paused: bool,
+    pub encoders: Encoders,
+    master: u16,
+    clock: Option<u32>,
+    audio: Option<AudioQueue>,
     generation: u64,
     last_lcd: Option<(u64, bool)>,
 }
@@ -47,6 +62,10 @@ impl Machine {
             cpu: None,
             fault: None,
             paused: false,
+            encoders: Encoders::default(),
+            master: super::MASTER_DEFAULT,
+            clock: None,
+            audio: None,
             generation: 0,
             last_lcd: None,
         }
@@ -57,9 +76,16 @@ impl Machine {
                 self.generation = generation;
                 self.paused = false;
                 self.last_lcd = None;
+                self.encoders = Encoders::default();
+                if let Some(audio) = &self.audio {
+                    audio.clear();
+                }
+                let (master, clock) = (self.master, self.clock);
                 match Firmware::load(&path).and_then(|firmware| {
                     let mut cpu = Cpu::new(firmware.bus()?, firmware.entry);
                     cpu.r[0] = 0x01c7fe08;
+                    cpu.bus.devices.adc.master = master;
+                    cpu.bus.set_instruction_clock(clock);
                     Ok(cpu)
                 }) {
                     Ok(cpu) => {
@@ -87,6 +113,20 @@ impl Machine {
                     }
                 }
             }
+            Command::Turn(encoder, detents) => self.encoders.turn(encoder, detents),
+            Command::Master(value) => {
+                self.master = value;
+                if let Some(cpu) = &mut self.cpu {
+                    cpu.bus.devices.adc.master = value;
+                }
+            }
+            Command::Clock(hz) => {
+                self.clock = hz;
+                if let Some(cpu) = &mut self.cpu {
+                    cpu.bus.set_instruction_clock(hz);
+                }
+            }
+            Command::Audio(queue) => self.audio = queue,
             Command::Pause(paused) => self.paused = paused,
             Command::Stop => return false,
             #[cfg(test)]
@@ -97,17 +137,30 @@ impl Machine {
     fn running(&self) -> bool {
         self.cpu.is_some() && !self.paused && self.fault.is_none()
     }
+    /// While the guest streams audio to the host, its pace is the playback
+    /// queue: real time when the host keeps up.
+    fn ahead(&self) -> bool {
+        match (&self.audio, &self.cpu) {
+            (Some(audio), Some(cpu)) => cpu.bus.audio.frames > 0 && audio.queued() >= TARGET_FRAMES,
+            _ => false,
+        }
+    }
     fn execute(&mut self) {
         if !self.running() {
             return;
         }
         let cpu = self.cpu.as_mut().unwrap();
+        // Encoder phases advance with the guest's own matrix scans.
+        self.encoders.drive(&mut cpu.bus.devices.gpio);
         // Poll commands between small batches, independently of repaint rate.
         for _ in 0..1024 {
             if let Err(error) = cpu.step() {
                 self.fault = Some(error.to_string());
                 break;
             }
+        }
+        if let Some(audio) = &self.audio {
+            audio.push(cpu.bus.audio.samples.drain(..));
         }
         if !cpu.bus.usb.serial.is_empty() {
             let bytes: Vec<_> = cpu.bus.usb.serial.drain(..).collect();
@@ -122,6 +175,7 @@ impl Machine {
             generation: self.generation,
             loaded: self.cpu.is_some(),
             steps: self.cpu.as_ref().map_or(0, |cpu| cpu.steps),
+            frames: self.cpu.as_ref().map_or(0, |cpu| cpu.bus.audio.frames),
             fault: self.fault.clone(),
             pixels: None,
         };
@@ -183,7 +237,9 @@ impl Worker {
                         pending_serial = None;
                     }
                 }
-                if machine.running() {
+                if machine.running() && machine.ahead() {
+                    thread::sleep(Duration::from_millis(1));
+                } else if machine.running() {
                     machine.execute();
                 } else {
                     match receiver.recv_timeout(Duration::from_millis(16)) {
@@ -219,6 +275,18 @@ impl Worker {
     }
     pub fn input(&self, pressed: [bool; 41]) {
         let _ = self.commands.send(Command::Input(pressed));
+    }
+    pub fn turn(&self, encoder: usize, detents: i32) {
+        let _ = self.commands.send(Command::Turn(encoder, detents));
+    }
+    pub fn master(&self, value: u16) {
+        let _ = self.commands.send(Command::Master(value));
+    }
+    pub fn clock(&self, hz: Option<u32>) {
+        let _ = self.commands.send(Command::Clock(hz));
+    }
+    pub fn audio(&self, queue: Option<AudioQueue>) {
+        let _ = self.commands.send(Command::Audio(queue));
     }
     pub fn pause(&self, paused: bool) {
         let _ = self.commands.send(Command::Pause(paused));

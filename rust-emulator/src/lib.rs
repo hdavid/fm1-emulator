@@ -7,6 +7,7 @@ mod clock;
 pub mod cpu;
 mod crc;
 pub mod devices;
+pub mod encoders;
 pub mod firmware;
 mod float;
 pub mod gpio;
