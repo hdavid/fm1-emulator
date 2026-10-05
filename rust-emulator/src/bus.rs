@@ -102,6 +102,7 @@ pub struct Bus {
     cache: crate::cache::Cache,
     crc: crate::crc::Crc,
     clock: crate::clock::Clock,
+    oscillator_ticks: u64,
     wireless: crate::wireless::Wireless,
     shift_spi: crate::shift_spi::ShiftSpi,
     perf: crate::perf::Perf,
@@ -148,6 +149,7 @@ impl Bus {
             cache: Default::default(),
             crc: Default::default(),
             clock: Default::default(),
+            oscillator_ticks: 0,
             wireless: Default::default(),
             shift_spi: Default::default(),
             perf: Default::default(),
@@ -491,8 +493,16 @@ impl Bus {
     }
 
     pub(crate) fn instruction_ticks(&mut self) -> u32 {
-        self.clock
-            .instruction_ticks(self.audio.read(0x10014).unwrap())
+        let ticks = self
+            .clock
+            .instruction_ticks(self.audio.read(0x10014).unwrap());
+        self.oscillator_ticks += ticks as u64;
+        ticks
+    }
+
+    /// 24 MHz oscillator ticks of guest time so far.
+    pub fn oscillator_ticks(&self) -> u64 {
+        self.oscillator_ticks
     }
 
     /// Queue USB-MIDI packets for the firmware (host to device). They are
