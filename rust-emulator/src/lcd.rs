@@ -5,6 +5,7 @@ pub const SPI: u32 = 0x11d00;
 pub const IOMAP: u32 = 0x51020;
 pub const WIDTH: usize = 240;
 pub const HEIGHT: usize = 240;
+pub(crate) const IRQ: usize = 16;
 const GRAM_HEIGHT: usize = 320;
 
 pub struct Lcd {
@@ -52,6 +53,11 @@ impl Default for Lcd {
 }
 
 impl Lcd {
+    pub(crate) fn pending_irq(&self) -> bool {
+        // Vendor spi0.c: bit 13 enables transfer-complete interrupts,
+        // bit 15 reports completion, and bit 14 acknowledges it.
+        self.registers[0] & 0xa001 == 0xa001
+    }
     pub fn read(&self, address: u32) -> Option<u32> {
         if address == IOMAP {
             return Some(self.iomap);
@@ -93,7 +99,7 @@ impl Lcd {
         if index != 2 && index != 4 {
             return Ok(());
         }
-        if self.registers[0] & 0x3fff != 0x21 || self.iomap & 0x10 == 0 {
+        if self.registers[0] & 0x1fff != 0x21 || self.iomap & 0x10 == 0 {
             return Err("unsupported LCD SPI configuration or pin routing");
         }
         if selected {

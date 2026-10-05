@@ -8,6 +8,42 @@ fn cpu(words: &[u16]) -> Cpu {
     )
 }
 #[test]
+fn stock_lcd_transfer_dispatches_irq_16_and_returns_after_guest_ack() {
+    use fm1_emu::{devices::IRQ_CONFIG, lcd::SPI};
+    let mut c = cpu(&[0x0020, 0x0020]);
+    c.r[0] = 0x6021;
+    c.r[1] = SPI;
+    c.sr[14] = RAM + 256;
+    c.sr[13] = RAM + 512;
+    c.sr[11] = 0x100;
+    c.interrupts_enabled = true;
+    c.bus.write(RAM, 0x00816090, 4).unwrap(); // [r1]=r0; rti
+    c.bus.write(0x01c7fe00 + 16 * 4, RAM, 4).unwrap();
+    c.bus.write(IRQ_CONFIG + 2 * 4, 1 | 6, 4).unwrap();
+    for (address, value) in [
+        (0x51020, 0x10),
+        (0x50088, !0x780),
+        (0x50080, 0),
+        (SPI, 0x2021),
+        (SPI + 8, 0x11),
+    ] {
+        c.bus.write(address, value, 4).unwrap();
+    }
+    c.step().unwrap();
+    assert_eq!(c.irq_entries, 1);
+    assert_eq!(c.pc, RAM);
+    c.step().unwrap();
+    assert_eq!(c.pc, RAM + 2);
+    assert_eq!(c.bus.pending_irq(0x100), None);
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 2);
+    assert_eq!(c.sr[14], RAM + 256);
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 4);
+    assert_eq!(c.irq_entries, 1);
+}
+
+#[test]
 fn register_pointer_updates_use_the_old_address_and_byte_stride() {
     // Vendor r3 assembler: the three-bit stride field selects r8..r15.
     for (base, size, value) in [

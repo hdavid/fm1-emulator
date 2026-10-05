@@ -39,6 +39,30 @@ fn init() -> Bus {
     bus
 }
 #[test]
+fn transfer_completion_interrupts_obey_enable_mask_and_acknowledgement() {
+    use fm1_emu::devices::IRQ_CONFIG;
+    let mut bus = init();
+    write(&mut bus, SPI, 0x4021);
+    write(&mut bus, IRQ_CONFIG + 2 * 4, 1 | (3 << 1));
+    assert_eq!(bus.pending_irq(0x100), None);
+    write(&mut bus, 0x50080, 0);
+    write(&mut bus, SPI + 8, 0x2c);
+    assert_eq!(bus.pending_irq(0x100), None); // Completed, peripheral IRQ disabled.
+    write(&mut bus, SPI, 0x2021);
+    assert_eq!(bus.pending_irq(0x100), Some(16));
+    write(&mut bus, IRQ_CONFIG + 2 * 4, 0);
+    assert_eq!(bus.pending_irq(0x100), None);
+    write(&mut bus, IRQ_CONFIG + 2 * 4, 1 | (3 << 1));
+    write(&mut bus, SPI, 0x6021);
+    assert_eq!(bus.pending_irq(0x100), None);
+    data(&mut bus, &[0xf8, 0]);
+    assert_eq!(bus.lcd.pixels[0], 0xff0000);
+    assert_eq!(bus.pending_irq(0x100), Some(16));
+    write(&mut bus, SPI, 0x2020);
+    assert_eq!(bus.pending_irq(0x100), None); // Disabled SPI cannot assert IRQ.
+}
+
+#[test]
 fn rgb565_dma_respects_window_wrap_and_split_pixels() {
     let mut bus = init();
     cmd(&mut bus, 0x2a);

@@ -27,11 +27,19 @@ mod dma_tests {
         let mut b = Bus::new(vec![0; 8]).unwrap();
         b.load_flash(&raw, 0x980f);
         for (address, value) in [
-            (0x51020, 0x10), (0x50088, !0x780), (SPI, 0x4021),
-            (0x50080, 0), (SPI + 8, 0x11), (SPI + 8, 0x3a),
-            (0x50080, 0x100), (SPI + 8, 0x55),
-            (0x50080, 0), (SPI + 8, 0x2c),
-            (0x50080, 0x100), (SPI + 12, XIP + 1), (SPI + 16, 4),
+            (0x51020, 0x10),
+            (0x50088, !0x780),
+            (SPI, 0x4021),
+            (0x50080, 0),
+            (SPI + 8, 0x11),
+            (SPI + 8, 0x3a),
+            (0x50080, 0x100),
+            (SPI + 8, 0x55),
+            (0x50080, 0),
+            (SPI + 8, 0x2c),
+            (0x50080, 0x100),
+            (SPI + 12, XIP + 1),
+            (SPI + 16, 4),
         ] {
             b.write(address, value, 4).unwrap();
         }
@@ -342,7 +350,10 @@ impl Bus {
                     // Read bytes through XIP so packaged encryption/mapping,
                     // flash modifications and disabled-XIP faults still apply.
                     (0..length)
-                        .map(|i| self.read_as(source + i as u32, 1, "DMA read").map(|v| v as u8))
+                        .map(|i| {
+                            self.read_as(source + i as u32, 1, "DMA read")
+                                .map(|v| v as u8)
+                        })
                         .collect::<Result<Vec<_>, _>>()?
                 } else {
                     return Err(Self::fault(
@@ -425,6 +436,7 @@ impl Bus {
     pub(crate) fn pending_irq_for(&self, icfg: u32, core: usize) -> Option<usize> {
         let mut candidate = self.devices.pending_irq_for(icfg, core);
         for (source, pending) in [
+            (crate::lcd::IRQ, self.lcd.pending_irq()),
             (crate::audio::IRQ, self.audio.pending_irq()),
             (crate::shift_spi::IRQ, self.shift_spi.pending_irq()),
             (40, self.wireless.clock_pending_irq()),
@@ -435,7 +447,9 @@ impl Bus {
                 .flatten()
             {
                 if candidate.is_none_or(|current| {
-                    priority > self.devices.irq_priority_for(current, icfg, core).unwrap()
+                    let current_priority =
+                        self.devices.irq_priority_for(current, icfg, core).unwrap();
+                    priority > current_priority || priority == current_priority && source < current
                 }) {
                     candidate = Some(source);
                 }
