@@ -154,7 +154,7 @@ impl Emulator {
         let down = response.is_pointer_button_down_on();
         if down || response.clicked() {
             self.pulse[id] = Instant::now() + Duration::from_millis(100);
-            self.pulse_steps[id] = self.cpu.as_ref().map_or(0, |cpu| cpu.steps + 2_400_000);
+            self.pulse_steps[id] = self.cpu.as_ref().map_or(0, |cpu| cpu.steps + 72_000_000);
         }
         let focused = ui.input(|i| i.focused);
         let binding = match id {
@@ -166,13 +166,14 @@ impl Emulator {
         let keyboard = binding.is_some_and(|key| ui.input(|i| i.key_down(key)));
         if binding.is_some_and(|key| ui.input(|i| i.key_pressed(key))) {
             self.pulse[id] = Instant::now() + Duration::from_millis(100);
-            self.pulse_steps[id] = self.cpu.as_ref().map_or(0, |cpu| cpu.steps + 2_400_000);
+            self.pulse_steps[id] = self.cpu.as_ref().map_or(0, |cpu| cpu.steps + 72_000_000);
         }
         if !focused {
             self.pulse[id] = Instant::now();
             self.pulse_steps[id] = 0;
         }
-        // A slow host still gives the guest 100 ms of oscillator time to scan
+        // A slow host gives the guest at least 100 ms at up to 360 MHz,
+        // including two issued core instructions per shared clock step, to scan
         // and debounce a click; the wall-clock pulse keeps visual feedback.
         let guest_pulse = self
             .cpu
@@ -603,7 +604,7 @@ mod tests {
         app.pulse[0] = Instant::now(); // Wall-clock pulse expired on a slow host.
         draw(&mut app, &ctx, vec![key(false)], true);
         assert!(app.pressed[0]);
-        app.cpu.as_mut().unwrap().steps = 2_400_000;
+        app.cpu.as_mut().unwrap().steps = 72_000_000;
         draw(&mut app, &ctx, vec![], true);
         assert!(!app.pressed[0]);
     }

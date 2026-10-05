@@ -767,6 +767,7 @@ fn repeat_finishes_before_dispatching_a_pending_interrupt() {
         c.bus.write(TIMER5 + 8, 1, 4).unwrap();
         c.bus.write(TIMER5, 9, 4).unwrap();
         c.interrupts_enabled = true;
+        c.bus.devices.advance(1); // Pending before REP; delivery must wait.
         c.step().unwrap();
         assert_eq!(c.pc, XIP + 2);
         assert_eq!(c.irq_entries, 0);

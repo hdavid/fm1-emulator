@@ -84,7 +84,7 @@ fn booted_guest_scans_all_eleven_columns_without_ghost_keys() {
         for &(column, row) in &keys {
             cpu.bus.devices.gpio.press(column, row, true).unwrap();
         }
-        cpu.run(Some(firmware.symbols["foundation_done"]), 10000, None)
+        cpu.run(Some(firmware.symbols["foundation_done"]), 150000, None)
             .unwrap();
         for column in 0..11 {
             let mut expected = 0x1e1;
@@ -170,7 +170,7 @@ fn spi_dma_clocks_matrix_before_gpio_latch_and_acknowledges_its_irq() {
     let mut c = Cpu::new(bus, XIP);
     // Replace the two-byte fixture with NOPs in SRAM to advance real CPU time.
     c.pc = RAM + 1024;
-    for _ in 0..191 {
+    for _ in 0..192 * 15 - 1 {
         c.step().unwrap();
     }
     assert_eq!(c.bus.pending_irq(0x100), None);

@@ -5,6 +5,8 @@ pub(crate) struct Clock {
     system: [u32; 4],
     pll: [u32; 4],
     usb_phy: [u32; 3],
+    instruction_phase: u64,
+    phase_hz: u32,
 }
 impl Default for Clock {
     fn default() -> Self {
@@ -12,15 +14,17 @@ impl Default for Clock {
             system: [0, 0x10200, 0x1c1, 2],
             pll: [0x45400203, 0x3f503026, 0x0940022b, 0x0750310c],
             usb_phy: [0, 0x8881c3, 0],
+            instruction_phase: 0,
+            phase_hz: 360_000_000,
         }
     }
 }
 impl Clock {
     // Vendor clock.c: CLK_CON3 selects the system PLL path; CLK_CON1
     // divides it into HSB and LSB. Peripheral timers select LSB or OSC.
-    pub(crate) fn timer_hz(&self, clk_con3: u32) -> u32 {
+    pub(crate) fn system_hz(&self, clk_con3: u32) -> u32 {
         let pll = (24_000_000 / (((self.pll[2] >> 2) & 31) + 2)) * ((self.pll[3] & 4095) + 2);
-        let sys = match clk_con3 & 15 {
+        match clk_con3 & 15 {
             source @ 0..=4 => {
                 let hz = [
                     192_000_000,
@@ -35,8 +39,24 @@ impl Clock {
             source @ 5..=7 => pll * 2 / [4, 3, 2][(source - 5) as usize],
             8 => 192_000_000,
             _ => 480_000_000,
-        };
+        }
+    }
+    pub(crate) fn timer_hz(&self, clk_con3: u32) -> u32 {
+        let sys = self.system_hz(clk_con3);
         sys / (((self.system[1] >> 16) & 3) + 1) / (((self.system[1] >> 8) & 7) + 1)
+    }
+    pub(crate) fn instruction_ticks(&mut self, clk_con3: u32) -> u32 {
+        let hz = self.system_hz(clk_con3).max(1);
+        if hz != self.phase_hz {
+            self.instruction_phase = self.instruction_phase * hz as u64 / self.phase_hz as u64;
+            self.phase_hz = hz;
+        }
+        // One nominal CPU issue per step. Latencies/cache stalls are not
+        // cycle accurate; an instruction is no longer one full OSC cycle.
+        self.instruction_phase += 24_000_000;
+        let ticks = self.instruction_phase / hz as u64;
+        self.instruction_phase %= hz as u64;
+        ticks as u32
     }
     fn register(&self, a: u32) -> Option<&u32> {
         match a {
@@ -77,6 +97,22 @@ impl Clock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cpu_clock_retains_fractional_oscillator_time_when_clock_changes() {
+        let mut c = Clock::default();
+        for _ in 0..14 {
+            assert_eq!(c.instruction_ticks(6), 0);
+        }
+        assert_eq!(c.instruction_ticks(6), 1);
+        for _ in 0..4 {
+            assert_eq!(c.instruction_ticks(8), 0);
+        }
+        // Half an oscillator tick is retained across 192 -> 360 MHz.
+        for _ in 0..7 {
+            assert_eq!(c.instruction_ticks(6), 0);
+        }
+        assert_eq!(c.instruction_ticks(6), 1);
+    }
     #[test]
     fn timer_clock_follows_pll_selection_and_both_bus_dividers() {
         let mut c = Clock::default();

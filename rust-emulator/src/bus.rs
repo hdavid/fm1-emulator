@@ -347,10 +347,16 @@ impl Bus {
     pub(crate) fn advance_devices(&mut self, ticks: u32) {
         let clk_con3 = self.audio.read(0x10014).unwrap();
         let peripheral_hz = self.clock.timer_hz(clk_con3);
-        self.devices.advance_with_timer_clock(ticks, peripheral_hz);
+        let core_hz = self.clock.system_hz(clk_con3);
+        self.devices
+            .advance_with_clocks(ticks, peripheral_hz, core_hz);
         if let Some(bytes) = self.shift_spi.advance(ticks, peripheral_hz) {
             self.devices.gpio.shift_spi(&bytes);
         }
+    }
+    pub(crate) fn instruction_ticks(&mut self) -> u32 {
+        self.clock
+            .instruction_ticks(self.audio.read(0x10014).unwrap())
     }
 
     pub fn advance_usb(&mut self, ticks: u32) -> Result<(), AccessFault> {

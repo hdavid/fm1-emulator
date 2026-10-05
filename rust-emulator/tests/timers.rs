@@ -97,7 +97,7 @@ fn firmware_boot_initializes_ram_and_services_a_real_guest_isr() {
         0
     );
     assert_eq!(cpu.bus.read(firmware.symbols["ram_magic"], 4).unwrap(), 0);
-    cpu.run(Some(firmware.symbols["foundation_done"]), 10000, None)
+    cpu.run(Some(firmware.symbols["foundation_done"]), 150000, None)
         .unwrap();
     let address = firmware.symbols["foundation_results"];
     let values: Vec<_> = (0..10)
@@ -137,6 +137,7 @@ fn an_interrupt_with_a_missing_vector_fails_visibly() {
     cpu.bus.write(IRQ_CONFIG + 7 * 4, 0x1000_0000, 4).unwrap();
     cpu.bus.write(TIMER5 + 8, 1, 4).unwrap();
     cpu.bus.write(TIMER5, 0x4009, 4).unwrap();
+    cpu.bus.devices.advance(1);
     assert!(
         matches!(cpu.step(),Err(Fault::Access { fault, .. }) if fault.operation=="fetch" && fault.address==0)
     );

@@ -61,7 +61,7 @@ fn full_package_preserves_application_and_supplies_the_spl_handoff() {
     );
     let mut cpu = Cpu::new(bus, package.entry);
     cpu.r[0] = 0x01c7fe08;
-    for _ in 0..35_000_000 {
+    for _ in 0..200_000_000 {
         cpu.step().unwrap();
     }
     assert!(cpu.bus.screen_visible());

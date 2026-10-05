@@ -91,7 +91,7 @@ fn hardware_application_boots_usb_and_updates_the_display() {
     );
     let mut cpu = Cpu::new(Bus::new(firmware.image).unwrap(), firmware.entry);
     cpu.r[0] = 0x01c7fe08;
-    for _ in 0..35_000_000 {
+    for _ in 0..150_000_000 {
         cpu.step().unwrap();
     }
     assert!(cpu.bus.screen_visible());
@@ -103,14 +103,14 @@ fn hardware_application_boots_usb_and_updates_the_display() {
     assert_eq!(cpu.bus.read(firmware.symbols["fm1_in"] + 4, 4).unwrap(), 0);
     let previous_screen = cpu.bus.lcd.pixels.clone();
     cpu.bus.devices.gpio.press(0, 4, true).unwrap();
-    for _ in 0..3_000_000 {
+    for _ in 0..72_000_000 {
         cpu.step().unwrap();
     }
     let down = String::from_utf8(cpu.bus.usb.serial.drain(..).collect()).unwrap();
     assert_eq!(down, "KEY 0 down\r\n");
     assert_ne!(cpu.bus.lcd.pixels, previous_screen);
     cpu.bus.devices.gpio.press(0, 4, false).unwrap();
-    for _ in 0..3_000_000 {
+    for _ in 0..72_000_000 {
         cpu.step().unwrap();
     }
     assert_eq!(

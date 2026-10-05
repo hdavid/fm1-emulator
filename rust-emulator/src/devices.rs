@@ -11,13 +11,14 @@ pub const TICK_IRQ: usize = 3;
 pub const OSC_TICKS_PER_INSTRUCTION: u32 = 1;
 
 // Core TTMR: WL82 csfr.h/hwi.h; stock code acknowledges with bit 6 and
-// enables with bit 0. Functional 360 MHz core / 24 MHz oscillator handoff.
+// enables with bit 0. Its clock follows the guest's system-clock selection.
 #[derive(Default)]
 pub struct TickTimer {
     control: u8,
     counter: u32,
     period: u32,
     pub pending: bool,
+    clock_phase: u64,
 }
 impl TickTimer {
     fn read(&self, offset: u32) -> Option<u32> {
@@ -42,12 +43,15 @@ impl TickTimer {
         }
         Some(Ok(()))
     }
-    fn advance(&mut self, ticks: u32) {
+    fn advance(&mut self, ticks: u32, hz: u32) {
         if self.control & 1 == 0 {
             return;
         }
         let period = self.period as u64 + 1;
-        let next = self.counter as u64 + ticks as u64 * 15;
+        self.clock_phase += ticks as u64 * hz as u64;
+        let cycles = self.clock_phase / 24_000_000;
+        self.clock_phase %= 24_000_000;
+        let next = self.counter as u64 + cycles;
         if next >= period {
             self.pending = true;
         }
@@ -343,14 +347,17 @@ impl Devices {
         self.advance_with_timer_clock(ticks, 60_000_000);
     }
     pub(crate) fn advance_with_timer_clock(&mut self, ticks: u32, peripheral_hz: u32) {
+        self.advance_with_clocks(ticks, peripheral_hz, 360_000_000);
+    }
+    pub(crate) fn advance_with_clocks(&mut self, ticks: u32, peripheral_hz: u32, core_hz: u32) {
         self.adc.advance(ticks);
         for timer in &mut self.startup_timers {
             timer.advance_with_clock(ticks, peripheral_hz);
         }
         self.timer4.advance_with_clock(ticks, peripheral_hz);
         self.timer5.advance_with_clock(ticks, peripheral_hz);
-        self.tick.advance(ticks);
-        self.tick_secondary.advance(ticks);
+        self.tick.advance(ticks, core_hz);
+        self.tick_secondary.advance(ticks, core_hz);
         self.rc_measurement.advance(ticks);
         self.random.advance(ticks);
     }

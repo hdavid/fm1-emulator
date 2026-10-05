@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Probe decodings mirror emu.py, checked against vendor objdump and the FM-1.
 // Startup-only additions use the pinned Quarkslab pi32v2 reference; see README.
-use crate::devices::OSC_TICKS_PER_INSTRUCTION;
 use crate::{
     bus::{AccessFault, Bus},
     PROBE_RETURN, RESULT, USER_STACK,
@@ -20,6 +19,20 @@ pub enum Fault {
 #[cfg(test)]
 mod lock_tests {
     use super::*;
+    #[test]
+    fn two_cores_share_elapsed_oscillator_time() {
+        let mut c = Cpu::new(Bus::new(vec![0; 128]).unwrap(), crate::XIP);
+        c.bus.write(0x10014, 6, 4).unwrap();
+        c.bus.write(0x10808, u32::MAX, 4).unwrap();
+        c.bus.write(0x10800, 9, 4).unwrap();
+        c.bus.write(0x01c7fff8, crate::RAM + 512, 4).unwrap();
+        c.bus.write(0x1eee004, 8, 4).unwrap();
+        for _ in 0..30 {
+            c.step().unwrap();
+        }
+        assert_eq!(c.steps, 60);
+        assert_eq!(c.bus.read(0x10804, 4).unwrap(), 2);
+    }
     #[test]
     fn lock_instructions_change_ownership_without_changing_registers() {
         let mut c = Cpu::new(Bus::new(vec![0x41, 0, 0x40, 0]).unwrap(), crate::XIP);
@@ -277,25 +290,25 @@ impl Cpu {
             && (self.read(0x1eee000, 4)? & 16 != 0
                 || self.secondary.as_ref().is_some_and(|core| core.bus_locked))
         {
-            return self.step_secondary();
+            return self.step_secondary(true);
         }
-        let op = self.step_core()?;
+        let op = self.step_core(true)?;
         if !self.bus_locked && secondary_running {
-            self.step_secondary()?;
+            self.step_secondary(false)?;
         }
         Ok(op)
     }
 
-    fn step_secondary(&mut self) -> Result<&'static str, Fault> {
+    fn step_secondary(&mut self, advance_time: bool) -> Result<&'static str, Fault> {
         let mut secondary = self.secondary.take().unwrap();
         secondary.swap(self);
-        let result = self.step_core();
+        let result = self.step_core(advance_time);
         secondary.swap(self);
         self.secondary = Some(secondary);
         result
     }
 
-    fn step_core(&mut self) -> Result<&'static str, Fault> {
+    fn step_core(&mut self, advance_time: bool) -> Result<&'static str, Fault> {
         if let Some((at, end)) = self.predicate_skip {
             if self.pc == at {
                 self.pc = end;
@@ -365,27 +378,34 @@ impl Cpu {
             }
         }
         self.steps += 1;
-        self.bus.advance_devices(OSC_TICKS_PER_INSTRUCTION);
-        self.bus.advance_nor(OSC_TICKS_PER_INSTRUCTION);
-        self.bus.advance_wireless(OSC_TICKS_PER_INSTRUCTION);
-        self.bus
-            .system
-            .advance(OSC_TICKS_PER_INSTRUCTION)
-            .map_err(|reason| Fault::Access {
-                pc,
-                fault: AccessFault {
-                    address: 0x13e08,
-                    size: 4,
-                    operation: "watchdog",
-                    reason,
-                },
-            })?;
-        self.bus
-            .advance_usb(OSC_TICKS_PER_INSTRUCTION)
-            .map_err(|fault| Fault::Access { pc, fault })?;
-        self.bus
-            .advance_audio(OSC_TICKS_PER_INSTRUCTION)
-            .map_err(|fault| Fault::Access { pc, fault })?;
+        let ticks = if advance_time {
+            self.bus.instruction_ticks()
+        } else {
+            0
+        };
+        if ticks != 0 {
+            self.bus.advance_devices(ticks);
+            self.bus.advance_nor(ticks);
+            self.bus.advance_wireless(ticks);
+            self.bus
+                .system
+                .advance(ticks)
+                .map_err(|reason| Fault::Access {
+                    pc,
+                    fault: AccessFault {
+                        address: 0x13e08,
+                        size: 4,
+                        operation: "watchdog",
+                        reason,
+                    },
+                })?;
+            self.bus
+                .advance_usb(ticks)
+                .map_err(|fault| Fault::Access { pc, fault })?;
+            self.bus
+                .advance_audio(ticks)
+                .map_err(|fault| Fault::Access { pc, fault })?;
+        }
         self.dispatch_interrupt()?;
         Ok(op)
     }
