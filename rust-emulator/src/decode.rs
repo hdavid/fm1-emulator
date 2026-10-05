@@ -26,15 +26,13 @@ pub(crate) enum First {
     PushRegs,
     PopPc,
     PushRets,
-    PushReti,
-    PopReturnRegister,
+    PushSpecial,
+    PopSpecial,
     PopRegs,
     PushRetsRegs,
     PopRetsRegs,
     PopPcRegs,
     MoveStackPointer,
-    PushIrqFrame,
-    PopIrqFrame,
     CallRel32,
     Relative22,
     CallRel9,
@@ -142,6 +140,10 @@ pub(crate) enum Wide {
     RegisterPostincrement,
     PairPostincrement,
     PairRegisterPreincrement,
+    PushSpecialMask,
+    PopSpecialMask,
+    Trigger,
+    SaturateSigned16,
     MemoryIndexed,
     Unknown,
 }
@@ -210,11 +212,13 @@ fn first(h: u32) -> First {
     if h == 0x0410 {
         return First::PushRets;
     }
-    if h == 0x04c1 {
-        return First::PushReti;
+    if h & 0xffc0 == 0x04c0 {
+        // [--sp] = {psr, sr4, rets, retx, rete, reti} for mask bits 5..0
+        // (vendor objdump); interrupt stubs push 04c8 {rets} or 04e9.
+        return First::PushSpecial;
     }
-    if matches!(h, 0x0481 | 0x0488) {
-        return First::PopReturnRegister;
+    if h & 0xffc0 == 0x0480 {
+        return First::PopSpecial;
     }
     if h & 0xfff0 == 0x0440 {
         return First::PopRegs;
@@ -230,12 +234,6 @@ fn first(h: u32) -> First {
     }
     if matches!(h, 0x1440..=0x1443) {
         return First::MoveStackPointer;
-    }
-    if matches!(h, 0x04e1 | 0x04e8 | 0x04e9) {
-        return First::PushIrqFrame;
-    }
-    if matches!(h, 0x04a1 | 0x04a8 | 0x04a9) {
-        return First::PopIrqFrame;
     }
     if h == 0xff80 {
         return First::CallRel32;
@@ -379,6 +377,19 @@ fn wide(h: u32, x: u32) -> Wide {
     if h == 0xe9d0 {
         return Wide::StackPair;
     }
+    if h == 0xe078 && x & 255 == 1 {
+        // rD = sat16(rS) (s); objdump's (u) form (x & 255 == 0) is not used.
+        return Wide::SaturateSigned16;
+    }
+    if h == 0xe958 && x & 0x8000 == 0 {
+        return Wide::PushSpecialMask;
+    }
+    if h == 0xe950 && x & 0x4000 == 0 {
+        return Wide::PopSpecialMask;
+    }
+    if h == 0xe870 && x == 0 {
+        return Wide::Trigger;
+    }
     if h == 0xe070 && x & 255 == 0 {
         return Wide::ReverseBytes;
     }
@@ -394,7 +405,9 @@ fn wide(h: u32, x: u32) -> Wide {
     if matches!(h, 0xe1f8 | 0xe1fc) && x & 15 == 0 {
         return Wide::MultiplyWide;
     }
-    if h == 0xe1f6 && d & 1 == 0 && s & 1 == 0 && x & 15 <= 1 {
+    if h == 0xe1f6 && s & 1 == 0 && x & 15 == 0 {
+        // Vendor objdump: x bit 12 selects the signed form (e1f6 1040 is
+        // r1_r0 = r5_r4 / r0 (s)); x bit 0 is not a valid encoding.
         return Wide::DivideWide;
     }
     if h == 0xe1d8 && d & 1 == 0 && s == 0 && matches!(x & 15, 0 | 2) {
@@ -430,7 +443,7 @@ fn wide(h: u32, x: u32) -> Wide {
     if matches!(h, 0xe0b4 | 0xe0b8) && matches!(x & 15, 0 | 2) {
         return Wide::ArithmeticRegister;
     }
-    if h == 0xe1c8 {
+    if h == 0xe1c8 && x & 15 <= 3 {
         return Wide::ShiftRegisterExtended;
     }
     if h == 0xeedc {
