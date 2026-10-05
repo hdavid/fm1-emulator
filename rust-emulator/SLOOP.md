@@ -46,3 +46,58 @@ the signed `<=` with a packed operand). Tests: `tests/sloop_isa.rs`.
 Result: `executed: 193392754`, `audio: 303440 stereo frames, 1185 DMA
 halves`, `LCD: 168960 pixels written` (unchanged), then `watchdog expired`
 at 0x0200508e. `ADC: 0 conversions` (Felucca: 672).
+
+## 2. Watchdog at 0x0200508e: reverb index never wrapped (`ecb1 0ae6`)
+
+Symptom: a 12-instruction loop at 0x02005082..0x0200517e (seq.c's USB-MIDI
+drain, `while (mi_r != mi_w)`) with `mi_r = 0x12050ee`, `mi_w = 0xc0021`:
+it would run ~4G times, so the watchdog fired. `FM1_MEMWATCH=0x1c177b4`
+showed the queue words written at step 37177740 by 0x02006a96, a halfword
+store `edd8 c019` to `rev_line + 2 * (0x1705 + line_i[3])`: fx.c
+`fx_buses`, `c[B3 + fx.line_i[3]]` with B3 = 1573 + 1931 + 2389 = 0x1705
+(the constants 0x625, 0xdb0, 0x1705 are all in the routine). All four
+`line_i` were 0x3b0c, far past `REV_LINE` (1559 + 14, 1931, 2389, 2791), so
+the delay lines had run off the end of `rev_line` across .bss.
+
+Analysis: the wraps `if (++fx.line_i[k] >= REV_LINE[k]) fx.line_i[k] = 0`
+compile to `r7 = 0; if (r1 <= #N-1) { r7 = r0 }` with kind 0xcb, e.g.
+`ecb1 0ae6` = `<= 2790`. The emulator (following Quarkslab, which lists 0xcb
+as `packedimm12`) read `packed(0x0ae6) = 0x7300`, so the index ran to 29440.
+The operand is the plain 12 bits (0xae6 = 2790 = REV_LINE[3] - 1), matching
+the family rule that low bits 3 select imm12. Zero-extended: a sign-extended
+0xfffffae6 would never wrap either.
+
+Fix: kind 0xcb compares against `x & 0xfff`.
+
+Open: kind 0xc3 (`>`, imm12 by the same rule) is still read as packed; the
+only image use where the two readings differ is SLOOP 0x0200451a
+`ec30 a600` (0x600 vs 0x08000000), not reached in 200M instructions.
+
+Result: `executed: 200000000`, `LCD: 4897854`, `audio: 315581`. Screens:
+the splash at 40M, then (120M) the REC-armed screen "play freely / then rec
+on the 1", (160M) "RECORDING", (200M) black: the UI saw REC presses that no
+key made (the GPIO matrix never returned a closed row: checked with a
+temporary probe on port A reads).
+
+## 3. Phantom REC presses: `e190 xxx3` is and-not, not `~rC`
+
+`FM1_MEMWATCH=0x1c17760` (rec_wait is the byte at +3, found from the
+`b[r11 + 3] = 0` store in rec_toggle's "REC OFF" branch next to the string
+reference at 0x0200f212) showed rec_wait set at step 94000713 by
+0x020104cc. The path came from ui_input.c with `pressed = 0xfffff133`,
+computed at 0x0200f17c by `e190 c133`: r12 = r3 (op) r1 with r1 = 0xecc,
+the seven layer-button bits. The emulator implemented mode 3 as `~r1`,
+ignoring r3, which made every other button (REC = bit 13) "pressed".
+
+Evidence for and-not (`rS & ~rC`): it is the mode-3 meaning in
+memory_logic (`old & !value`) and logic_immediate mode 7; and the stock
+images use `2141 ; e190 0013` / `2144 ; e190 1143` (r1 = 1; r0 = r1 & ~r0),
+which is C's `!flag` for a 0/1 flag only under and-not (243 uses of
+`e190 xxx3` across the five images).
+
+Fix: mode 3 = `r[s] & !r[c]`. Felucca and Jangada unchanged; stock and Baud
+Girl now run 729174 instructions (was 648199) to the same stop at
+0x02034b3c.
+
+Result: SLOOP `executed: 95961853`, then `unsupported instruction 0x0488 at
+PC 0x020108cc`.
