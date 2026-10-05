@@ -7,7 +7,7 @@ description = "Incremental pi32v2 interpreter for unchanged FM-1 application fir
 default-run = "fm1-emu"
 
 [features]
-gui = ["dep:eframe"]
+gui = ["dep:eframe", "dep:cpal"]
 
 [[bin]]
 name = "fm1-ui"
@@ -16,6 +16,7 @@ required-features = ["gui"]
 
 [dependencies]
 eframe = { version = "=0.31.1", optional = true, default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+cpal = { version = "0.15", optional = true }
 
 [profile.release]
 lto = "fat"

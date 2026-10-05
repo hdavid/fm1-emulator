@@ -14,6 +14,9 @@ pub struct Gpio {
     shift: u16,
     pub latched: u16,
     previous_driven_a: u32,
+    /// Port A input reads while each matrix column was selected: how many
+    /// times the guest has sampled that column's contacts (encoder pacing).
+    scans: [std::cell::Cell<u32>; 11],
 }
 
 impl Default for Gpio {
@@ -28,6 +31,7 @@ impl Default for Gpio {
             shift: u16::MAX,
             latched: u16::MAX,
             previous_driven_a: 0,
+            scans: Default::default(),
         }
     }
 }
@@ -58,7 +62,19 @@ impl Gpio {
             })
     }
 
+    /// Times the guest has read the rows while `column` was selected.
+    pub fn column_scans(&self, column: usize) -> u32 {
+        self.scans[column].get()
+    }
+
     fn input(&self, port: usize) -> u32 {
+        if port == 0 {
+            for (column, count) in self.scans.iter().enumerate() {
+                if self.latched & (1 << column) == 0 {
+                    count.set(count.get().wrapping_add(1));
+                }
+            }
+        }
         let registers = self.ports[port];
         let mut input = registers[PU as usize / 4] & !registers[PD as usize / 4];
         let rows = self.selected_rows() as u32;

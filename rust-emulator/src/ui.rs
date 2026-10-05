@@ -3,6 +3,8 @@ use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Rect, Sense, Strok
 #[cfg(test)]
 use fm1_emu::bus::Bus;
 use fm1_emu::{cpu::Cpu, firmware::Firmware};
+mod ui_audio;
+mod ui_knobs;
 use std::{
     io::{self, Write},
     path::PathBuf,
@@ -32,6 +34,36 @@ const NOTE_KEYS: [egui::Key; 13] = [
     egui::Key::J,
     egui::Key::K,
 ];
+/// Drawn knobs: position, label, matrix encoder (None: the MASTER pot) and
+/// the keys that turn them (counter-clockwise / clockwise).
+const KNOBS: [(f32, f32, &str, Option<usize>, &str); 8] = [
+    (91., 106., "MASTER", None, "N / M"),
+    (208., 106., "SELECT", Some(ui_knobs::knob::SELECT), "[ / ]"),
+    (91., 224., "PRESETS", Some(ui_knobs::knob::PRESETS), "9 / 0"),
+    (208., 224., "ALGORITHM", Some(ui_knobs::knob::ALGORITHM), "- / ="),
+    (632., 106., "KNOB1", Some(ui_knobs::knob::KNOB1), "1 / 2"),
+    (758., 106., "KNOB2", Some(ui_knobs::knob::KNOB1 + 1), "3 / 4"),
+    (884., 106., "KNOB3", Some(ui_knobs::knob::KNOB1 + 2), "5 / 6"),
+    (1010., 106., "KNOB4", Some(ui_knobs::knob::KNOB1 + 3), "7 / 8"),
+];
+const KNOB_KEYS: [(egui::Key, egui::Key); 8] = [
+    (egui::Key::N, egui::Key::M),
+    (egui::Key::OpenBracket, egui::Key::CloseBracket),
+    (egui::Key::Num9, egui::Key::Num0),
+    (egui::Key::Minus, egui::Key::Equals),
+    (egui::Key::Num1, egui::Key::Num2),
+    (egui::Key::Num3, egui::Key::Num4),
+    (egui::Key::Num5, egui::Key::Num6),
+    (egui::Key::Num7, egui::Key::Num8),
+];
+/// Pointer travel (points of drag, or half-points of scroll) per encoder click.
+const DETENT_PX: f32 = 12.;
+/// Encoder clicks per turn as drawn (the pointer moves 15 degrees a click).
+const DETENT_ANGLE: f32 = std::f32::consts::TAU / 24.;
+/// MASTER pointer: -135..+135 degrees over the ADC range 0..=1023.
+fn master_angle(master: u16) -> f32 {
+    (master as f32 / 1023. - 0.5) * 1.5 * std::f32::consts::PI
+}
 const INK: Color32 = Color32::from_rgb(190, 194, 193);
 const ACCENT: Color32 = Color32::from_rgb(231, 193, 91);
 
@@ -44,6 +76,18 @@ struct Emulator {
     pressed: [bool; 41],
     pulse: [Instant; 41],
     pulse_steps: [u64; 41],
+    /// Host playback; None in tests or when no device opens (`audio_error`).
+    audio: Option<ui_audio::HostAudio>,
+    audio_error: Option<String>,
+    encoders: ui_knobs::Encoders,
+    /// MASTER potentiometer as the ADC reads it (0..=1023).
+    master: u16,
+    /// Pointer angle per drawn knob (radians, 0 = up) and unspent drag/scroll.
+    knob_angle: [f32; 8],
+    knob_accum: [f32; 8],
+    /// Guest speed against real time (24 M instructions/s), sampled each second.
+    speed: Option<f64>,
+    speed_mark: (Instant, u64),
 }
 impl Emulator {
     fn new(path: PathBuf) -> Self {
@@ -56,7 +100,16 @@ impl Emulator {
             pressed: [false; 41],
             pulse: [Instant::now(); 41],
             pulse_steps: [0; 41],
+            audio: None,
+            audio_error: None,
+            encoders: ui_knobs::Encoders::default(),
+            master: 768,
+            knob_angle: [0.; 8],
+            knob_accum: [0.; 8],
+            speed: None,
+            speed_mark: (Instant::now(), 0),
         };
+        app.knob_angle[0] = master_angle(app.master);
         app.reset();
         app
     }
@@ -66,6 +119,12 @@ impl Emulator {
         self.pulse_steps.fill(0);
         self.paused = false;
         self.texture = None;
+        self.encoders = ui_knobs::Encoders::default();
+        self.speed = None;
+        self.speed_mark = (Instant::now(), 0);
+        if let Some(audio) = &self.audio {
+            audio.clear();
+        }
         match Firmware::load(&self.path).and_then(|firmware| {
             let mut cpu = Cpu::new(firmware.bus()?, firmware.entry);
             cpu.r[0] = 0x01c7fe08;
@@ -94,18 +153,52 @@ impl Emulator {
                     }
                 }
             }
+            cpu.bus.devices.adc.master = self.master;
             if !self.paused && self.fault.is_none() {
                 // Keep the UI responsive even if guest code spins forever.
-                // This is an instruction budget, not a cycle-accuracy claim.
-                let deadline = Instant::now() + Duration::from_millis(12);
-                for i in 0..400_000 {
+                // While the guest streams audio to a host device, its pace is
+                // the playback queue (real time when the host keeps up);
+                // otherwise an instruction budget of about one frame of guest
+                // time. Neither is a cycle-accuracy claim.
+                let deadline = Instant::now() + Duration::from_millis(14);
+                let paced = self.audio.is_some() && cpu.bus.audio.frames > 0;
+                let budget = if paced { u64::MAX } else { 400_000 };
+                let mut i = 0u64;
+                while i < budget {
+                    if i % 1024 == 0 {
+                        let contacts = self
+                            .encoders
+                            .update(|column| cpu.bus.devices.gpio.column_scans(column));
+                        for (e, (a, b)) in contacts.into_iter().enumerate() {
+                            let [ac, ar, bc, br] = ui_knobs::CONTACTS[e];
+                            let gpio = &mut cpu.bus.devices.gpio;
+                            gpio.press(ac, ar, a).unwrap();
+                            gpio.press(bc, br, b).unwrap();
+                        }
+                        if let Some(audio) = &self.audio {
+                            audio.push(cpu.bus.audio.samples.drain(..));
+                            if paced && audio.queued() >= ui_audio::TARGET_FRAMES {
+                                break;
+                            }
+                        }
+                        if Instant::now() >= deadline {
+                            break;
+                        }
+                    }
                     if let Err(error) = cpu.step() {
                         self.fault = Some(error.to_string());
                         break;
                     }
-                    if i % 1024 == 0 && Instant::now() >= deadline {
-                        break;
-                    }
+                    i += 1;
+                }
+                if let Some(audio) = &self.audio {
+                    audio.push(cpu.bus.audio.samples.drain(..));
+                }
+                let (since, steps) = self.speed_mark;
+                let elapsed = since.elapsed().as_secs_f64();
+                if elapsed >= 1.0 {
+                    self.speed = Some((cpu.steps - steps) as f64 / 24e6 / elapsed);
+                    self.speed_mark = (Instant::now(), cpu.steps);
                 }
             }
             if !cpu.bus.usb.serial.is_empty() {
@@ -243,6 +336,29 @@ impl Emulator {
             format!("{label} · hold to press")
         });
     }
+    /// Pointer movement on drawn knob `index`: whole encoder clicks are queued
+    /// for the guest, the rest is kept; MASTER moves the ADC value directly.
+    fn turn_knob(&mut self, index: usize, encoder: Option<usize>, amount: f32) {
+        if amount == 0. {
+            return;
+        }
+        match encoder {
+            None => {
+                let value = self.master as f32 + amount * 4.;
+                self.master = value.clamp(0., 1023.) as u16;
+                self.knob_angle[index] = master_angle(self.master);
+            }
+            Some(e) => {
+                self.knob_accum[index] += amount;
+                let detents = (self.knob_accum[index] / DETENT_PX).trunc();
+                if detents != 0. {
+                    self.knob_accum[index] -= detents * DETENT_PX;
+                    self.encoders.turn(e, detents as i32);
+                    self.knob_angle[index] += detents * DETENT_ANGLE;
+                }
+            }
+        }
+    }
     fn panel(&mut self, ui: &mut egui::Ui) {
         let available = ui.available_size();
         let scale = (available.x / 1160.).min(available.y / 700.).max(0.1);
@@ -267,17 +383,22 @@ impl Emulator {
             Stroke::new(scale, Color32::from_gray(48)),
             StrokeKind::Inside,
         );
-        for (x, y, name) in [
-            (91., 106., "MASTER"),
-            (208., 106., "SELECT"),
-            (91., 224., "PRESETS"),
-            (208., 224., "ALGORITHM"),
-            (632., 106., "KNOB1"),
-            (758., 106., "KNOB2"),
-            (884., 106., "KNOB3"),
-            (1010., 106., "KNOB4"),
-        ] {
-            c.knob(ui, x, y, name);
+        for (index, (x, y, name, encoder, keys)) in KNOBS.iter().enumerate() {
+            let hint = match encoder {
+                Some(_) => format!("{name} · drag or scroll to turn · keys {keys}"),
+                None => format!("{name} volume · drag or scroll · keys {keys}"),
+            };
+            let response = c.knob(ui, *x, *y, name, self.knob_angle[index], &hint);
+            // Drag up or right, scroll up, or the right-hand key: clockwise.
+            let mut amount = response.drag_delta().x - response.drag_delta().y;
+            if response.hovered() {
+                amount += ui.input(|i| i.raw_scroll_delta.y) * 0.5;
+            }
+            let (down, up) = KNOB_KEYS[index];
+            amount += ui.input(|i| {
+                (i.key_pressed(up) as i32 - i.key_pressed(down) as i32) as f32 * DETENT_PX
+            });
+            self.turn_knob(index, *encoder, amount);
         }
         c.box_at([290., 52., 270., 272.], 34., Color32::from_gray(8));
         c.box_at([310., 72., 230., 230.], 3., Color32::BLACK);
@@ -372,7 +493,7 @@ impl Canvas {
         self.painter
             .rect_filled(self.rect(rect), radius * self.scale, color);
     }
-    fn knob(&self, ui: &mut egui::Ui, x: f32, y: f32, name: &str) {
+    fn knob(&self, ui: &mut egui::Ui, x: f32, y: f32, name: &str, angle: f32, hint: &str) -> egui::Response {
         let p = self.origin + vec2(x, y) * self.scale;
         self.painter.text(
             p - vec2(0., 53.) * self.scale,
@@ -400,19 +521,15 @@ impl Canvas {
         }
         self.painter
             .circle_filled(p, 19. * self.scale, Color32::from_gray(35));
-        self.painter.line_segment(
-            [
-                p + vec2(-5., -11.) * self.scale,
-                p + vec2(-8., -18.) * self.scale,
-            ],
-            Stroke::new(3. * self.scale, INK),
-        );
+        let pointer = vec2(angle.sin(), -angle.cos()) * self.scale;
+        self.painter
+            .line_segment([p + pointer * 11., p + pointer * 18.], Stroke::new(3. * self.scale, INK));
         ui.interact(
             Rect::from_center_size(p, vec2(56., 56.) * self.scale),
             egui::Id::new(name),
-            Sense::hover(),
+            Sense::drag(),
         )
-        .on_hover_text("Rotary input is not implemented yet");
+        .on_hover_text(hint)
     }
 }
 
@@ -447,6 +564,8 @@ impl eframe::App for Emulator {
                             .clicked()
                         {
                             self.paused = !self.paused;
+                            let steps = self.cpu.as_ref().map_or(0, |cpu| cpu.steps);
+                            self.speed_mark = (Instant::now(), steps);
                         }
                         let (label, color) = if self.fault.is_some() {
                             ("Stopped", Color32::LIGHT_RED)
@@ -464,8 +583,14 @@ impl eframe::App for Emulator {
                 ui.colored_label(Color32::LIGHT_RED, error);
                 ui.label("This firmware needs additional emulation support. The LCD retains its last guest-written pixels.");
             } else {
-                ui.label("Hold a key or button to press it · Arrow keys: octave · A W S E D R F G T H Y J K: notes");
-                ui.weak("The LCD follows the loaded firmware. Audio playback and rotary input are not implemented.");
+                ui.label("Hold a key or button to press it · Arrow keys: octave · A W S E D R F G T H Y J K: notes · Knobs: drag, scroll, or 1–0 - = [ ] (MASTER: N / M)");
+                let speed = self.speed.map_or(String::from("measuring…"), |s| format!("{:.0}% of real time", s * 100.));
+                let audio = match (&self.audio, &self.audio_error) {
+                    (Some(audio), _) => format!("audio {} Hz · {} dropouts", audio.device_rate, audio.underruns()),
+                    (None, Some(error)) => format!("no audio: {error}"),
+                    (None, None) => String::from("no audio"),
+                };
+                ui.weak(format!("Guest speed {speed} · {audio} · below 100% the sound breaks up"));
             }
         });
         // Use input from the previous rendered frame, then collect this frame's
@@ -508,7 +633,12 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::new(Emulator::new(PathBuf::from(path))))
+            let mut app = Emulator::new(PathBuf::from(path));
+            match ui_audio::HostAudio::open() {
+                Ok(audio) => app.audio = Some(audio),
+                Err(error) => app.audio_error = Some(error),
+            }
+            Ok(Box::new(app))
         }),
     )
 }
