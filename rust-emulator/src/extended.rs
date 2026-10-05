@@ -857,7 +857,11 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
                 3 => (x & 4095) | 0xfffff000,
                 _ => packed(x),
             };
-            cpu.r[n] = cpu.r[d].wrapping_add(value);
+            // The compiler pairs this with addc for 64-bit sums (e.g.
+            // `r12 = r10 + 32; r13 = r11 + r0 + c`): it sets the carry out.
+            let (sum, carry) = cpu.r[d].overflowing_add(value);
+            cpu.r[n] = sum;
+            cpu.set_carry(carry);
             name = "add_immediate";
         }
         Op::AddStackExtended => {

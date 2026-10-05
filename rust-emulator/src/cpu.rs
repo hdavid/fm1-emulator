@@ -102,6 +102,24 @@ mod lock_tests {
     }
 
     #[test]
+    fn add_immediate_sets_the_carry_for_a_following_addc() {
+        // r12 = r10 + 32; r0 = 0; r13 = r11 + r0 + c (compiler 64-bit add,
+        // SLOOP's dx7_tables_init); the carry must not leak from before.
+        let program = vec![0x0c, 0xe1, 0x20, 0xa0, 0x40, 0x20, 0xb8, 0xe0, 0xb0, 0xd0];
+        for (low, high) in [(0u32, 0u32), (0xffff_ffe0, 1)] {
+            let mut c = Cpu::new(Bus::new(program.clone()).unwrap(), crate::XIP);
+            c.set_carry(true);
+            c.r[10] = low;
+            c.r[11] = 0;
+            for _ in 0..3 {
+                c.step().unwrap();
+            }
+            assert_eq!(c.r[12], low.wrapping_add(32));
+            assert_eq!(c.r[13], high);
+        }
+    }
+
+    #[test]
     fn paused_secondary_retains_context_until_resume() {
         let mut c = Cpu::new(Bus::new(vec![0; 32]).unwrap(), crate::XIP);
         let entry = crate::RAM + 512;
