@@ -722,6 +722,29 @@ impl Cpu {
                     name = "lsl";
                 }
             }
+            Op::BytePostIncrementRegister => {
+                // JieLi objdump: "rD = b[rB++=rI] (u)" / "b[rB++=rI] = rD" with
+                // rD = bits 0-2, store = bit 3, rB = bits 4-6, rI = r8 + bits 7-9;
+                // the access uses rB, then rB += rI (post-increment, as its
+                // "h[r15++=2]" for edd0). Stock/Baud Girl 0x0200de98: 13c0.
+                let data = (h & 7) as usize;
+                let base = ((h >> 4) & 7) as usize;
+                let step = 8 + ((h >> 7) & 7) as usize;
+                let address = self.r[base];
+                let next = address.wrapping_add(self.r[step]);
+                if h & 8 != 0 {
+                    self.bus
+                        .write(address, self.r[data] & 0xff, 1)
+                        .map_err(|fault| Box::new(Fault::Access { pc: self.pc, fault }))?;
+                    self.r[base] = next;
+                    name = "byte_store_postincrement_register";
+                } else {
+                    let value = self.read(address, 1)?;
+                    self.r[base] = next;
+                    self.r[data] = value;
+                    name = "byte_load_postincrement_register";
+                }
+            }
             Op::LoadStore32 => {
                 let address = self.r[b].wrapping_add((signed((h >> 8) & 31, 5) * 4) as u32);
                 if h & 0x80 != 0 {

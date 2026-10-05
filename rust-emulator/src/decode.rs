@@ -28,6 +28,7 @@ pub(crate) enum Op {
     Asr,
     Shift,
     LoadStore32,
+    BytePostIncrementRegister,
     PushPopMask,
     PushRegs,
     PopPc,
@@ -172,6 +173,10 @@ pub(crate) fn decode(h: u32) -> Op {
         MovImm8
     } else if h & 0xe0f8 == 0x2010 {
         MovNegative
+    } else if h & 0xfc00 == 0x1000 {
+        // 0x1000-0x13ff: b[rB++=rI] load/store; the JieLi pi32v2 objdump
+        // decodes all 1024 codes this way.
+        BytePostIncrementRegister
     } else if h & 0xff00 == 0x1600 {
         MovReg
     } else if matches!(h & 0xfe00, 0x1c00 | 0x1e00) {

@@ -737,3 +737,30 @@ fn long_divide_with_bit_12_set_is_signed() {
     c.step().unwrap();
     assert_eq!((c.r[2], c.r[3]), (0xfff4_fde6, 0xffff_ffff));
 }
+
+#[test]
+fn byte_load_and_store_post_increment_by_a_register() {
+    // Stock FM-1_015 / Baud Girl 0x0200de98: 13c0. The vendor objdump (JieLi
+    // pi32v2 toolchain) prints it as "r0 = b[r4++=r15] (u)", and decodes the
+    // whole 0x1000-0x13ff range as this family: bits 0-2 data register,
+    // bit 3 store, bits 4-6 base, bits 7-9 increment register r8-r15
+    // (all 1024 codes checked against objdump). "++=" is post-increment, as
+    // its "h[r15++=2]" for edd0 (and "b[++r3=-18]" for the pre form ee59).
+    let mut c = cpu(&[0x13c0]);
+    c.r[4] = RAM + 0x40;
+    c.r[15] = 3;
+    c.bus.write(RAM + 0x40, 0x0a, 1).unwrap();
+    c.bus.write(RAM + 0x43, 0x55, 1).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.r[0], 0x0a); // read at the old r4
+    assert_eq!(c.r[4], RAM + 0x43);
+    assert_eq!(c.pc, XIP + 2);
+    let mut c = cpu(&[0x13c8]); // b[r4++=r15] = r0
+    c.r[4] = RAM + 0x40;
+    c.r[15] = 1;
+    c.r[0] = 0x1234_56fe;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x40, 1).unwrap(), 0xfe);
+    assert_eq!(c.bus.read(RAM + 0x41, 1).unwrap(), 0);
+    assert_eq!(c.r[4], RAM + 0x41);
+}
