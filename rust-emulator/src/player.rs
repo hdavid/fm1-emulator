@@ -8,6 +8,9 @@ use std::{collections::VecDeque, path::Path};
 /// Guest instructions per second of guest time.
 pub const RATE: f64 = 24e6;
 
+/// Instructions between two scans of the held keys and turned encoders.
+const PANEL_SCAN_STEPS: u64 = 1024;
+
 // Matrix IDs per (row - 1, column), from fm1_input.h; same table as fm1-ui.
 const KEYMAP: [[i8; 11]; 4] = [
     [5, 11, 4, 10, 3, 9, 2, 8, -1, -1, -1],
@@ -73,13 +76,30 @@ impl Player {
     /// instructions (PC, form, registers after it) as a trace.
     pub fn run(&mut self, steps: u64) -> Result<(), String> {
         let end = self.cpu.steps + steps;
+        // The panel is scanned every 1024 instructions (a halted span jumped
+        // over by `skip_idle` stops at the next scan).
+        let mut next_scan = self.cpu.steps.next_multiple_of(PANEL_SCAN_STEPS);
         while self.cpu.steps < end {
-            if self.cpu.steps % 1024 == 0 {
+            if self.cpu.steps >= next_scan {
                 self.scan_panel()?;
+                next_scan = (self.cpu.steps / PANEL_SCAN_STEPS + 1) * PANEL_SCAN_STEPS;
+            }
+            if self.cpu.halted() {
+                let skipped = self.cpu.skip_idle(end.min(next_scan) - self.cpu.steps);
+                if skipped > 0 {
+                    if let Some(profile) = self.profile.as_mut() {
+                        profile.record_idle(skipped);
+                    }
+                    continue;
+                }
             }
             let pc = self.cpu.pc;
             if let Some(profile) = self.profile.as_mut() {
-                profile.record(pc, self.cpu.in_interrupt());
+                if self.cpu.halted() {
+                    profile.record_idle(1);
+                } else {
+                    profile.record(pc, self.cpu.in_interrupt());
+                }
             }
             match self.cpu.step() {
                 Ok(op) => {

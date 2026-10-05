@@ -6,7 +6,8 @@
 //                                 and interrupt count into a hash every step,
 //                                 then hash all SRAM and audio samples
 //                                 (batch prints those final hashes too)
-// FM1_CPU_MHZ=N sets the emulated clock as in diagnose.
+// FM1_CPU_MHZ=N sets the emulated clock as in diagnose; FM1_IDLE_SKIP=0 steps
+// halted idle slots one by one in batch mode.
 use fm1_emu::{cpu::Cpu, firmware::Firmware};
 use std::{env, path::Path, process::ExitCode, time::Instant};
 
@@ -42,6 +43,9 @@ fn run() -> Result<(), String> {
     if let Ok(mhz) = env::var("FM1_CPU_MHZ") {
         cpu.set_cpu_mhz(mhz.parse().map_err(|_| "invalid FM1_CPU_MHZ")?)?;
     }
+    // FM1_IDLE_SKIP=0: batch mode steps every halted `idle` slot instead of
+    // jumping to the next device event (the hashes must not change).
+    cpu.idle_skip = env::var("FM1_IDLE_SKIP").map_or(true, |v| v != "0");
     let mut hash = FNV_OFFSET;
     let mut fault = None;
     let start = Instant::now();
@@ -70,6 +74,13 @@ fn run() -> Result<(), String> {
     println!(
         "{steps} instructions in {seconds:.3} s: {:.1} M instr/s",
         steps as f64 / seconds / 1e6
+    );
+    let guest = cpu.ticks() as f64 / 24e6;
+    println!(
+        "guest time {guest:.3} s: {:.2}x real time; {} slots halted in idle ({} jumped over)",
+        guest / seconds,
+        cpu.idle_slots,
+        cpu.idle_skipped
     );
     if hashing || batched {
         let ram_hash = (0..fm1_emu::RAM_SIZE as u32)
