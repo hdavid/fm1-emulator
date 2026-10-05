@@ -455,6 +455,33 @@ fn float_integer_conversions_select_signedness_by_sub_operation() {
 }
 
 #[test]
+fn masked_push_and_pop_with_bit_zero_save_rets_and_return() {
+    // FM-1_093 0x02074b18: e8d9 0df0 opens a function whose last
+    // instruction is e8d5 0df0 (0x02074ba2, the next function follows), so
+    // h bit 0 adds rets to the push and pc to the pop, like push/pop
+    // {rets, r4..rN} (0x047n / 0x045n).
+    let mut c = cpu(&[0xe8d9, 0x0df0, 0xe8d5, 0x0df0]);
+    c.sr[14] = RAM + 0x100;
+    c.sr[3] = XIP + 0x40;
+    for n in 0..16 {
+        c.r[n] = 0x100 + n as u32;
+    }
+    c.step().unwrap();
+    assert_eq!(c.sr[14], RAM + 0x100 - 4 * 8);
+    assert_eq!(c.bus.read(RAM + 0xfc, 4).unwrap(), XIP + 0x40);
+    assert_eq!(c.bus.read(RAM + 0xe0, 4).unwrap(), 0x104);
+    for n in [4, 5, 6, 7, 8, 10, 11] {
+        c.r[n] = 0;
+    }
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 0x40);
+    assert_eq!(c.sr[14], RAM + 0x100);
+    for n in [4, 5, 6, 7, 8, 10, 11] {
+        assert_eq!(c.r[n], 0x100 + n as u32);
+    }
+}
+
+#[test]
 fn register_repeat_with_a_zero_count_skips_its_block() {
     let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);
     c.r[1] = RAM;

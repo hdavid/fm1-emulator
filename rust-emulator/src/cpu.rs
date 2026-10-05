@@ -641,7 +641,12 @@ impl Cpu {
             }
             Op::PushPopMask => {
                 let mask = self.operand(code.x, pc + 2)?;
-                if h == 0xe8d8 {
+                // h bit 0 adds rets to the push and pc to the pop (FM-1_093
+                // pairs e8d9/e8d5 as function prologue/epilogue).
+                if h & !1 == 0xe8d8 {
+                    if h & 1 != 0 {
+                        self.push(self.sr[3])?;
+                    }
                     for n in (0..16).rev() {
                         if mask & (1 << n) != 0 {
                             self.push(self.r[n])?;
@@ -657,6 +662,9 @@ impl Cpu {
                     name = "pop_mask";
                 }
                 next = pc + 4;
+                if h == 0xe8d5 {
+                    next = self.pop()?;
+                }
             }
             Op::PushRegs => {
                 let boundary = (h & 15) as usize;

@@ -190,7 +190,7 @@ pub(crate) fn decode(h: u32) -> Op {
         Shift
     } else if h & 0xe008 == 0x6000 {
         LoadStore32
-    } else if h == 0xe8d8 || h == 0xe8d4 {
+    } else if matches!(h, 0xe8d8 | 0xe8d4 | 0xe8d9 | 0xe8d5) {
         PushPopMask
     } else if h & 0xfff0 == 0x0460 {
         PushRegs
