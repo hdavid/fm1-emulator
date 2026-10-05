@@ -16,6 +16,45 @@ pub(crate) fn packed(x: u32) -> u32 {
         mode => ((0x80 | (x & 127)) << (32 - mode * 8)) >> ((x >> 7) & 7),
     }
 }
+/// Word offset of the E866/E868/E86C/E86D read-modify-write forms: x bits 2-7
+/// as a signed byte (vendor objdump: E868 12FC is [r1+-4] += r2).
+fn memory_offset(x: u32) -> u32 {
+    signed(x & 0xfc, 8) as u32
+}
+
+/// Signed nine-bit byte offset of the EE5X and EEDX forms; h bit 0 is its sign.
+fn word_increment(h: u32, x: u32) -> u32 {
+    // ECD8-ECDF: (h & 7) : x[11:8] : x[3:2], signed (vendor objdump: ECDF 4F00
+    // is r4 = [r0++=-16], ECDA 1238 is r1 = [r3++=552]).
+    signed(((h & 7) << 8) | (((x >> 8) & 15) << 4) | (x & 12), 11) as u32
+}
+
+fn byte_offset(h: u32, x: u32) -> u32 {
+    signed(((h & 1) << 8) | (((x >> 8) & 15) << 4) | (x & 15), 9) as u32
+}
+
+/// Store the upper halfword of rD (the vendor's `= rD.h` stores).
+fn store_upper_half(cpu: &mut Cpu, pc: u32, address: u32, d: usize) -> Result<(), Fault> {
+    cpu.bus
+        .write(address, cpu.r[d] >> 16, 2)
+        .map_err(|fault| Fault::Access { pc, fault })
+}
+
+/// Load or store the register pair rD+1:rD, the even register at `address`.
+fn pair_access(cpu: &mut Cpu, address: u32, d: usize, store: bool) -> Result<(), Fault> {
+    let reg = d & 14;
+    if store {
+        cpu.write(address, cpu.r[reg])?;
+        cpu.write(address.wrapping_add(4), cpu.r[reg + 1])?;
+    } else {
+        let low = cpu.read(address, 4)?;
+        let high = cpu.read(address.wrapping_add(4), 4)?;
+        cpu.r[reg] = low;
+        cpu.r[reg + 1] = high;
+    }
+    Ok(())
+}
+
 pub(crate) fn execute(
     cpu: &mut Cpu,
     h: u32,
@@ -56,11 +95,14 @@ pub(crate) fn execute(
             op = "clear_high_register";
         }
         Extended::CacheFlushInvalidate => {
+            // flush [rN] (0220) and flushinv [rN] (0230) act on one data cache
+            // line; memory is not cached here, so neither changes anything.
             op = "cache_flush_invalidate";
         }
         Extended::StackWord => {
             mem = Some((
-                a,
+                // Bit 3 selects r8-r15 (vendor objdump: 2709 is r9 = [sp+28]).
+                (h & 15) as usize,
                 0,
                 // Bit 5 supplies offset bit 7; Felucca spills beyond 128 bytes.
                 cpu.sr[14].wrapping_add((((h >> 8) & 31) | (h & 32)) * 4),
@@ -217,7 +259,7 @@ pub(crate) fn execute(
                     op = "branch_register_mask";
                 }
                 Wide::MemoryShift => {
-                    let address = cpu.r[d].wrapping_add(x & 252);
+                    let address = cpu.r[d].wrapping_add(memory_offset(x));
                     let value = cpu.read(address, 4)?;
                     let shift = c + ((h & 1) as usize) * 16;
                     cpu.write(
@@ -231,7 +273,7 @@ pub(crate) fn execute(
                     op = "memory_shift";
                 }
                 Wide::MemoryArithmeticRegister => {
-                    let addr = cpu.r[d] + (x & 252);
+                    let addr = cpu.r[d].wrapping_add(memory_offset(x));
                     let value = cpu.read(addr, 4)?;
                     let operand = cpu.r[c];
                     cpu.write(
@@ -250,43 +292,52 @@ pub(crate) fn execute(
                 }
                 Wide::HalfwordExtended => {
                     let store = x & 1 != 0;
-                    let high = if store {
-                        signed(h & 7, 3)
-                    } else {
-                        // Loads have a signed ten-bit displacement. Bit 2 selects
-                        // value sign extension; bit 1 belongs to the address sign.
-                        // Stock LVGL uses ED5B to load at r8-4 and write back r8.
-                        signed(h & 3, 2)
-                    };
-                    let offset = (high << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 14) as i32;
+                    // Loads and stores have a signed ten-bit displacement. Bit 2
+                    // selects value sign extension of loads and the upper half
+                    // for stores (vendor objdump: ED53 0F2B is h[r2+-6] = r0 and
+                    // ED55 0F2B is h[r2+506] = r0.h). Stock LVGL uses ED5B to load
+                    // at r8-4 and write back r8.
+                    let offset =
+                        (signed(h & 3, 2) << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 14) as i32;
                     let addr = cpu.r[s].wrapping_add(offset as u32);
-                    mem = Some((
-                        d,
-                        s,
-                        addr,
-                        2,
-                        store,
-                        !store && h & 4 != 0,
-                        if h & 8 != 0 { Some(addr) } else { None },
-                    ));
+                    let updated = if h & 8 != 0 { Some(addr) } else { None };
+                    if store && h & 4 != 0 {
+                        store_upper_half(cpu, pc, addr, d)?;
+                        if let Some(value) = updated {
+                            cpu.r[s] = value;
+                        }
+                    } else {
+                        mem = Some((d, s, addr, 2, store, !store && h & 4 != 0, updated));
+                    }
                     op = "halfword_extended";
                 }
                 Wide::HalfwordPostincrement => {
-                    let increment = ((x >> 8) & 15) * 16 + (x & 14);
+                    // EDD0-EDD7: a signed ten-bit increment with h bits 0-1 on
+                    // top; bit 2 is a signed load or a store of the upper half
+                    // (vendor objdump: EDD4 1231 is h[r3++=32] = r1.h).
+                    let store = x & 1 != 0;
+                    let increment =
+                        signed(((h & 3) << 8) | (((x >> 8) & 15) << 4) | (x & 14), 10) as u32;
                     let address = cpu.r[s];
-                    mem = Some((
-                        d,
-                        s,
-                        address,
-                        2,
-                        x & 1 != 0,
-                        h & 4 != 0,
-                        Some(address.wrapping_add(increment)),
-                    ));
+                    if store && h & 4 != 0 {
+                        store_upper_half(cpu, pc, address, d)?;
+                        cpu.r[s] = address.wrapping_add(increment);
+                    } else {
+                        mem = Some((
+                            d,
+                            s,
+                            address,
+                            2,
+                            store,
+                            !store && h & 4 != 0,
+                            Some(address.wrapping_add(increment)),
+                        ));
+                    }
                     op = "halfword_postincrement";
                 }
                 Wide::BytePostincrementStore => {
-                    let increment = ((x >> 8) & 15) * 16 + (x & 15);
+                    // EED2/EED3: a signed nine-bit increment, h bit 0 its sign.
+                    let increment = byte_offset(h, x);
                     let address = cpu.r[s];
                     mem = Some((
                         d,
@@ -300,7 +351,7 @@ pub(crate) fn execute(
                     op = "byte_postincrement_store";
                 }
                 Wide::BytePostincrementLoad => {
-                    let off = ((x >> 8) & 15) * 16 + (x & 15);
+                    let off = byte_offset(h, x);
                     let addr = cpu.r[s];
                     mem = Some((
                         d,
@@ -478,7 +529,7 @@ pub(crate) fn execute(
                     op = "decrement_branch";
                 }
                 Wide::MemoryBit => {
-                    let addr = cpu.r[d] + (x & 252);
+                    let addr = cpu.r[d].wrapping_add(memory_offset(x));
                     let old = cpu.read(addr, 4)?;
                     let mask = 1u32 << (cpu.r[c] & 31);
                     cpu.write(
@@ -599,6 +650,10 @@ pub(crate) fn execute(
                             address = address.wrapping_add(4);
                         }
                     }
+                    // [rN++] = {...} (EB3X): the base advances past the list.
+                    if h & 0x10 != 0 {
+                        cpu.r[n] = address;
+                    }
                     op = "store_register_list";
                 }
                 Wide::LoadRegisterList => {
@@ -608,6 +663,10 @@ pub(crate) fn execute(
                             cpu.r[register] = cpu.read(address, 4)?;
                             address = address.wrapping_add(4);
                         }
+                    }
+                    // {...} = [rN++] (EB1X), as the store.
+                    if h & 0x10 != 0 {
+                        cpu.r[n] = address;
                     }
                     op = "load_register_list";
                 }
@@ -637,15 +696,31 @@ pub(crate) fn execute(
                     let offset =
                         (signed(h & 7, 3) << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 12) as i32;
                     let addr = cpu.r[s].wrapping_add(offset as u32);
-                    let reg = d & 14;
-                    if x & 1 != 0 {
-                        cpu.write(addr, cpu.r[reg])?;
-                        cpu.write(addr + 4, cpu.r[reg + 1])?;
-                    } else {
-                        cpu.r[reg] = cpu.read(addr, 4)?;
-                        cpu.r[reg + 1] = cpu.read(addr + 4, 4)?;
+                    pair_access(cpu, addr, d, x & 1 != 0)?;
+                    if x & 2 != 0 {
+                        // Pre-increment: the address is written back to the base
+                        // (vendor objdump: EC50 8012 is r9_r8 = d[++r1=0]).
+                        cpu.r[s] = addr;
                     }
                     op = "memory_pair";
+                }
+                Wide::PairPostincrement => {
+                    // EC58-EC5F with x bit 1 clear: d[rS++=imm], the access at
+                    // rS, then rS += a signed eleven-bit immediate (vendor
+                    // objdump: EC58 2009 is d[r0++=8] = r3_r2).
+                    let offset =
+                        (signed(h & 7, 3) << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 12) as i32;
+                    let addr = cpu.r[s];
+                    pair_access(cpu, addr, d, x & 1 != 0)?;
+                    cpu.r[s] = addr.wrapping_add(offset as u32);
+                    op = "pair_postincrement";
+                }
+                Wide::PairRegisterPreincrement => {
+                    // EC5C with x bit 1: r9_r8 = d[++r1=r0] (stock 0x0200940e).
+                    let addr = cpu.r[s].wrapping_add(cpu.r[c]);
+                    pair_access(cpu, addr, d, x & 1 != 0)?;
+                    cpu.r[s] = addr;
+                    op = "pair_register_preincrement";
                 }
                 Wide::BitField => {
                     let pos = (x >> 7) & 31;
@@ -653,8 +728,12 @@ pub(crate) fn execute(
                     let mask = (1u32 << len) - 1;
                     cpu.r[n] = if h & 0x10 == 0 {
                         (cpu.r[n] & !(mask << pos)) | ((cpu.r[d] & mask) << pos)
-                    } else {
+                    } else if x & 1 == 0 {
                         (cpu.r[d] >> pos) & mask
+                    } else {
+                        // sextra (vendor objdump: E1B0 B041 is
+                        // r0 = sextra(r11, p:0, l:16), Baud Girl 0x02012c5e).
+                        signed((cpu.r[d] >> pos) & mask, len.max(1)) as u32
                     };
                     op = "bit_field";
                 }
@@ -672,13 +751,17 @@ pub(crate) fn execute(
                     op = "branch_bit";
                 }
                 Wide::MemoryMask => {
-                    let addr = cpu.r[d].wrapping_add((h & 31) * 4);
+                    // EF00-EFFF: bits 7-6 select or, xor, and, and-not; bits 5-0
+                    // are a signed word offset (vendor objdump: EF3F 0400 is
+                    // [r0+-4] |= 0x80000000, EF40 0400 is [r0+0] ^= 0x80000000).
+                    let addr = cpu.r[d].wrapping_add((signed(h & 63, 6) * 4) as u32);
                     let old = cpu.read(addr, 4)?;
                     let value = packed(x);
                     cpu.write(
                         addr,
                         match h & 0xc0 {
                             0 => old | value,
+                            0x40 => old ^ value,
                             0x80 => old & value,
                             _ => old & !value,
                         },
@@ -930,8 +1013,52 @@ pub(crate) fn execute(
                     };
                     op = "halfword_register_preincrement";
                 }
+                Wide::HalfwordRegisterPreincrementStore => {
+                    // Vendor objdump: EDDC 4651 is h[++r5=r6] = r4 and EDDC 4653
+                    // is h[++r5=r6] = r4.h (SLOOP's sequencer event ring).
+                    let address = cpu.r[s].wrapping_add(cpu.r[c]);
+                    let value = if x & 2 != 0 { cpu.r[d] >> 16 } else { cpu.r[d] };
+                    cpu.bus
+                        .write(address, value, 2)
+                        .map_err(|fault| Fault::Access { pc, fault })?;
+                    cpu.r[s] = address;
+                    op = "halfword_register_preincrement_store";
+                }
+                Wide::RegisterPostincrement => {
+                    // ECDE/EDDE/EEDE [rS++=rC]: the access at rS, then rS += rC.
+                    // x bits 0-1 (vendor objdump): word 2 load, 3 store; halfword
+                    // 0 load, 1 store, 2 signed load, 3 store of the upper half;
+                    // byte 0 load, 1 store, 2 signed load.
+                    let size = match h {
+                        0xecde => 4,
+                        0xedde => 2,
+                        _ => 1,
+                    };
+                    let address = cpu.r[s];
+                    let updated = address.wrapping_add(cpu.r[c]);
+                    if x & 1 != 0 {
+                        let value = if size == 2 && x & 2 != 0 {
+                            cpu.r[d] >> 16
+                        } else {
+                            cpu.r[d]
+                        };
+                        cpu.bus
+                            .write(address, value, size)
+                            .map_err(|fault| Fault::Access { pc, fault })?;
+                        cpu.r[s] = updated;
+                    } else {
+                        let value = cpu.read(address, size)?;
+                        cpu.r[s] = updated;
+                        cpu.r[d] = if size != 4 && x & 2 != 0 {
+                            signed(value, (size * 8) as u32) as u32
+                        } else {
+                            value
+                        };
+                    }
+                    op = "register_postincrement";
+                }
                 Wide::WordPostincrementStore => {
-                    let increment = (((x >> 8) & 15) << 4) | (x & 12);
+                    let increment = word_increment(h, x);
                     let address = cpu.r[s];
                     mem = Some((
                         d,
@@ -945,7 +1072,7 @@ pub(crate) fn execute(
                     op = "word_postincrement_store";
                 }
                 Wide::WordPostincrementLoad => {
-                    let increment = (((x >> 8) & 15) << 4) | (x & 12);
+                    let increment = word_increment(h, x);
                     let address = cpu.r[s];
                     mem = Some((
                         d,

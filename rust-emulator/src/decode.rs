@@ -136,8 +136,12 @@ pub(crate) enum Wide {
     WordRegisterPreincrementStore,
     WordRegisterPreincrement,
     HalfwordRegisterPreincrement,
+    HalfwordRegisterPreincrementStore,
     WordPostincrementStore,
     WordPostincrementLoad,
+    RegisterPostincrement,
+    PairPostincrement,
+    PairRegisterPreincrement,
     MemoryIndexed,
     Unknown,
 }
@@ -294,10 +298,10 @@ fn extended(h: u32) -> Extended {
     if h & 0xfff8 == 0x14c0 {
         return Extended::ClearHighRegister;
     }
-    if h & 0xfff0 == 0x0230 {
+    if h & 0xffe0 == 0x0220 {
         return Extended::CacheFlushInvalidate;
     }
-    if h & 0xe058 == 0x2000 {
+    if h & 0xe050 == 0x2000 {
         return Extended::StackWord;
     }
     if matches!(h & 0xff88, 0x1700 | 0x1708 | 0x1780 | 0x1788) {
@@ -357,13 +361,13 @@ fn wide(h: u32, x: u32) -> Wide {
     if h & 0xfff8 == 0xed50 || h & 0xfff8 == 0xed58 {
         return Wide::HalfwordExtended;
     }
-    if h == 0xedd0 || h == 0xedd4 && x & 1 == 0 {
+    if h & 0xfff8 == 0xedd0 {
         return Wide::HalfwordPostincrement;
     }
-    if h == 0xeed2 {
+    if matches!(h, 0xeed2 | 0xeed3) {
         return Wide::BytePostincrementStore;
     }
-    if matches!(h, 0xeed0 | 0xeed4) {
+    if matches!(h, 0xeed0 | 0xeed1 | 0xeed4 | 0xeed5) {
         return Wide::BytePostincrementLoad;
     }
     if h & 0xfff0 == 0xe1e0 {
@@ -444,10 +448,11 @@ fn wide(h: u32, x: u32) -> Wide {
     if h == 0xe190 && x & 15 <= 3 {
         return Wide::LogicThree;
     }
-    if h & 0xfff0 == 0xeb20 && x != 0 {
+    if h & 0xffe0 == 0xeb20 && x != 0 {
+        // [rN+] = {...} (eb2X) and [rN++] = {...} (eb3X).
         return Wide::StoreRegisterList;
     }
-    if h & 0xfff0 == 0xeb00 && x != 0 {
+    if h & 0xffe0 == 0xeb00 && x != 0 {
         return Wide::LoadRegisterList;
     }
     if matches!(h, 0xe9d8 | 0xe9d9 | 0xe9dc | 0xe9dd | 0xe9de) {
@@ -456,8 +461,14 @@ fn wide(h: u32, x: u32) -> Wide {
     if h == 0xe9d4 {
         return Wide::StackExtended;
     }
-    if h & 0xfff8 == 0xec50 && x & 3 <= 1 {
+    if h & 0xfff8 == 0xec50 {
         return Wide::MemoryPair;
+    }
+    if h & 0xfff8 == 0xec58 && x & 2 == 0 {
+        return Wide::PairPostincrement;
+    }
+    if h == 0xec5c && x & 2 != 0 {
+        return Wide::PairRegisterPreincrement;
     }
     if matches!(h & 0xfff0, 0xe1a0 | 0xe1b0) {
         return Wide::BitField;
@@ -468,7 +479,7 @@ fn wide(h: u32, x: u32) -> Wide {
     if h & 0xfff0 == 0xe850 {
         return Wide::BranchBit;
     }
-    if matches!(h & 0xffe0, 0xef00 | 0xef80 | 0xefc0) {
+    if h & 0xff00 == 0xef00 {
         return Wide::MemoryMask;
     }
     if matches!(
@@ -545,7 +556,18 @@ fn wide(h: u32, x: u32) -> Wide {
     }
     if matches!(
         h,
-        0xee50 | 0xee51 | 0xee52 | 0xee54 | 0xee55 | 0xee58 | 0xee5a
+        0xee50
+            | 0xee51
+            | 0xee52
+            | 0xee53
+            | 0xee54
+            | 0xee55
+            | 0xee58
+            | 0xee59
+            | 0xee5a
+            | 0xee5b
+            | 0xee5c
+            | 0xee5d
     ) {
         return Wide::ByteExtended;
     }
@@ -561,11 +583,19 @@ fn wide(h: u32, x: u32) -> Wide {
     if h == 0xeddc && matches!(x & 15, 0 | 2) {
         return Wide::HalfwordRegisterPreincrement;
     }
-    if h == 0xecd8 && x & 3 == 1 {
+    if h == 0xeddc && matches!(x & 15, 1 | 3) {
+        return Wide::HalfwordRegisterPreincrementStore;
+    }
+    if h & 0xfff8 == 0xecd8 && x & 3 == 1 {
+        // ecd8-ecdf: rS advances by a signed 11-bit immediate.
         return Wide::WordPostincrementStore;
     }
-    if h == 0xecd8 && x & 3 == 0 {
+    if h & 0xfff8 == 0xecd8 && x & 3 == 0 {
         return Wide::WordPostincrementLoad;
+    }
+    if (h == 0xecde && x & 2 != 0) || h == 0xedde || (h == 0xeede && x & 3 != 3) {
+        // [rS++=rC]: the access at rS, then rS += rC.
+        return Wide::RegisterPostincrement;
     }
     if matches!(h, 0xecd8 | 0xedd8 | 0xeed8) {
         return Wide::MemoryIndexed;
