@@ -53,7 +53,10 @@ software reset, sleep/display enable, RGB565 format, unrotated RGB/BGR, column/
 row windows, and pixel writes. Unsupported commands, rotations, and invalid DMA
 addresses fault visibly. Completion is synchronous, not cycle-accurate; INVON
 is treated as the FM-1 panel's normal electrical drive mode, not an RGB invert.
-The CPU runs bounded slices on the UI thread, not at a calibrated real-time rate.
+The CPU runs continuously on a worker thread. The window sends matrix contacts
+and receives the latest LCD snapshot; unchanged pixels do not require texture
+uploads. Guest time still follows the emulated clock, so execution speed depends
+on the host and is not yet calibrated to real time.
 
 `build/display/firmware.elf` is the 17,056-byte FM-1_981 hardware application.
 It uses Felucca-derived startup, watchdog, recovery, input scanning, USB CDC and
