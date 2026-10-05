@@ -33,3 +33,16 @@ fn hardware_resampler_accepts_its_disable_and_rejects_unemulated_conversions() {
     assert!(b.write(0x14300, 1, 4).is_err());
     assert!(b.read(0x14300, 1).is_err());
 }
+
+#[test]
+fn random_number_generator_returns_fresh_words_and_is_read_only() {
+    // Stock read at 0x02003472 of JL_RAND->R64L (WL82.h lsfr 0x3b00).
+    let b = bus();
+    let first = b.read(0x13b00, 4).unwrap();
+    let second = b.read(0x13b00, 4).unwrap();
+    assert_ne!(first, second);
+    b.read(0x13b04, 4).unwrap();
+    let mut b = bus();
+    assert!(b.write(0x13b00, 0, 4).is_err());
+    assert!(b.read(0x13b00, 2).is_err());
+}

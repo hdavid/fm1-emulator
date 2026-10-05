@@ -36,6 +36,7 @@ pub struct Bus {
     crc: crate::crc::Crc,
     clock: crate::clock::Clock,
     resample: crate::resample::Resampler,
+    rng: crate::rng::Rng,
     code: crate::code_cache::CodeCache,
     /// NOR generation the code cache was last synchronized with.
     nor_generation: u64,
@@ -75,6 +76,7 @@ impl Bus {
             crc: Default::default(),
             clock: Default::default(),
             resample: Default::default(),
+            rng: Default::default(),
             code: Default::default(),
             nor_generation: 0,
             mmio_stats: Default::default(),
@@ -165,6 +167,17 @@ impl Bus {
             }
             if let Some(value) = self.crc.read(address) {
                 return Ok(value);
+            }
+            if crate::rng::Rng::contains(address & !3) {
+                return match (size, self.rng.read(address)) {
+                    (4, Some(value)) => Ok(value),
+                    _ => Err(Self::fault(
+                        address,
+                        size,
+                        operation,
+                        "JL_RAND registers require word reads",
+                    )),
+                };
             }
             if let Some(value) = self.resample.read(address & !3) {
                 return if size == 4 {
@@ -302,6 +315,14 @@ impl Bus {
         }
         if self.crc.write(address, value).is_some() {
             return Ok(());
+        }
+        if crate::rng::Rng::contains(address & !3) {
+            return Err(Self::fault(
+                address,
+                size,
+                "write",
+                "JL_RAND registers are read-only",
+            ));
         }
         if self.resample.read(address & !3).is_some() {
             if size != 4 {
