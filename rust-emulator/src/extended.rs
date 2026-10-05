@@ -344,6 +344,21 @@ fn execute_wide(
             cpu.r[pair + 1] = (product >> 32) as u32;
             name = "multiply_long";
         }
+        Op::MultiplyAccumulateLong => {
+            // rD+1:rD += rS * rC, fields as MultiplyLong. Felucca's signed
+            // Q30 filters chain e1fc bde0; stock soft-double uses e1fc ae60.
+            let pair = d & 14;
+            let product = if x & 0x1000 != 0 {
+                (cpu.r[s] as i32 as i64).wrapping_mul(cpu.r[c] as i32 as i64) as u64
+            } else {
+                cpu.r[s] as u64 * cpu.r[c] as u64
+            };
+            let sum =
+                ((cpu.r[pair] as u64) | ((cpu.r[pair + 1] as u64) << 32)).wrapping_add(product);
+            cpu.r[pair] = sum as u32;
+            cpu.r[pair + 1] = (sum >> 32) as u32;
+            name = "multiply_accumulate_long";
+        }
         Op::DivideLong => {
             // rD+1:rD = (rS+1:rS) / rC, unsigned 64-by-32 division. The stock
             // microsecond conversion divides by 1000000 then rebuilds the

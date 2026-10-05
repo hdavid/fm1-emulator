@@ -323,6 +323,30 @@ fn pair_shift_by_register_normalises_a_double_mantissa() {
 }
 
 #[test]
+fn long_multiply_accumulate_adds_the_product_to_the_pair() {
+    // e1fc follows the e1f8 field layout (pair rD&14, x bit 12 signed) and
+    // accumulates. Felucca's DSP chains e1fc bde0 (signed, r11:r10 +=
+    // r14 * r13) before a Q30 e1d0 490e; FM-1_093's soft-double multiply
+    // at 0x02044f5c uses the unsigned e1fc ae60 (r11:r10 += r6 * r14).
+    let mut c = cpu(&[0xe1fc, 0xbde0]);
+    c.r[10] = 0xffff_fff0;
+    c.r[11] = 0;
+    c.r[13] = 3;
+    c.r[14] = 0xffff_fffe; // -2
+    c.step().unwrap();
+    let expected = 0xffff_fff0u64.wrapping_add((-6i64) as u64);
+    assert_eq!((c.r[11], c.r[10]), ((expected >> 32) as u32, expected as u32));
+    let mut c = cpu(&[0xe1fc, 0xae60]);
+    c.r[10] = 0xffff_ffff;
+    c.r[11] = 1;
+    c.r[6] = 0xffff_ffff;
+    c.r[14] = 2;
+    c.step().unwrap();
+    let expected = 0x1_ffff_ffffu64 + 0xffff_ffffu64 * 2;
+    assert_eq!((c.r[11], c.r[10]), ((expected >> 32) as u32, expected as u32));
+}
+
+#[test]
 fn register_repeat_with_a_zero_count_skips_its_block() {
     let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);
     c.r[1] = RAM;
