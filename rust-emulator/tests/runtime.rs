@@ -1294,6 +1294,26 @@ fn halfword_postincrement_reads_before_advancing_parameter_pointer() {
 }
 
 #[test]
+fn stock_pixel_stores_advance_by_two_bytes_without_loading_the_buffer() {
+    // Stock 0x02012724: h[r13++=2] = r0; bit 0 is direction.
+    let mut c = cpu(&[0xedd0, 0x00d3, 0xedd0, 0x00d3]);
+    c.r[13] = RAM + 8;
+    c.r[0] = 0x1234f800;
+    c.sr[5] = 15;
+    c.bus.write(RAM + 8, 0xabcdef12, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.r[0], 0x1234f800);
+    assert_eq!(c.r[13], RAM + 10);
+    assert_eq!(c.bus.read(RAM + 8, 4).unwrap(), 0xabcdf800);
+    c.r[0] = 0x07e0;
+    c.step().unwrap();
+    assert_eq!(c.r[13], RAM + 12);
+    assert_eq!(c.bus.read(RAM + 8, 4).unwrap(), 0x07e0f800);
+    assert_eq!(c.sr[5], 15);
+    assert!(cpu(&[0xedd4, 0x00d3]).step().is_err());
+}
+
+#[test]
 fn fx_signed_halfword_load_reads_before_advancing_the_parameter_pointer() {
     for (value, expected) in [
         (0, 0),

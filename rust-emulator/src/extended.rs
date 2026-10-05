@@ -236,15 +236,15 @@ pub(crate) fn execute(
                 if h & 8 != 0 { Some(addr) } else { None },
             ));
             op = "halfword_extended";
-        } else if matches!(h, 0xedd0 | 0xedd4) {
-            let increment = ((x >> 8) & 15) * 16 + (x & 15);
+        } else if h == 0xedd0 || h == 0xedd4 && x & 1 == 0 {
+            let increment = ((x >> 8) & 15) * 16 + (x & 14);
             let address = cpu.r[s];
             mem = Some((
                 d,
                 s,
                 address,
                 2,
-                false,
+                x & 1 != 0,
                 h & 4 != 0,
                 Some(address.wrapping_add(increment)),
             ));
