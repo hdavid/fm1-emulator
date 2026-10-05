@@ -58,10 +58,12 @@ fn report(profile: &Profile, symbols: &[Symbol], top: usize) {
     let total = profile.total.max(1) as f64;
     let share = |count: u64| 100.0 * count as f64 / total;
     println!(
-        "profile: {} primary-core instructions, {} ({:.2}%) in interrupt handlers",
+        "profile: {} primary-core instructions, {} ({:.2}%) in interrupt handlers, {} ({:.2}%) halted in idle",
         profile.total,
         profile.interrupt,
-        share(profile.interrupt)
+        share(profile.interrupt),
+        profile.idle,
+        share(profile.idle)
     );
     let functions = profile.by_function(symbols);
     for f in functions.iter().take(top) {
@@ -150,6 +152,9 @@ fn main() -> Result<(), String> {
     if let Ok(mhz) = env::var("FM1_CPU_MHZ") {
         player.cpu.set_cpu_mhz(mhz.parse().map_err(|_| "invalid FM1_CPU_MHZ")?)?;
     }
+    // Optional: FM1_IDLE_SKIP=0 steps every slot of a core halted in `idle`
+    // instead of jumping to the next device event (same guest state).
+    player.cpu.idle_skip = env::var("FM1_IDLE_SKIP").map_or(true, |v| v != "0");
     // Optional: FM1_HOT=N profiles the primary core (see the top).
     let hot_top: usize = env::var("FM1_HOT")
         .ok()
@@ -168,6 +173,7 @@ fn main() -> Result<(), String> {
         }
     }
     for step in steps {
+        let started = (std::time::Instant::now(), player.cpu.ticks());
         let parts: Vec<&str> = step.split(':').collect();
         let result = match parts.as_slice() {
             ["run", s] => player.run_seconds(seconds(step, s)?),
@@ -272,7 +278,17 @@ fn main() -> Result<(), String> {
             println!("{trace}");
             return Err(fault.to_string());
         }
-        println!("{step}: ok ({} instructions)", player.cpu.steps);
+        let guest = (player.cpu.ticks() - started.1) as f64 / 24e6;
+        if guest > 0.0 {
+            let host = started.0.elapsed().as_secs_f64();
+            println!(
+                "{step}: ok ({} instructions; {guest:.2} s guest in {host:.2} s: {:.2}x real time)",
+                player.cpu.steps,
+                guest / host
+            );
+        } else {
+            println!("{step}: ok ({} instructions)", player.cpu.steps);
+        }
     }
     if let Some(profile) = player.profile.as_ref().or(paused.as_ref()) {
         if profile.total > 0 {

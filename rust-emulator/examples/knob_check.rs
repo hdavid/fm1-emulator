@@ -12,14 +12,21 @@ const SETTLE_STEPS: u64 = 72_000_000; // 3 s for the clicks to play and draw
 
 fn run_for(cpu: &mut Cpu, encoders: &mut ui_knobs::Encoders, steps: u64) -> Result<(), String> {
     let end = cpu.steps + steps;
+    // The encoders update every 1024 instructions; a halted span jumped
+    // over by `skip_idle` stops at the next update.
+    let mut next_update = cpu.steps.next_multiple_of(1024);
     while cpu.steps < end {
-        if cpu.steps % 1024 == 0 {
+        if cpu.steps >= next_update {
             let contacts = encoders.update(|column| cpu.bus.devices.gpio.column_scans(column));
             for (e, (a, b)) in contacts.into_iter().enumerate() {
                 let [ac, ar, bc, br] = ui_knobs::CONTACTS[e];
                 cpu.bus.devices.gpio.press(ac, ar, a)?;
                 cpu.bus.devices.gpio.press(bc, br, b)?;
             }
+            next_update = (cpu.steps / 1024 + 1) * 1024;
+        }
+        if cpu.halted() && cpu.skip_idle(end.min(next_update) - cpu.steps) > 0 {
+            continue;
         }
         cpu.step().map_err(|fault| fault.to_string())?;
     }

@@ -95,7 +95,30 @@ fn run() -> Result<(), String> {
     // Optional: FM1_OP=NAME counts executions per PC of one operation name.
     let op_filter = env::var("FM1_OP").ok();
     let mut op_pcs = BTreeMap::<u32, u64>::new();
-    for step in 0..limit {
+    // Optional: FM1_IDLE_SKIP=0 steps every slot of a core halted in `idle`
+    // instead of jumping to the next device event (same guest state).
+    cpu.idle_skip = env::var("FM1_IDLE_SKIP").map_or(true, |v| v != "0");
+    // Halted spans are skipped only where no per-instruction diagnostic
+    // looks, and never across the start of the FM1_HOT / FM1_MMIO windows.
+    let hot_start = limit - hot_window.min(limit);
+    let mmio_start = limit - mmio_window.min(limit);
+    let skip_allowed = watch.is_empty() && memwatch.is_none();
+    let mut next = 0;
+    while next < limit {
+        let step = next;
+        next += 1;
+        if skip_allowed && step < hot_start && cpu.halted() {
+            let bound = [hot_start, mmio_start, limit]
+                .into_iter()
+                .filter(|&b| b >= step)
+                .min()
+                .unwrap_or(limit);
+            let skipped = cpu.skip_idle_calls(bound - step);
+            if skipped > 0 {
+                next = step + skipped;
+                continue;
+            }
+        }
         let pc = cpu.pc;
         if watch.contains(&pc) && watch_hits < 400 {
             watch_hits += 1;
@@ -159,6 +182,12 @@ fn run() -> Result<(), String> {
         "executed: {} steps of guest time; CPU0 {} instructions, CPU1 {}",
         cpu.steps, cpu.core_steps[0], cpu.core_steps[1]
     );
+    if cpu.idle_slots > 0 {
+        eprintln!(
+            "idle: {} instruction slots halted in idle, both cores ({} jumped over)",
+            cpu.idle_slots, cpu.idle_skipped
+        );
+    }
     eprintln!("stopped: {}", location(&firmware.symbols, cpu.pc));
     if let Some(pc) = cpu.secondary_pc() {
         eprintln!("secondary core: pc {}", location(&firmware.symbols, pc));
