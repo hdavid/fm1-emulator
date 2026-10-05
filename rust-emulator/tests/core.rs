@@ -235,3 +235,24 @@ fn diagnostic_startup_runs_past_the_original_blocker() {
     assert!(cpu.bus.system.watchdog_feeds > 0);
     assert_eq!(cpu.bus.read(0x01c0_7f28, 4).unwrap(), 0x01c7_fe08);
 }
+
+#[test]
+fn leaf_interrupt_frame_preserves_flags_and_reti_without_saving_rets() {
+    let mut c = Cpu::new(Bus::new(vec![0xe1, 4, 0xa1, 4]).unwrap(), fm1_emu::XIP);
+    c.sr[14] = fm1_emu::USER_STACK;
+    c.sr[5] = 0x13579bdf;
+    c.sr[0] = 0x02001234;
+    c.sr[3] = 0x02005678;
+    c.step().unwrap();
+    assert_eq!(c.sr[14], fm1_emu::USER_STACK - 8);
+    assert_eq!(c.bus.read(c.sr[14], 4).unwrap(), 0x02001234);
+    assert_eq!(c.bus.read(c.sr[14] + 4, 4).unwrap(), 0x13579bdf);
+    c.sr[5] = 0;
+    c.sr[0] = 0;
+    c.sr[3] = 0xaabbccdd;
+    c.step().unwrap();
+    assert_eq!(c.sr[5], 0x13579bdf);
+    assert_eq!(c.sr[0], 0x02001234);
+    assert_eq!(c.sr[3], 0xaabbccdd);
+    assert_eq!(c.sr[14], fm1_emu::USER_STACK);
+}

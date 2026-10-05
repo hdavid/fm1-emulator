@@ -661,18 +661,22 @@ impl Cpu {
                 _ => self.sr[13] = self.sr[14],
             }
             op = "move_stack_pointer";
-        } else if matches!(h, 0x04e8 | 0x04e9) {
+        } else if matches!(h, 0x04e1 | 0x04e8 | 0x04e9) {
             self.push(self.sr[5])?;
-            self.push(self.sr[3])?;
-            if h == 0x04e9 {
+            if h != 0x04e1 {
+                self.push(self.sr[3])?;
+            }
+            if h != 0x04e8 {
                 self.push(self.sr[0])?;
             }
             op = "push_irq_frame";
-        } else if matches!(h, 0x04a8 | 0x04a9) {
-            if h == 0x04a9 {
+        } else if matches!(h, 0x04a1 | 0x04a8 | 0x04a9) {
+            if h != 0x04a8 {
                 self.sr[0] = self.pop()?;
             }
-            self.sr[3] = self.pop()?;
+            if h != 0x04a1 {
+                self.sr[3] = self.pop()?;
+            }
             self.sr[5] = self.pop()?;
             op = "pop_irq_frame";
         } else if h == 0xff80 {
