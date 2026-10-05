@@ -40,24 +40,39 @@ core, so it is larger than the loop limit.
 | 24 | `0x0001` at 0x0205b8da (IDLE0 task) | `asm("idle")` (SDK init.c / adc_api.c wait-for-interrupt), executed as a hint | see log | |
 | 25 | btctrler spin on 0x2001c (0x0206f096, interrupts off) | **STUB, inferred**: a self-clearing BT command register. The code writes it and then polls it until 0 with interrupts disabled, so only hardware can clear it | see log | 248M |
 | 26 | SPI1 DMA from flash 0x0204f8b2 (0x02023de0); CASET 0..240; ST7789V config commands (b2, b7, bb, c0, c2-c4, c6, d0, e0, e1, e7, 51) | The stock app sends its panel init table from XIP flash, so DMA from flash is allowed. Window addresses past the frame memory are accepted and their pixels dropped: this follows my reading of the ST7789V datasheet's CASET/RASET note, which I have not re-checked against the document. Frame memory is 240x320 (stock uses RASET 40..279). Config commands have no frame-memory effect | see log | 57,361 pixels |
+| 27 | `0x13c0` at 0x0200de98 | Resolved by the main session with JieLi's objdump: `r0 = b[r4++=r15] (u)`. The whole 0x1000-0x13ff family is byte load/store with register post-increment | f092145 (feat/boot-fixes) | |
+| 28 | `e53f 5f22` at 0x0201e4a4 | objdump `--mattr=+fprev1` gives the whole unary set: ftoi/ftou with (even/trunc/ceil/floor) rounding, itof, utof, `rD.l = ftof(rC)` / `rD = ftof(rC.l)` (binary16), integral-float rounding. It confirmed the earlier inferred 0x8f = itof and 0x9f = utof. Op 4 is `fcmp`; its flags are unknown, so it stays undecoded | 220d532 | 305M |
+| 29 | float compare-branch predicates | objdump prints `iff`: e800 ==, e880 u!=, e900 u>=, e980 <, ec00 u>, ec80 <=, ed00 >=, ed80 u<, ee00 >, ee80 u<= (u = also taken when unordered). The earlier version only had eq/ne/signed kinds, with ordered semantics | 220d532 | |
+| 30 | read of 0x51004 (0x02025878, battery/charge code) | JL_USB_IO CON1 (bit 1 read). **STUB**: register, reset value assumed 0 | 220d532 | |
+| 31 | byte write to 0x16001 (0x02006f76) | Stock enables the high-speed USB controller for usb id 1. **STUB** husb.rs: register file, and SIE_CON bit 4 reads ready once bits 0-1 are set (inferred from the poll). Nothing is attached | 220d532 | |
+| 32 | SPI1 CON 0x2021 | The stock LCD driver runs DMA from the SPI1 interrupt (IRQ 16, CON bit 13 = IE). Interrupt mode completes after the shift time (lsb_clk *assumed* to be 4x osc); polled mode (Felucca) is unchanged. The IRQ fast path `any_irq_pending` from the perf merge lacked the source. With instant completion the CPU stayed in the handler until a FreeRTOS queue lock overflowed (assert at 0x0205a1fa, then reset) | 220d532 | runs the full loop |
 
 ## Current state (FM1_CPU_MHZ=192)
 
-- **First screen output.** The stock LCD driver in `usr_app_task` runs the
-  full ST7789V init table and clears the panel: 57,361 pixels written, all
-  black, display on.
-  - `~/GitHub/fm1-firmware/screens/baudgirl-192mhz-first-fill.png`: rows
-    0-239.
-  - `baudgirl-192mhz-first-fill-ram240x320.png`: the whole frame memory,
-    from the new diagnose option `FM1_PNG_RAM`.
-- **Stock and Baud Girl now diverge** (248,378,369 vs 248,668,070
-  instructions): Baud Girl's changes are reached.
+- **Both images reach their main screens and run a stable main loop.**
+  Baud Girl at 800M steps: 1.55G instructions, 1,840,592 LCD pixels, audio
+  309,288 frames, no fault.
+- **Baud Girl:**
+  - `~/GitHub/fm1-firmware/screens/baudgirl-192mhz-splash.png` ("BAUD
+    GIRL / VERSION-93").
+  - `baudgirl-192mhz-main.png` and `baudgirl-192mhz-main-800M.png`: four
+    level meters ("100"), "Volume 00" popup, "0011", battery icon.
+- **Stock V15:**
+  - `stock-v15-192mhz-main.png`: an "OSC" screen with a full-height blue
+    vertical-stripe area and a yellow line.
+  - **Not verified against hardware.** I cannot tell whether the stripes
+    are the real waveform view or an emulation artefact. The left digits
+    and the right-hand battery look clipped.
+- **Unverified assumptions behind these screens:**
+  - lsb_clk rate.
+  - USB_IO CON1 = 0 (the not-charging path).
+  - High-speed USB "ready" bit.
+  - Radio stubs.
 - **Open question for someone with the hardware:** which 240 of the 320
-  frame-memory rows does the FM-1 glass show? Felucca draws rows 0-239 and
-  the stock app rows 40-279, both with MADCTL 0. `lcd.pixels` keeps rows
-  0-239, so the regression baselines are unchanged.
+  frame-memory rows the glass shows. Both firmwares draw their UI in rows
+  0-239 after init, so the question matters less than it seemed.
 
-## Blocker: `0x13c0` at 0x0200de98 (both images)
+## Former blocker: `0x13c0` at 0x0200de98 (resolved, fix 27)
 
 - **Where it is:** in a text loop. The code just before tests r6 != 13
   (CR) and r7 != 10 (LF), adds r13 to the counter at [sp+0x14], and sets
