@@ -48,7 +48,7 @@ other firmware paths can stop emulation.
 
 | Firmware | Status | Verified behavior / blocker |
 | --- | --- | --- |
-| Felucca 0.9-beta (`FM-1_909`, `.fwsc`) | Partial | LCD, USB console, watchdog, note audio/DMA and FX pass; full UI coverage remains incomplete |
+| Felucca 0.9-beta (`FM-1_909`, `.fwsc`) | Partial | LCD, USB console output, watchdog, note audio/DMA and FX pass; full UI coverage remains incomplete |
 | Felucca source build (`1e838e1`, `.elf`) | Partial | Boot, note press/release, FX, HOME and ENV pass; other UI paths need broader coverage |
 | Official `FM-1_015` (`FM-1.fwsc`) | Partial | LCD boot, PIANO 1, FX/HOME and note audio/DMA pass |
 | Baud Girl `FM-1_093` (`FM-1_093.fwsc`) | Partial | LCD boot and FX/HOME pass; its factory preset payload fails integrity validation |
@@ -60,9 +60,13 @@ and Baud Girl results.
 
 ## Still to implement
 
-- Remaining CPU instructions, peripherals and firmware UI paths.
-- Host audio playback, rotary controls, USB MIDI and serial input.
-- Flash persistence, plus fuller encryption, interrupt and timing behavior.
+- [ ] Cache decoded instructions/blocks to reduce interpreter overhead.
+- [ ] Add a JIT to improve guest execution speed.
+- [ ] USB serial input: forward terminal input through emulated CDC OUT. Felucca
+  prints its console banner, but typing `help` currently has no effect.
+- [ ] Remaining CPU instructions, peripherals and firmware UI paths.
+- [ ] Host audio playback, rotary controls and USB MIDI.
+- [ ] Flash persistence, plus fuller encryption, interrupt and timing behavior.
 
 GPL-3.0-only; see [LICENSE](LICENSE). Based on research and components from
 [Felucca](https://github.com/hugelton/Felucca), the
