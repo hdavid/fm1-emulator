@@ -6,6 +6,9 @@ use std::collections::VecDeque;
 
 /// Packets kept from the device when nobody drains them (oldest dropped).
 const MIDI_RECEIVED_MAX: usize = 4096;
+/// Device endpoints of USB0: EP0..EP4 (AC79 SDK WL82.h has count and DMA
+/// address registers for EP0..EP4).
+const ENDPOINTS: usize = 5;
 #[derive(Default)]
 pub struct Usb {
     regs: [u32; 16],
@@ -16,7 +19,8 @@ pub struct Usb {
     io_more: [u32; 2],
     clock: u32,
     sie: [u8; 16],
-    endpoints: [[u8; 8]; 4],
+    /// Indexed CSRs of EP0..EP4 (INDEX selects one).
+    endpoints: [[u8; 8]; ENDPOINTS],
     index: usize,
     ticks: u64,
     deadline: u64,
@@ -239,7 +243,7 @@ impl Usb {
     fn deliver_midi(&mut self, ram: &mut [u8]) -> Result<(), &'static str> {
         let ep = self.midi.out_ep.ok_or("USB MIDI has no OUT endpoint")?;
         let n = self.midi.to_device.len().min(16);
-        let address = self.regs[8 + (ep - 1) * 2];
+        let address = self.rx_address(ep);
         let buffer = Self::dma(ram, address, n * 4)?;
         for (slot, packet) in buffer
             .as_chunks_mut::<4>()
@@ -258,16 +262,36 @@ impl Usb {
         self.midi.rx_packets += 1;
         Ok(())
     }
+    /// EPn_CNT: EP0..EP3 at 0x11808 + 4n, EP4 after EP3's addresses (0x11834).
+    fn count(&self, ep: usize) -> u32 {
+        if ep == 4 {
+            self.regs[13]
+        } else {
+            self.regs[2 + ep]
+        }
+    }
+    /// EPn_TADR: EP0 0x11818, EP1..EP3 0x1181c + 8(n - 1), EP4 0x11838.
+    fn tx_address(&self, ep: usize) -> u32 {
+        match ep {
+            0 => self.regs[6],
+            4 => self.regs[14],
+            _ => self.regs[7 + (ep - 1) * 2],
+        }
+    }
+    /// EPn_RADR: EP1..EP3 0x11820 + 8(n - 1), EP4 0x1183c (EP0 shares TADR).
+    fn rx_address(&self, ep: usize) -> u32 {
+        match ep {
+            0 => self.regs[6],
+            4 => self.regs[15],
+            _ => self.regs[8 + (ep - 1) * 2],
+        }
+    }
     fn send(&mut self, ep: usize, ram: &mut [u8]) -> Result<(), &'static str> {
-        let n = self.regs[2 + ep] as usize;
+        let n = self.count(ep) as usize;
         if n > 64 {
             return Err("USB full-speed packet exceeds 64 bytes");
         }
-        let a = if ep == 0 {
-            self.regs[6]
-        } else {
-            self.regs[7 + (ep - 1) * 2]
-        };
+        let a = self.tx_address(ep);
         let bytes = Self::dma(ram, a, n)?;
         if ep == 0 {
             self.response.extend_from_slice(bytes);
@@ -308,7 +332,7 @@ impl Usb {
                     self.phase = 0;
                     self.waiting = false;
                     self.sie = [0; 16];
-                    self.endpoints = [[0; 8]; 4];
+                    self.endpoints = [[0; 8]; ENDPOINTS];
                 }
             }
             0x11804 => {
@@ -333,7 +357,7 @@ impl Usb {
                 } else {
                     let data = v as u8;
                     if r == 14 {
-                        if data > 3 {
+                        if data as usize >= ENDPOINTS {
                             return Err("USB endpoint index exceeds modeled controller");
                         }
                         self.index = data as usize;
@@ -478,20 +502,20 @@ impl Usb {
             }
             e[1] &= !1;
             self.sie[2] |= 1 << ep;
-            let n = self.regs[2 + ep] as usize;
+            let n = self.count(ep) as usize;
             if n > 1023 {
                 return Err("USB isochronous packet exceeds 1023 bytes");
             }
-            let bytes = Self::dma(ram, self.regs[7 + (ep - 1) * 2], n)?;
+            let bytes = Self::dma(ram, self.tx_address(ep), n)?;
             self.audio.in_packet(ep, bytes);
         }
         if let Some((ep, packet)) = self.audio.out_packet() {
+            let address = self.rx_address(ep);
             let e = &mut self.endpoints[ep];
             if e[4] & 1 != 0 {
                 self.audio.out_lost();
                 return Ok(());
             }
-            let address = self.regs[8 + (ep - 1) * 2];
             Self::dma(ram, address, packet.len())?.copy_from_slice(&packet);
             self.dma_writes.push((address, packet.len()));
             e[4] |= 1;
