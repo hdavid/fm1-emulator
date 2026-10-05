@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Host playback of the guest's ALNK0 DMA stream (audio.rs): 44.1 kHz stereo,
-// 24-bit left-justified in i32, through the default output device. The guest
+// 24-bit samples in the low bits of each i32 (Felucca audio.c: Q15 << 7 =
+// "24-bit, -6 dBFS ceiling"), through the default output device. The guest
 // fills a queue; the device callback drains it, resampling linearly when the
 // device does not run at 44.1 kHz, and plays silence (counted) when it is empty.
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -119,9 +120,9 @@ impl HostAudio {
             .map_err(|error| format!("audio output: {error}"))
     }
 
-    /// Guest frames (24-bit left-justified i32) into the playback queue.
+    /// Guest frames (24-bit samples in i32) into the playback queue.
     pub fn push(&self, frames: impl Iterator<Item = [i32; 2]>) {
-        const SCALE: f32 = 1.0 / 2_147_483_648.0;
+        const SCALE: f32 = 1.0 / 8_388_608.0; // 2^23: 24-bit full scale
         if let Ok(mut shared) = self.shared.lock() {
             shared
                 .queue
