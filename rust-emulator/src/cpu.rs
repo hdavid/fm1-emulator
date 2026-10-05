@@ -297,6 +297,11 @@ impl Cpu {
         self.sr[5] = (self.sr[5] & !2) | (u32::from(carry) << 1);
     }
 
+    /// PSR N (bit 3), Z (bit 2) and V (bit 0), C kept.
+    pub(crate) fn set_nzv(&mut self, n: bool, z: bool, v: bool) {
+        self.sr[5] = (self.sr[5] & !13) | (u32::from(n) << 3) | (u32::from(z) << 2) | u32::from(v);
+    }
+
     pub(crate) fn carry(&self) -> bool {
         self.sr[5] & 2 != 0
     }

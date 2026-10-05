@@ -360,18 +360,32 @@ fn clock(rig: &mut Rig, c: &Clock) {
                         .unwrap_or(-1)
                 };
                 println!(
-                    "  t {:+.2} ms: beat {} pos {} out_t {:+.2} n {} n0 {} arm {} have {}",
+                    "  t {:+.2} ms: beat {} pos {} out_t {:+.2} n {} n0 {} arm {} have {} tq {:+.3} (lo {:x} hi {:x}) p {:.3}",
                     (rig.now() as f64 - ideal[down]) / TICKS_PER_MS,
                     g(rig, "clk_beat", 4),
                     g(rig, "clk_pos", 4),
-                    (g(rig, "sync_out_t", 4) as f64 - (ideal[down] as u64 as u32) as f64)
-                        / TICKS_PER_MS,
+                    (g(rig, "sync_out_t", 4) as f64 - (ideal[down] as u64 as u32) as f64) / TICKS_PER_MS,
                     g(rig, "sy.5", 4),
                     g(rig, "sy.6", 4),
                     g(rig, "sy.17", 1),
-                    g(rig, "sy.12", 1)
+                    g(rig, "sy.12", 1),
+                    ((((g(rig, "sy.0", 4) as u64) >> 8) | ((g(rig, "sy.0", 4) as u64 >> 0) & 0) | (((rig.sym.get("sy.0").map(|a| rig.cpu.bus.read(*a + 4, 4).unwrap()).unwrap_or(0) as u64) << 24) & 0xffff_ffff)) as f64 - (ideal[down] as u64 as u32) as f64) / TICKS_PER_MS,
+                    g(rig, "sy.0", 4),
+                    rig.sym.get("sy.0").map(|a| rig.cpu.bus.read(*a + 4, 4).unwrap()).unwrap_or(0),
+                    g(rig, "sy.1", 4) as f64 / 256.0 / TICKS_PER_MS
                 );
                 rig.run_ms(1.0);
+            }
+        }
+        if let (Ok(w), true) = (env::var("PCW"), k == down) {
+            let pcs: Vec<u32> = w.split(',').map(|v| u32::from_str_radix(v, 16).unwrap()).collect();
+            let mut shown = 0;
+            while rig.now() < at as u64 && shown < 12 {
+                rig.cpu.step().unwrap();
+                if pcs.contains(&rig.cpu.pc) {
+                    println!("pc {:08x} r {:08x?} psr {:x}", rig.cpu.pc, rig.cpu.r, rig.cpu.sr[5]);
+                    shown += 1;
+                }
             }
         }
         rig.run_until(at as u64);

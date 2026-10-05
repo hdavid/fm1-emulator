@@ -125,6 +125,29 @@ fn add_with_carry_propagates_the_low_word_carry() {
 }
 
 #[test]
+fn subtract_with_carry_sets_n_z_v_for_signed_64_bit_compares() {
+    // SLOOP sy_at (clock_sync.c), a signed 64-bit min: r4 = r6 - r2;
+    // r5 = r7 - r3 - !C; then N != V (PSR bits 3 and 0) is "less than".
+    for (lhs, rhs, n, z, v) in [
+        (5i64, 9i64, true, false, false),
+        (9, 5, false, true, false), // high word 0 - 0: Z of that word
+        (i64::MIN, 1, false, false, true),
+        (-3, -3, false, true, false),
+    ] {
+        let mut c = cpu(&[0x1ee4, 0xe0b8, 0x5372]);
+        (c.r[6], c.r[7]) = (lhs as u32, (lhs >> 32) as u32);
+        (c.r[2], c.r[3]) = (rhs as u32, (rhs >> 32) as u32);
+        c.step().unwrap();
+        c.step().unwrap();
+        let d = lhs.wrapping_sub(rhs);
+        assert_eq!((c.r[4], c.r[5]), (d as u32, (d >> 32) as u32));
+        let psr = c.sr[5];
+        assert_eq!((psr & 8 != 0, psr & 4 != 0, psr & 1 != 0), (n, z, v), "{lhs} - {rhs}");
+        assert_eq!((psr & 8 != 0) != (psr & 1 != 0), lhs < rhs);
+    }
+}
+
+#[test]
 fn stack_adjust_by_signed_thirteen_bit_immediate_allocates_and_frees_frames() {
     // Stock FM-1_015 0x0200c97c prologue: push, then e8f0 1d98 (sp -= 616);
     // its epilogues e8f0 0268 (sp += 616), then pop. Jangada 0x0200de16:
