@@ -8,7 +8,8 @@
 // (N words, decimal), halves:ADDRESS:N (non-zero words per DMA half),
 // cores (instructions per core), click:KNOB:N (N settled detents), align (to
 // the next audio DMA half: pins a following hold or release to the same
-// audio block at any render cost).
+// audio block at any render cost), master:VALUE (the MASTER potentiometer,
+// 0..1023 as the SARADC reads it).
 // FM1_CPU_MHZ=N sets the instruction clock (default: the firmware's);
 // FM1_NESTED_IRQ=1 lets interrupts nest (USB audio builds); FM1_IDLE_SKIP=0
 // steps every halted slot instead of skipping to the next device event.
@@ -235,6 +236,15 @@ fn main() -> Result<(), String> {
                         return Err("align: the audio DMA is not running".into());
                     }
                 }
+                Ok(())
+            }
+            ["master", value] => {
+                // The MASTER potentiometer as the SARADC reads it (0..1023).
+                let value: u16 = value.parse().map_err(|_| format!("bad {step}"))?;
+                if value > 1023 {
+                    return Err(format!("bad {step}: 0..1023"));
+                }
+                player.cpu.bus.devices.adc.master = value;
                 Ok(())
             }
             ["cores"] => {
