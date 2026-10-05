@@ -3,7 +3,7 @@
 // Quarkslab pi32v2 SLEIGH reference. Unknown/reserved forms still fault.
 // Classification is in decode.rs; this file executes the classified forms.
 use crate::code_cache::Operands;
-use crate::cpu::{signed, Cpu, Fault};
+use crate::cpu::{signed, Cpu, Fault, Step};
 use crate::decode::Op;
 
 /// A deferred load or store: (register, base, address, size, store,
@@ -21,18 +21,19 @@ pub(crate) fn packed(x: u32) -> u32 {
     }
 }
 
-fn unsupported(pc: u32, h: u32) -> Fault {
-    Fault::Unsupported { pc, word: h as u16 }
+fn unsupported(pc: u32, h: u32) -> Box<Fault> {
+    Box::new(Fault::Unsupported { pc, word: h as u16 })
 }
 
-/// Execute an extended.rs form; returns the next PC and the form's name.
+/// Execute an extended.rs form; returns the next PC and records the form's
+/// name in the CPU.
 pub(crate) fn execute(
     cpu: &mut Cpu,
     op: Op,
     h: u32,
     pc: u32,
     code: Operands,
-) -> Result<(u32, &'static str), Fault> {
+) -> Step<u32> {
     let a = (h & 7) as usize;
     let b = ((h >> 4) & 7) as usize;
     let mut mem = None;
@@ -121,7 +122,8 @@ pub(crate) fn execute(
             name = "add_stack";
         }
         Op::GotoRegister => {
-            return Ok((cpu.r[(h & 15) as usize], "goto_register"));
+            cpu.name = "goto_register";
+            return Ok(cpu.r[(h & 15) as usize]);
         }
         Op::Ssync => {
             name = "ssync";
@@ -130,7 +132,8 @@ pub(crate) fn execute(
             let size = if h & 0x10 == 0 { 1 } else { 2 };
             let next = (pc + 2)
                 .wrapping_add(cpu.read((pc + 2).wrapping_add(cpu.r[(h & 15) as usize]), size)? * 2);
-            return Ok((next, "table_branch"));
+            cpu.name = "table_branch";
+            return Ok(next);
         }
         Op::MemorySmall => {
             let size = if h & 0x2000 == 0 { 1 } else { 2 };
@@ -165,11 +168,12 @@ pub(crate) fn execute(
         _ => return execute_wide(cpu, op, h, pc, code),
     }
     access(cpu, pc, mem)?;
-    Ok((pc + 2, name))
+    cpu.name = name;
+    Ok(pc + 2)
 }
 
 /// Perform a deferred load or store and its base-register update.
-fn access(cpu: &mut Cpu, pc: u32, mem: Option<Memory>) -> Result<(), Fault> {
+fn access(cpu: &mut Cpu, pc: u32, mem: Option<Memory>) -> Step<()> {
     if let Some((reg, base, address, size, store, sign, updated)) = mem {
         if store {
             cpu.bus
@@ -197,7 +201,7 @@ fn execute_wide(
     h: u32,
     pc: u32,
     code: Operands,
-) -> Result<(u32, &'static str), Fault> {
+) -> Step<u32> {
     let x = cpu.operand(code.x, pc + 2)?;
     let n = (h & 15) as usize;
     let d = (x >> 12) as usize;
@@ -994,5 +998,6 @@ fn execute_wide(
         _ => return Err(unsupported(pc, h)),
     }
     access(cpu, pc, mem)?;
-    Ok((next, name))
+    cpu.name = name;
+    Ok(next)
 }

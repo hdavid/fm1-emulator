@@ -635,6 +635,13 @@ impl Bus {
             .map_err(|reason| Self::fault(0x12e1c, 4, "audio DMA", reason))
     }
 
+    /// Whether any interrupt source is pending at all: when not,
+    /// `pending_irq_for` returns None for every core and configuration.
+    #[inline(always)]
+    pub(crate) fn any_irq_pending(&self) -> bool {
+        self.devices.any_pending() || self.audio.pending_irq() || self.spi2.pending_irq()
+    }
+
     pub fn pending_irq(&self, icfg: u32) -> Option<usize> {
         self.pending_irq_for(icfg, 0)
     }

@@ -111,6 +111,10 @@ impl fmt::Display for Fault {
     }
 }
 
+/// Internal result: the fault is boxed so that results stay register-sized
+/// on the per-instruction path; `step` unboxes it.
+pub(crate) type Step<T> = Result<T, Box<Fault>>;
+
 pub fn signed(value: u32, bits: u32) -> i32 {
     ((value << (32 - bits)) as i32) >> (32 - bits)
 }
@@ -137,6 +141,8 @@ pub struct Cpu {
     bus_locked: bool,
     secondary: Option<Core>,
     irq_priority_mask: u32,
+    /// Name of the last executed instruction form (what `step` returns).
+    pub(crate) name: &'static str,
 }
 
 // Per-core context. Memory and devices remain on the one shared bus.
@@ -208,19 +214,20 @@ impl Cpu {
             bus_locked: false,
             secondary: None,
             irq_priority_mask: 0,
+            name: "",
         }
     }
 
-    pub(crate) fn read(&self, address: u32, size: usize) -> Result<u32, Fault> {
+    pub(crate) fn read(&self, address: u32, size: usize) -> Step<u32> {
         self.bus
             .read(address, size)
-            .map_err(|fault| Fault::Access { pc: self.pc, fault })
+            .map_err(|fault| Box::new(Fault::Access { pc: self.pc, fault }))
     }
 
-    pub(crate) fn write(&mut self, address: u32, value: u32) -> Result<(), Fault> {
+    pub(crate) fn write(&mut self, address: u32, value: u32) -> Step<()> {
         self.bus
             .write(address, value, 4)
-            .map_err(|fault| Fault::Access { pc: self.pc, fault })
+            .map_err(|fault| Box::new(Fault::Access { pc: self.pc, fault }))
     }
 
     /// PSR bit 1 is the carry flag (Quarkslab pi32v2 PSR: V, C, Z, N).
@@ -232,20 +239,24 @@ impl Cpu {
         self.sr[5] & 2 != 0
     }
 
-    fn push(&mut self, value: u32) -> Result<(), Fault> {
+    fn push(&mut self, value: u32) -> Step<()> {
         let address = self.sr[14].wrapping_sub(4);
         self.write(address, value)?;
         self.sr[14] = address;
         Ok(())
     }
 
-    fn pop(&mut self) -> Result<u32, Fault> {
+    fn pop(&mut self) -> Step<u32> {
         let value = self.read(self.sr[14], 4)?;
         self.sr[14] = self.sr[14].wrapping_add(4);
         Ok(value)
     }
 
     pub fn step(&mut self) -> Result<&'static str, Fault> {
+        self.step_cores().map_err(|fault| *fault)
+    }
+
+    fn step_cores(&mut self) -> Step<&'static str> {
         let control = self.bus.core_control(1);
         if control & 2 != 0 && self.secondary.is_some() {
             self.secondary = None;
@@ -265,25 +276,26 @@ impl Cpu {
         {
             return self.step_secondary();
         }
-        let op = self.step_core()?;
+        self.step_core()?;
+        let op = self.name;
         if !self.bus_locked && secondary_running {
             self.step_secondary()?;
         }
         Ok(op)
     }
 
-    fn step_secondary(&mut self) -> Result<&'static str, Fault> {
+    fn step_secondary(&mut self) -> Step<&'static str> {
         let mut secondary = self.secondary.take().unwrap();
         secondary.swap(self);
         let result = self.step_core();
         secondary.swap(self);
         self.secondary = Some(secondary);
-        result
+        result.map(|()| self.name)
     }
 
     /// A bundle's following slot at `self.pc`: its raw word (executed without
     /// normalization), classification and known operands.
-    fn following(&mut self) -> Result<(u32, Op, Operands), Fault> {
+    fn following(&mut self) -> Step<(u32, Op, Operands)> {
         let pc = self.pc;
         Ok(match self.bus.decoded(pc) {
             Some(entry) if !is_parallel(entry.h as u32) => {
@@ -297,7 +309,7 @@ impl Cpu {
         })
     }
 
-    fn step_core(&mut self) -> Result<&'static str, Fault> {
+    fn step_core(&mut self) -> Step<()> {
         if let Some((at, end)) = self.predicate_skip {
             if self.pc == at {
                 self.pc = end;
@@ -316,43 +328,11 @@ impl Cpu {
                 (h, decode(primary(h)), Operands::default())
             }
         };
-        let op = if is_parallel(h) {
-            let length = if h >> 13 == 6 { 2 } else { 4 };
-            self.pc = pc + length;
-            let (following, following_op, following_code) = self.following()?;
-            let before = self.r;
-            let specials_before = self.sr;
-            self.execute(following, following_op, following_code)?;
-            let following_registers = self.r;
-            let following_specials = self.sr;
-            let continuation = self.pc;
-            self.r = before;
-            self.sr = specials_before;
-            self.pc = pc;
-            // The primary slot reads its operands after the following slot
-            // ran; if that slot stored over them, decode them afresh.
-            let (op, code) = if self.bus.is_cached(pc) {
-                (op, code)
-            } else {
-                (decode(primary(h)), Operands::default())
-            };
-            let op = self.execute(primary(h), op, code)?;
-            // Both slots read the incoming registers. Compiler bundles have
-            // distinct destinations; retain writes from the following slot
-            // where the primary slot did not change that register.
-            for i in 0..16 {
-                if self.r[i] == before[i] {
-                    self.r[i] = following_registers[i];
-                }
-                if self.sr[i] == specials_before[i] {
-                    self.sr[i] = following_specials[i];
-                }
-            }
-            self.pc = continuation;
-            op
+        if is_parallel(h) {
+            self.execute_bundle(pc, h, op, code)?;
         } else {
-            self.execute(h, op, code)?
-        };
+            self.execute(h, op, code)?;
+        }
         if let Some((start, end, count)) = self.repeat {
             if self.pc == end {
                 if count > 1 {
@@ -372,14 +352,58 @@ impl Cpu {
                 self.advance_devices(pc)?;
             }
         }
-        self.dispatch_interrupt()?;
-        Ok(op)
+        self.dispatch_interrupt()
+    }
+
+    /// A parallel bundle at `pc`: the following slot, then the primary slot
+    /// (word `h`, classified as `op`), both reading the incoming registers.
+    #[inline(never)]
+    fn execute_bundle(
+        &mut self,
+        pc: u32,
+        h: u32,
+        op: Op,
+        code: Operands,
+    ) -> Step<()> {
+        let length = if h >> 13 == 6 { 2 } else { 4 };
+        self.pc = pc + length;
+        let (following, following_op, following_code) = self.following()?;
+        let before = self.r;
+        let specials_before = self.sr;
+        self.execute(following, following_op, following_code)?;
+        let following_registers = self.r;
+        let following_specials = self.sr;
+        let continuation = self.pc;
+        self.r = before;
+        self.sr = specials_before;
+        self.pc = pc;
+        // The primary slot reads its operands after the following slot
+        // ran; if that slot stored over them, decode them afresh.
+        let (op, code) = if self.bus.is_cached(pc) {
+            (op, code)
+        } else {
+            (decode(primary(h)), Operands::default())
+        };
+        self.execute(primary(h), op, code)?;
+        // Both slots read the incoming registers. Compiler bundles have
+        // distinct destinations; retain writes from the following slot
+        // where the primary slot did not change that register.
+        for i in 0..16 {
+            if self.r[i] == before[i] {
+                self.r[i] = following_registers[i];
+            }
+            if self.sr[i] == specials_before[i] {
+                self.sr[i] = following_specials[i];
+            }
+        }
+        self.pc = continuation;
+        Ok(())
     }
 
     /// Oscillator tick `bus.now`, at which a device may have an event: the
     /// ticks since the last one only counted, so they are applied at once,
     /// then this tick runs exactly as every tick once did.
-    fn advance_devices(&mut self, pc: u32) -> Result<(), Fault> {
+    fn advance_devices(&mut self, pc: u32) -> Step<()> {
         let now = self.bus.now;
         self.bus
             .catch_up(now - 1)
@@ -393,7 +417,7 @@ impl Cpu {
     }
 
     /// One oscillator tick of the clocked devices.
-    fn advance_tick(&mut self, pc: u32) -> Result<(), Fault> {
+    fn advance_tick(&mut self, pc: u32) -> Step<()> {
         self.bus.devices.advance(OSC_TICKS_PER_INSTRUCTION);
         self.bus
             .system
@@ -437,7 +461,7 @@ impl Cpu {
         self.steps / self.instructions_per_tick as u64
     }
 
-    pub(crate) fn conditional(&mut self, test: bool, counts: u32) -> Result<u32, Fault> {
+    pub(crate) fn conditional(&mut self, test: bool, counts: u32) -> Step<u32> {
         let mut cursor = self.pc + 4;
         let mut then_end = cursor;
         let then_count = (counts >> 14) + 1;
@@ -477,7 +501,7 @@ impl Cpu {
 
     /// A code halfword after the instruction word: the decode cache's copy
     /// when it has one, otherwise a bus read (with the bus's faults).
-    pub(crate) fn operand(&self, known: Option<u16>, address: u32) -> Result<u32, Fault> {
+    pub(crate) fn operand(&self, known: Option<u16>, address: u32) -> Step<u32> {
         match known {
             Some(value) => Ok(value as u32),
             None => self.read(address, 2),
@@ -485,7 +509,7 @@ impl Cpu {
     }
 
     /// Execute the instruction word `h` at `self.pc`, classified as `op`.
-    fn execute(&mut self, h: u32, op: Op, code: Operands) -> Result<&'static str, Fault> {
+    fn execute(&mut self, h: u32, op: Op, code: Operands) -> Step<()> {
         let pc = self.pc;
         let a = (h & 7) as usize;
         let b = ((h >> 4) & 7) as usize;
@@ -502,7 +526,7 @@ impl Cpu {
                     self.sr[n] = value;
                     name = "stack_imm32";
                 } else {
-                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                    return Err(Fault::Unsupported { pc, word: h as u16 }.into());
                 }
                 next = pc + 6;
             }
@@ -515,7 +539,7 @@ impl Cpu {
                 // must then fall through. Neither pattern is satisfied by
                 // one block per dispatch.
                 if self.repeat.is_some() {
-                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                    return Err(Fault::Unsupported { pc, word: h as u16 }.into());
                 }
                 let register = (h & 15) as usize;
                 let length = (((h >> 4) & 15) + 1) * 2;
@@ -530,7 +554,7 @@ impl Cpu {
             }
             Op::RepeatImmediate => {
                 if self.repeat.is_some() {
-                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                    return Err(Fault::Unsupported { pc, word: h as u16 }.into());
                 }
                 let length = (((h >> 4) & 15) + 1) * 2;
                 let count = ((h >> 8) & 31) + 1;
@@ -543,7 +567,7 @@ impl Cpu {
                 let special = ((extra >> 8) & 15) as usize;
                 // Deliberately exclude PC writes and unrecognized reserved encodings.
                 if special == 15 || !matches!(extra & 255, 0 | 128) {
-                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                    return Err(Fault::Unsupported { pc, word: h as u16 }.into());
                 }
                 if extra & 255 == 128 {
                     self.sr[special] = self.r[reg];
@@ -569,7 +593,7 @@ impl Cpu {
                 } else if extra & 0x0f00 == 0 {
                     byte
                 } else {
-                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                    return Err(Fault::Unsupported { pc, word: h as u16 }.into());
                 };
                 self.r[((extra >> 12) & 15) as usize] = value;
                 next = pc + 4;
@@ -848,7 +872,7 @@ impl Cpu {
             }
             Op::Rti => {
                 if !self.in_interrupt {
-                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                    return Err(Fault::Unsupported { pc, word: h as u16 }.into());
                 }
                 next = self.sr[0];
                 self.sr[13] = self.sr[14];
@@ -893,15 +917,16 @@ impl Cpu {
                 };
                 return self.execute(h, decode_wide(h, x), operands);
             }
-            Op::Unsupported => return Err(Fault::Unsupported { pc, word: h as u16 }),
+            Op::Unsupported => return Err(Fault::Unsupported { pc, word: h as u16 }.into()),
             _ => {
-                let (destination, extended_name) = crate::extended::execute(self, op, h, pc, code)?;
-                next = destination;
-                name = extended_name;
+                // Sets the name itself.
+                self.pc = crate::extended::execute(self, op, h, pc, code)?;
+                return Ok(());
             }
         }
         self.pc = next;
-        Ok(name)
+        self.name = name;
+        Ok(())
     }
 
     /// Whether the PC is inside an active repeat block or the then-part of
@@ -912,7 +937,8 @@ impl Cpu {
             || matches!(self.predicate_skip, Some((at, _)) if pc < at && at - pc <= 32)
     }
 
-    fn dispatch_interrupt(&mut self) -> Result<(), Fault> {
+    #[inline(always)]
+    fn dispatch_interrupt(&mut self) -> Step<()> {
         // No interrupt inside a repeat or conditional block. The stock RTOS
         // context switch saves only r0-r15 and {psr, rets, reti} (04e9 /
         // 04a9 + e8d8/e8d4), so no hidden block state can survive an
@@ -920,10 +946,17 @@ impl Cpu {
         // task's repeat into another (FM-1_093: a nested rep at 0x01c05026).
         if !self.interrupts_enabled
             || self.in_interrupt
+            || !self.bus.any_irq_pending()
             || self.inside_block()
         {
             return Ok(());
         }
+        self.take_interrupt()
+    }
+
+    /// Enter the highest-priority deliverable interrupt, if any.
+    #[inline(never)]
+    fn take_interrupt(&mut self) -> Step<()> {
         if let Some(source) = self.bus.pending_irq_for(self.sr[11], self.sr[6] as usize) {
             let mask_register = 0x1eef1a8 + self.sr[6] * 0x200;
             let priority = self
@@ -987,7 +1020,7 @@ impl Cpu {
         }
         let mut values = [0; 12];
         for (i, value) in values.iter_mut().enumerate() {
-            *value = self.read(RESULT + i as u32 * 4, 4)?;
+            *value = self.read(RESULT + i as u32 * 4, 4).map_err(|fault| *fault)?;
         }
         Ok(values)
     }

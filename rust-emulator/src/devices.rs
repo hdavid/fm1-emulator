@@ -356,6 +356,17 @@ impl Devices {
         let config = self.irq_config[core][15];
         (0..8).fold(0, |mask, bit| mask | (((config >> (bit * 4)) & 1) << bit))
     }
+    /// Whether any source here is pending for either core: when not,
+    /// `pending_irq_for` finds nothing.
+    #[inline(always)]
+    pub(crate) fn any_pending(&self) -> bool {
+        self.tick.pending
+            || self.tick_secondary.pending
+            || self.timer4.pending
+            || self.timer5.pending
+            || self.software != 0
+            || self.startup_timers.iter().any(|timer| timer.pending)
+    }
     pub fn pending_irq(&self, icfg: u32) -> Option<usize> {
         self.pending_irq_for(icfg, 0)
     }
