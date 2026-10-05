@@ -778,3 +778,171 @@ fn stock_protection_setup_acknowledges_events_without_enabling_sdram() {
     b.write(0x1eef2d4, u32::MAX, 4).unwrap();
     assert_eq!(b.read(0x1eef2d4, 4).unwrap(), 0);
 }
+
+// Forms found by scripts/op-scan.sh (examples/op_scan.rs) in Felucca, Jangada
+// and SLOOP code; texts are the JieLi objdump's.
+
+#[test]
+fn special_register_push_and_pop_cover_every_mask() {
+    // Vendor objdump 0x04c0-0x04ff: [--sp] = {psr, sr4, rets, retx, rete,
+    // reti} for bits 5..0; 0x0480-0x04bf pop the same sets. Every interrupt
+    // stub of fm1_vec.S (Felucca/Jangada/SLOOP) starts with 04c8,
+    // [--sp] = {rets}. The lowest register is at the lowest address, as the
+    // irq frame pushes (04e9) and pops (04a9) the firmware relies on.
+    for mask in 0..64u16 {
+        let mut c = cpu(&[0x04c0 | mask, 0x0480 | mask]);
+        c.sr[14] = RAM + 0x100;
+        for i in 0..6 {
+            c.sr[i] = 0x1000 + i as u32;
+        }
+        c.step().unwrap();
+        let count = mask.count_ones();
+        assert_eq!(c.sr[14], RAM + 0x100 - 4 * count, "mask {mask:#x}");
+        let mut address = c.sr[14];
+        for i in 0..6 {
+            if mask & (1 << i) != 0 {
+                assert_eq!(c.bus.read(address, 4).unwrap(), 0x1000 + i as u32);
+                address += 4;
+            }
+        }
+        for i in 0..6 {
+            c.sr[i] = 0;
+        }
+        c.step().unwrap();
+        assert_eq!(c.sr[14], RAM + 0x100);
+        for i in 0..6 {
+            let expected = if mask & (1 << i) != 0 { 0x1000 + i as u32 } else { 0 };
+            assert_eq!(c.sr[i], expected, "mask {mask:#x} sr{i}");
+        }
+        assert_eq!(c.pc, XIP + 4);
+    }
+}
+
+#[test]
+fn special_register_mask_push_saves_the_fatal_frame() {
+    // fm1_vec.S fm1_fatal_common: e958 782f is
+    // [--sp] = {sp, ssp, usp, icfg, psr, rets, retx, rete, reti}; fm1_fault_c
+    // reads it back as f[16] reti .. f[24] sp, so the lowest special register
+    // is at the lowest address. e950 382f pops the same set without sp.
+    let mut c = cpu(&[0xe958, 0x782f, 0xe950, 0x382f]);
+    c.sr = std::array::from_fn(|i| 0x100 + i as u32);
+    c.sr[14] = RAM + 0x100;
+    c.step().unwrap();
+    assert_eq!(c.sr[14], RAM + 0x100 - 36);
+    let saved: Vec<u32> = (0..9)
+        .map(|i| c.bus.read(RAM + 0x100 - 36 + 4 * i, 4).unwrap())
+        .collect();
+    // sp is saved as it was before the push (UNCERTAIN: objdump cannot say).
+    assert_eq!(
+        saved,
+        [0x100, 0x101, 0x102, 0x103, 0x105, 0x10b, 0x10c, 0x10d, RAM + 0x100]
+    );
+    for i in [0, 1, 2, 3, 5, 11, 12, 13] {
+        c.sr[i] = 0;
+    }
+    c.step().unwrap();
+    assert_eq!(c.sr[14], RAM + 0x100 - 4);
+    for i in [0, 1, 2, 3, 5, 11, 12, 13] {
+        assert_eq!(c.sr[i], 0x100 + i as u32, "sr{i}");
+    }
+    assert_eq!(c.pc, XIP + 8);
+}
+
+#[test]
+fn special_register_mask_pop_of_pc_returns() {
+    // Stock FM-1 0x02043854: e950 8000, {pc} = [sp++].
+    let mut c = cpu(&[0xe950, 0x8000]);
+    c.sr[14] = RAM + 0x100;
+    c.bus.write(RAM + 0x100, XIP + 0x40, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 0x40);
+    assert_eq!(c.sr[14], RAM + 0x104);
+}
+
+#[test]
+fn trigger_is_a_debug_event_that_continues() {
+    // e870 0000 `trigger`: the SDK's ___trig (jl_fft.c) is followed by a
+    // printf, so execution continues; fm1_fatal_common starts with it.
+    let mut c = cpu(&[0xe870, 0x0000]);
+    c.r = std::array::from_fn(|i| i as u32);
+    let (r, sr) = (c.r, c.sr);
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 4);
+    assert_eq!((c.r, c.sr), (r, sr));
+}
+
+/// Where a one-instruction conditional block `[h, x, r1 = 1]` continues.
+fn conditional_target(h: u16, x: u16, register: usize, value: u32) -> u32 {
+    let mut c = cpu(&[h, x, 0x2141, 0x2140]);
+    c.r[register] = value;
+    c.step().unwrap();
+    c.pc - XIP
+}
+
+#[test]
+fn conditional_blocks_compare_with_packed_immediates() {
+    // ota_session (Felucca/Jangada/SLOOP): ec23 0ba0 `if (r3 > 81920) {`.
+    for (value, enters) in [(81921, true), (81920, false), (0xffff_ffff, true)] {
+        let expected = if enters { 4 } else { 6 };
+        assert_eq!(conditional_target(0xec23, 0x0ba0, 3, value), expected);
+    }
+    // e9a3 0ba0 `if (r3 < 81920) {` (unsigned).
+    for (value, enters) in [(81919, true), (81920, false), (0xffff_ffff, false)] {
+        let expected = if enters { 4 } else { 6 };
+        assert_eq!(conditional_target(0xe9a3, 0x0ba0, 3, value), expected);
+    }
+    // FM-1_093 0x020a3008: ee21 0e5e `ifs (r1 > 3552) {` (signed).
+    for (value, enters) in [(3553, true), (3552, false), (-5i32 as u32, false)] {
+        let expected = if enters { 4 } else { 6 };
+        assert_eq!(conditional_target(0xee21, 0x0e5e, 1, value), expected);
+    }
+}
+
+#[test]
+fn unsigned_conditional_immediates_are_not_sign_extended() {
+    // clang -target pi32v2 -O2 for `if (x < 3000u) y = y * 3 + 1;`:
+    // r2 = r1 * 0x3; r2 += 1; if (r0 >= 3000) { r2 = r1 }; r0 = r2; rts.
+    // 3000 is 0xbb8: bit 11 set, still an unsigned 3000 (objdump agrees for
+    // e93X and e9bX alike).
+    for (x, expected) in [(100, 16), (2999, 16), (3000, 5), (4000, 5)] {
+        let mut c = cpu(&[0xe1e2, 0x1003, 0x21c2, 0xe930, 0x0bb8, 0x1612, 0x1620, 0x0080]);
+        c.r[0] = x;
+        c.r[1] = 5;
+        c.sr[3] = XIP + 0x40;
+        while c.pc != XIP + 0x40 {
+            c.step().unwrap();
+        }
+        assert_eq!(c.r[0], expected, "x = {x}");
+    }
+    for (value, enters) in [(2999, true), (3000, false), (0xffff_ffff, false)] {
+        let expected = if enters { 4 } else { 6 };
+        assert_eq!(conditional_target(0xe9b0, 0x0bb8, 0, value), expected); // if (r0 < 3000) {
+    }
+    // ec33 0ba5 `if (r3 > 2981) {`: imm12 too, not packed.
+    for (value, enters) in [(2982, true), (2981, false)] {
+        let expected = if enters { 4 } else { 6 };
+        assert_eq!(conditional_target(0xec33, 0x0ba5, 3, value), expected);
+    }
+    // e8b3 0ba5 `if (r3 != -1115) {` and ea33 0ba5
+    // `if ((r3 & 0x14A00) != 0) {` (a packed mask).
+    for (value, enters) in [(-1115i32 as u32, false), (0, true)] {
+        let expected = if enters { 4 } else { 6 };
+        assert_eq!(conditional_target(0xe8b3, 0x0ba5, 3, value), expected);
+    }
+    for (value, enters) in [(0x200, true), (0x1_0000, true), (0x1ff, false)] {
+        let expected = if enters { 4 } else { 6 };
+        assert_eq!(conditional_target(0xea33, 0x0ba5, 3, value), expected);
+    }
+}
+
+#[test]
+fn conditional_blocks_skip_six_byte_compare_branches_whole() {
+    // e820 0001 `if (r0 == 1) {` around ff00 0000 0002
+    // `if (r0 == 0) goto 4` (6 bytes in objdump), then r1 = 1; r0 = 1.
+    let mut c = cpu(&[0xe820, 0x0001, 0xff00, 0x0000, 0x0002, 0x2141, 0x2140]);
+    c.r[0] = 5;
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 10);
+    c.step().unwrap();
+    assert_eq!(c.r[1], 1);
+}

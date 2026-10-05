@@ -265,7 +265,7 @@ impl Cpu {
     }
 
     #[inline]
-    fn push(&mut self, value: u32) -> Step<()> {
+    pub(crate) fn push(&mut self, value: u32) -> Step<()> {
         let address = self.sr[14].wrapping_sub(4);
         self.write(address, value)?;
         self.sr[14] = address;
@@ -273,7 +273,7 @@ impl Cpu {
     }
 
     #[inline]
-    fn pop(&mut self) -> Step<u32> {
+    pub(crate) fn pop(&mut self) -> Step<u32> {
         let value = self.read(self.sr[14], 4)?;
         self.sr[14] = self.sr[14].wrapping_add(4);
         Ok(value)
@@ -829,30 +829,24 @@ impl Cpu {
                 }
                 name = "move_stack_pointer";
             }
-            Op::PushIrqFrame => {
-                // 0x04c0 | mask over {reti 0, rets 3, psr 5}, highest first
-                // (04e9 = {psr, rets, reti}; 04e1 = {psr, reti}).
-                for index in [5, 3, 0] {
+            Op::PushSpecial => {
+                // 0x04c0 | mask over {reti 0, rete 1, retx 2, rets 3, sr4 4,
+                // psr 5}, highest first, so the lowest is at the lowest
+                // address (04e9 = {psr, rets, reti}; fm1_vec.S stubs: 04c8 =
+                // {rets}).
+                for index in (0..6).rev() {
                     if h & (1 << index) != 0 {
                         self.push(self.sr[index])?;
                     }
                 }
-                name = "push_irq_frame";
-            }
-            Op::PopIrqFrame => {
-                for index in [0, 3, 5] {
-                    if h & (1 << index) != 0 {
-                        self.sr[index] = self.pop()?;
-                    }
-                }
-                name = "pop_irq_frame";
+                name = "push_special";
             }
             Op::PopSpecial => {
-                // pop {reti, rete, retx, rets}: bit n restores sr[n], lowest
-                // first (SLOOP's tail calls: pop {rets}; goto f).
-                for n in 0..4 {
-                    if h & (1 << n) != 0 {
-                        self.sr[n] = self.pop()?;
+                // 0x0480 | the same mask, lowest first (SLOOP's tail calls:
+                // pop {rets}; goto f; irq exit: 04a9 = {psr, rets, reti}).
+                for index in 0..6 {
+                    if h & (1 << index) != 0 {
+                        self.sr[index] = self.pop()?;
                     }
                 }
                 name = "pop_special";

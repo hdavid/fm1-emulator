@@ -353,6 +353,42 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
             }
             name = "stack_pair";
         }
+        Op::PushSpecialMask => {
+            // e958: [--sp] = {sp, ssp, usp, icfg, psr, rets, retx, rete,
+            // reti} for x 782f (fm1_vec.S fatal frame, read back by
+            // fm1_fault_c as reti..sp upwards): x bit n is sr[n], pushed
+            // highest first. UNCERTAIN: sp is saved as it was before the
+            // push (the frame only reports it).
+            let sp = cpu.sr[14];
+            for index in (0..15).rev() {
+                if x & (1 << index) != 0 {
+                    let value = if index == 14 { sp } else { cpu.sr[index] };
+                    cpu.push(value)?;
+                }
+            }
+            name = "push_special_mask";
+        }
+        Op::PopSpecialMask => {
+            // e950: the same set popped lowest first; bit 15 pops pc
+            // (stock FM-1 0x02043854: {pc} = [sp++]).
+            for index in 0..14 {
+                if x & (1 << index) != 0 {
+                    cpu.sr[index] = cpu.pop()?;
+                    if index == 11 {
+                        cpu.interrupts_enabled = cpu.sr[11] & 0x200 != 0;
+                    }
+                }
+            }
+            if x & 0x8000 != 0 {
+                next = cpu.pop()?;
+            }
+            name = "pop_special_mask";
+        }
+        Op::Trigger => {
+            // Debug trigger event (SDK ___trig, followed by a printf in
+            // jl_fft.c): nothing to do without a debugger attached.
+            name = "trigger";
+        }
         Op::ReverseBytes => {
             cpu.r[d] = cpu.r[c].swap_bytes();
             name = "reverse_bytes";
@@ -778,22 +814,27 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
         Op::ConditionalBlock => {
             let kind = (h >> 4) & 255;
             let lhs = cpu.r[n];
+            // Low bits of the kind: 1 register, 2 packed immediate, 3 imm12.
+            // JieLi objdump (x = 0x0ba5): the imm12 is signed for ==, != and
+            // the signed comparisons (-1115), unsigned for the unsigned ones
+            // (2981); not packed as Quarkslab lists it. SLOOP's reverb wraps
+            // `++line_i[3] >= 2791` with ecb1 0ae6 (<= 2790); clang emits
+            // e930 0bb8 for `x < 3000u`.
             let rhs = if kind & 7 == 1 {
                 cpu.r[c]
-            } else if matches!(kind, 0x83 | 0x93 | 0x9b | 0xd3 | 0xdb | 0xe3 | 0xeb) {
-                signed(x & 4095, 12) as u32
-            } else if kind == 0xcb {
-                // Plain imm12, not packed as Quarkslab lists it: SLOOP's
-                // reverb wraps `++line_i[3] >= 2791` with ecb1 0ae6 (<= 2790).
-                x & 4095
-            } else {
+            } else if kind & 7 == 2 || matches!(kind, 0xa2 | 0xa3) {
+                // ea2X/ea3X test bits against a packed mask (== 0 / != 0).
                 packed(x)
+            } else if matches!(kind, 0x83 | 0x8b | 0xd3 | 0xdb | 0xe3 | 0xeb) {
+                signed(x & 4095, 12) as u32
+            } else {
+                x & 4095
             };
             let test = match kind {
                 0x81..=0x83 => lhs == rhs,
                 0x89..=0x8b => lhs != rhs,
                 0x91..=0x93 => lhs >= rhs,
-                0x99 | 0x9b => lhs < rhs,
+                0x99..=0x9b => lhs < rhs,
                 0xa1 => {
                     if x & 128 == 0 {
                         lhs & rhs == 0
@@ -803,13 +844,13 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
                 }
                 0xa2 => lhs & rhs == 0,
                 0xa3 => lhs & rhs != 0,
-                0xc1 | 0xc3 => lhs > rhs,
+                0xc1..=0xc3 => lhs > rhs,
                 0xc9..=0xcb => lhs <= rhs,
                 0xd1..=0xd3 => (lhs as i32) >= (rhs as i32),
                 0xd9..=0xdb => (lhs as i32) < (rhs as i32),
                 // Same condition order as the compare-branches: 0xee00 is
                 // signed >, 0xee80 signed <= (FM-1_093 0x02002bea: ee15).
-                0xe1 | 0xe3 => (lhs as i32) > (rhs as i32),
+                0xe1..=0xe3 => (lhs as i32) > (rhs as i32),
                 _ => (lhs as i32) <= (rhs as i32),
             };
             next = cpu.conditional(test, x)?;

@@ -39,8 +39,7 @@ pub(crate) enum Op {
     PopRetsRegs,
     PopPcRegs,
     MoveStackPointer,
-    PushIrqFrame,
-    PopIrqFrame,
+    PushSpecial,
     PopSpecial,
     CallRel32,
     Rel22,
@@ -137,6 +136,9 @@ pub(crate) enum Op {
     WordPostincrementStore,
     WordPostincrementLoad,
     MemoryIndexed,
+    PushSpecialMask,
+    PopSpecialMask,
+    Trigger,
     Unsupported,
 }
 
@@ -215,11 +217,9 @@ pub(crate) fn decode(h: u32) -> Op {
         PopPcRegs
     } else if matches!(h, 0x1440..=0x1443) {
         MoveStackPointer
-    } else if matches!(h, 0x04e8 | 0x04e9 | 0x04e1) {
-        PushIrqFrame
-    } else if matches!(h, 0x04a8 | 0x04a9 | 0x04a1) {
-        PopIrqFrame
-    } else if h & 0xfff0 == 0x0480 && h & 15 != 0 {
+    } else if h & 0xffc0 == 0x04c0 {
+        PushSpecial
+    } else if h & 0xffc0 == 0x0480 {
         PopSpecial
     } else if h == 0xff80 {
         CallRel32
@@ -321,6 +321,15 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         BitMask
     } else if h == 0xe9d0 {
         StackPair
+    } else if h == 0xe958 && x & 0x8000 == 0 {
+        // [--sp] = {sp, ssp, ..., reti}: x bit n is sr[n]. Pushing pc is
+        // not decided (no firmware uses it).
+        PushSpecialMask
+    } else if h == 0xe950 && x & 0x4000 == 0 {
+        // {pc, ..., reti} = [sp++]; popping sp itself is not decided.
+        PopSpecialMask
+    } else if h == 0xe870 && x == 0 {
+        Trigger
     } else if h == 0xe070 && x & 255 == 0 {
         ReverseBytes
     } else if h & 0xfff0 == 0xe0f0 {
@@ -526,7 +535,10 @@ pub(crate) fn length(op: Op) -> Option<u32> {
         | HalfwordRegisterPreincrementStore
         | WordPostincrementStore
         | WordPostincrementLoad
-        | MemoryIndexed => Some(4),
+        | MemoryIndexed
+        | PushSpecialMask
+        | PopSpecialMask
+        | Trigger => Some(4),
         _ => Some(2),
     }
 }
@@ -534,7 +546,8 @@ pub(crate) fn length(op: Op) -> Option<u32> {
 /// Length in bytes of the instruction word `h` as a conditional block counts
 /// it when it skips instructions (`Cpu::conditional`), from the word alone.
 pub(crate) fn skip_length(h: u32) -> u32 {
-    if matches!(h & 0xffe0, 0xffc0 | 0xffe0) || h == 0xff80 {
+    // ff00-ff7f: the six-byte compare-branches (objdump), as BranchLong.
+    if matches!(h & 0xffe0, 0xffc0 | 0xffe0) || h == 0xff80 || h & 0xff80 == 0xff00 {
         6
     } else if h >> 13 == 7 {
         4
@@ -599,11 +612,15 @@ fn conditional_kind(kind: u32) -> bool {
             | 0x92
             | 0x93
             | 0x99
+            // if (rA < #packed): e9a3 0ba0 (objdump: < 81920).
+            | 0x9a
             | 0x9b
             | 0xa1
             | 0xa2
             | 0xa3
             | 0xc1
+            // if (rA > #packed): Felucca/SLOOP ota_session ec23 0ba0 (> 81920).
+            | 0xc2
             | 0xc3
             | 0xc9
             | 0xca
@@ -615,6 +632,8 @@ fn conditional_kind(kind: u32) -> bool {
             | 0xda
             | 0xdb
             | 0xe1
+            // ifs (rA > #packed): FM-1_093 0x020a3008 ee21 0e5e (> 3552).
+            | 0xe2
             // ifs (rA > #imm12): FM-1_093 0x02004872 ee37 5fff (r7 > -1).
             | 0xe3
             | 0xe9
