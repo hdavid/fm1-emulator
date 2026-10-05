@@ -40,7 +40,12 @@ The panel is an original vector illustration drawn in Rust, using the device's
 as a layout reference. No vendor product photo is bundled. Button identities
 follow the [pinned Felucca panel defaults](https://github.com/hugelton/Felucca/blob/1e838e17e170b20ff09b9660c9a7171aadfc5dca/firmware/src/panel.c)
 and the local `fm1_input.h` wiring. All fourteen buttons and twenty-seven note
-keys feed matrix contacts; rotary controls are currently decorative. Short
+keys feed matrix contacts. The seven encoders turn by dragging around them,
+scrolling, or keys (`[ ]`, `9 0`, `- =`, `1`-`8`); each click plays one
+quadrature cycle into the encoder's A/B matrix contacts (Felucca's
+`FM1_ENC` wiring), and each phase is held until the guest has read both
+contact columns three times, so the pace follows the firmware's own scan rate.
+MASTER is the ADC potentiometer (drag, scroll, or `N M`). Short
 clicks/keystrokes are held for at least 100 ms of both host and guest time so a
 slow guest scan can observe and debounce them.
 Losing window focus releases contacts. Pause stops guest execution; Restart
@@ -161,7 +166,8 @@ mise exec -- cargo run --manifest-path rust-emulator/Cargo.toml --offline -- \
 keys. Columns are 0..10 and packed rows 0..5. `0:4` is OCT-minus; `3:4` is the F3
 note key. Debouncing and encoder decoding belong to firmware, not the GPIO
 model. The hardware display application runs the inherited full input routine.
-Scheduled input events and UI encoder contacts remain future work.
+Scheduled input events remain future work; `fm1_emu::encoders` plays
+encoder clicks against the guest's own scans.
 
 `--until` accepts a breakpoint symbol or numeric address, and `--inspect` accepts
 `SYMBOL_OR_ADDRESS:WORDS`. Raw `.bin` boot works with numeric addresses. Successful
@@ -205,7 +211,7 @@ not a percentage of complete instruction-set or musical-feature coverage.
 | Memory/startup | ELF equals raw flash image; guest copies data and RAM code, clears dirty BSS, executes RAM code | ROM/SPL, reset retention, boot parameters |
 | Timers | Guest sees TIMER4 progress; TIMER5 produces a periodic event | Other sources/dividers and measured cycle timing |
 | Interrupts | IRQ63/ALNK11 vectors, masking, SSP handler frame, acknowledgment, `rti`, priority selection | Nested priorities, other IRQs, physical entry-state validation |
-| Controls | Guest scans eleven columns; released/pressed and multiple-key cases agree | Scheduled events and UI encoder input |
+| Controls | Guest scans eleven columns; released/pressed and multiple-key cases agree; UI encoders and MASTER reach the guest | Scheduled events |
 | Flash | Startup JEDEC/status/NOR reads; plain XIP shares physical NOR storage | Erase/program, persistence, XIP busy behavior |
 | LCD | Display guest initializes SPI/DMA, draws RGB565 pixels and live timer/key data | Other controller modes, SPI timing, pixel-exact physical comparison |
 | USB serial | Hardware guest enumerates and sends CDC debug bytes through DMA | Host OUT packets, broader controller/USB behavior |

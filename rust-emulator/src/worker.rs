@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Private GUI worker: one owner of the CPU, and one replaceable UI snapshot.
-use fm1_emu::{cpu::Cpu, firmware::Firmware};
+use fm1_emu::{cpu::Cpu, encoders::Encoders, firmware::Firmware};
 use std::{
     io::{self, Read, Write},
     path::PathBuf,
@@ -20,6 +20,10 @@ pub(super) struct Snapshot {
 enum Command {
     Restart(u64, PathBuf),
     Input([bool; 41]),
+    /// Queue detents (+ clockwise) on a matrix encoder.
+    Turn(usize, i32),
+    /// The MASTER potentiometer as the ADC reads it (0..=1023).
+    Master(u16),
     Pause(bool),
     Stop,
     #[cfg(test)]
@@ -37,6 +41,8 @@ pub(super) struct Machine {
     pub cpu: Option<Cpu>,
     pub fault: Option<String>,
     pub paused: bool,
+    pub encoders: Encoders,
+    master: u16,
     generation: u64,
     last_lcd: Option<(u64, bool)>,
 }
@@ -47,6 +53,8 @@ impl Machine {
             cpu: None,
             fault: None,
             paused: false,
+            encoders: Encoders::default(),
+            master: super::MASTER_DEFAULT,
             generation: 0,
             last_lcd: None,
         }
@@ -57,9 +65,12 @@ impl Machine {
                 self.generation = generation;
                 self.paused = false;
                 self.last_lcd = None;
+                self.encoders = Encoders::default();
+                let master = self.master;
                 match Firmware::load(&path).and_then(|firmware| {
                     let mut cpu = Cpu::new(firmware.bus()?, firmware.entry);
                     cpu.r[0] = 0x01c7fe08;
+                    cpu.bus.devices.adc.master = master;
                     Ok(cpu)
                 }) {
                     Ok(cpu) => {
@@ -87,6 +98,13 @@ impl Machine {
                     }
                 }
             }
+            Command::Turn(encoder, detents) => self.encoders.turn(encoder, detents),
+            Command::Master(value) => {
+                self.master = value;
+                if let Some(cpu) = &mut self.cpu {
+                    cpu.bus.devices.adc.master = value;
+                }
+            }
             Command::Pause(paused) => self.paused = paused,
             Command::Stop => return false,
             #[cfg(test)]
@@ -102,6 +120,8 @@ impl Machine {
             return;
         }
         let cpu = self.cpu.as_mut().unwrap();
+        // Encoder phases advance with the guest's own matrix scans.
+        self.encoders.drive(&mut cpu.bus.devices.gpio);
         // Poll commands between small batches, independently of repaint rate.
         for _ in 0..1024 {
             if let Err(error) = cpu.step() {
@@ -219,6 +239,12 @@ impl Worker {
     }
     pub fn input(&self, pressed: [bool; 41]) {
         let _ = self.commands.send(Command::Input(pressed));
+    }
+    pub fn turn(&self, encoder: usize, detents: i32) {
+        let _ = self.commands.send(Command::Turn(encoder, detents));
+    }
+    pub fn master(&self, value: u16) {
+        let _ = self.commands.send(Command::Master(value));
     }
     pub fn pause(&self, paused: bool) {
         let _ = self.commands.send(Command::Pause(paused));
