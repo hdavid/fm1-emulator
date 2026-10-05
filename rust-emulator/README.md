@@ -64,8 +64,16 @@ register, arithmetic, shift, memory and short branch operations, including their
 operands. Each core retains its own position in the block. Current instruction
 words are still checked through the bus, so SRAM changes, flash remapping and
 disabled XIP cannot execute stale code. Interrupts, device timing and core
-interleaving retain their per-instruction boundaries. Native JIT compilation
-remains future work.
+interleaving retain their per-instruction boundaries.
+
+Hot blocks compile common register operations to ARM64 or x86-64 machine code.
+Each native entry currently executes one guest instruction before returning to
+the device scheduler; memory accesses and complex instructions use the existing
+handlers. Cheap uncached operations bypass block lookup. Native code uses owned
+pages that become read/execute after emission, and automatically falls back to
+prepared interpretation if allocation is denied. Broader translation and native
+block batching remain performance work; this initial backend does not yet provide
+a substantial whole-firmware speedup.
 
 `build/display/firmware.elf` is the 17,056-byte FM-1_981 hardware application.
 It uses Felucca-derived startup, watchdog, recovery, input scanning, USB CDC and

@@ -61,7 +61,7 @@ and Baud Girl results.
 
 ## Still to implement
 
-- [ ] Add a JIT to improve guest execution speed.
+- [ ] Broaden JIT coverage and execute native blocks in batches for larger speed gains.
 - [ ] Remaining CPU instructions, peripherals and firmware UI paths.
 - [ ] Host audio playback, rotary controls and USB MIDI.
 - [ ] Flash persistence, plus fuller encryption, interrupt and timing behavior.

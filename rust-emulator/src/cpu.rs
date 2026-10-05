@@ -387,16 +387,34 @@ impl Cpu {
                 }
                 self.pc = continuation;
                 op
-            } else if let Some(instruction) = self.blocks.instruction(
-                &self.bus,
-                &mut self.decode,
-                &mut self.block_cursor,
-                pc,
-                h as u16,
-            ) {
-                instruction.execute(self)?
             } else {
-                self.execute(h)?
+                let prepared =
+                    if self
+                        .blocks
+                        .can_execute(&self.decode, self.block_cursor, pc, h as u16)
+                    {
+                        self.blocks.instruction(
+                            &self.bus,
+                            &mut self.decode,
+                            &mut self.block_cursor,
+                            pc,
+                            h as u16,
+                        )
+                    } else {
+                        None
+                    };
+                if let Some(prepared) = prepared {
+                    let instruction = prepared.instruction;
+                    if let Some(native) = prepared.native {
+                        native.run(&mut self.r, &mut self.sr);
+                        self.pc = pc.wrapping_add(instruction.length as u32);
+                        instruction.name
+                    } else {
+                        instruction.execute(self)?
+                    }
+                } else {
+                    self.execute(h)?
+                }
             }
         };
         // FM-1_988: conditional bundles finish and skip their unselected
@@ -1051,11 +1069,13 @@ mod block_tests {
             b.sr = a.sr;
             compare(&mut a, &mut b);
             // Revisit the cached instruction with different dynamic operands.
-            a.pc = crate::XIP;
-            b.pc = crate::XIP;
-            a.r = a.r.map(|v| !v);
-            b.r = a.r;
-            compare(&mut a, &mut b);
+            for _ in 0..40 {
+                a.pc = crate::XIP;
+                b.pc = crate::XIP;
+                a.r = a.r.map(|v| !v);
+                b.r = a.r;
+                compare(&mut a, &mut b);
+            }
         }
         for h in [
             0xe1e4, 0xe0b4, 0xe190, 0xe1c0, 0xe1c4, 0xffc8, 0xffee, 0xe04f,
@@ -1066,7 +1086,11 @@ mod block_tests {
                 a.sr[5] = 0xabcdfff0;
                 b.r = a.r;
                 b.sr = a.sr;
-                compare(&mut a, &mut b);
+                for _ in 0..40 {
+                    a.pc = crate::XIP;
+                    b.pc = crate::XIP;
+                    compare(&mut a, &mut b);
+                }
             }
         }
     }
@@ -1097,5 +1121,82 @@ mod block_tests {
         compare(&mut a, &mut b);
         assert_eq!(a.pc, crate::XIP + 2);
         compare(&mut a, &mut b);
+    }
+}
+
+#[cfg(test)]
+mod jit_tests {
+    use super::*;
+    #[test]
+    fn native_arithmetic_matches_all_condition_flag_edges_and_operand_aliases() {
+        for subtract in [false, true] {
+            for destination in [1, 2, 3] {
+                let bytes: Vec<_> = [
+                    0xe0b4u16,
+                    (destination << 12) | 0x0210 | if subtract { 2 } else { 0 },
+                ]
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect();
+                let mut a = Cpu::new(Bus::new(bytes.clone()).unwrap(), crate::XIP);
+                let mut b = Cpu::new(Bus::new(bytes).unwrap(), crate::XIP);
+                b.blocks.enabled = false;
+                for _ in 0..64 {
+                    a.pc = crate::XIP;
+                    a.step().unwrap();
+                }
+                let calls = a.blocks.native_calls;
+                assert!(calls > 0);
+                for left in [0, 1, u32::MAX, 0x80000000, 0x7fffffff, 0x80000001] {
+                    for right in [0, 1, u32::MAX, 0x80000000, 0x7fffffff, 0x80000001] {
+                        a.pc = crate::XIP;
+                        b.pc = crate::XIP;
+                        a.r[1] = left;
+                        a.r[2] = right;
+                        a.sr[5] = 0xaabbccf0;
+                        b.r = a.r;
+                        b.sr = a.sr;
+                        assert_eq!(a.step(), b.step());
+                        assert_eq!(a.r, b.r);
+                        assert_eq!(a.sr, b.sr);
+                        assert_eq!(a.pc, b.pc);
+                    }
+                }
+                assert!(a.blocks.native_calls > calls);
+            }
+        }
+    }
+    #[test]
+    fn hot_native_code_revalidates_sram_operands_and_flash_permissions() {
+        let mut c = Cpu::new(Bus::new(vec![0xc0, 0x20, 0, 0]).unwrap(), crate::XIP);
+        for _ in 0..64 {
+            c.pc = crate::XIP;
+            c.step().unwrap();
+        }
+        assert!(
+            c.blocks.native_calls > 0,
+            "the test must execute native code"
+        );
+        c.bus.write(0x40200, 0, 4).unwrap();
+        c.pc = crate::XIP;
+        assert!(matches!(c.step(), Err(Fault::Access { .. })));
+        c.bus.write(crate::RAM, 0x4003e1e4, 4).unwrap();
+        for _ in 0..64 {
+            c.pc = crate::RAM;
+            c.r[4] = 7;
+            c.step().unwrap();
+            assert_eq!(c.r[4], 21);
+        }
+        let calls = c.blocks.native_calls;
+        assert!(calls > 32);
+        c.bus.write(crate::RAM + 2, 0x4005, 2).unwrap();
+        c.pc = crate::RAM;
+        c.r[4] = 7;
+        c.step().unwrap();
+        assert_eq!(c.r[4], 35);
+        assert_eq!(
+            c.blocks.native_calls, calls,
+            "changed code must leave the old translation"
+        );
     }
 }

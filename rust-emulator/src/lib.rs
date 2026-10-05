@@ -42,6 +42,7 @@ pub const NAMES: [&str; 12] = [
 mod blocks;
 mod decode;
 mod extended;
+mod jit;
 
 pub mod system;
 

@@ -140,18 +140,30 @@ impl Instruction {
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Cursor {
-    slot: usize,
-    index: usize,
+    slot: u16,
+    index: u8,
     start: u32,
+    next: u32,
 }
 struct Block {
     start: u32,
     instructions: Vec<Instruction>,
+    visits: u16,
+    attempted: bool,
+    native: Option<crate::jit::Code>,
+}
+pub(crate) struct Prepared<'a> {
+    pub(crate) instruction: Instruction,
+    pub(crate) native: Option<crate::jit::Entry<'a>>,
 }
 pub(crate) struct Cache {
     slots: Box<[Option<Block>]>,
     #[cfg(test)]
     pub(crate) enabled: bool,
+    #[cfg(test)]
+    pub(crate) jit_enabled: bool,
+    #[cfg(test)]
+    pub(crate) native_calls: u64,
 }
 impl Cache {
     pub(crate) fn new() -> Self {
@@ -159,7 +171,15 @@ impl Cache {
             slots: std::iter::repeat_with(|| None).take(SLOTS).collect(),
             #[cfg(test)]
             enabled: true,
+            #[cfg(test)]
+            jit_enabled: true,
+            #[cfg(test)]
+            native_calls: 0,
         }
+    }
+    #[inline]
+    pub(crate) fn can_execute(&self, decode: &Decode, cursor: Cursor, pc: u32, h: u16) -> bool {
+        cursor.next == pc || candidate(decode.first(h as u32), h)
     }
     pub(crate) fn instruction(
         &mut self,
@@ -168,18 +188,26 @@ impl Cache {
         cursor: &mut Cursor,
         pc: u32,
         h: u16,
-    ) -> Option<Instruction> {
+    ) -> Option<Prepared<'_>> {
         #[cfg(test)]
         if !self.enabled {
             return None;
         }
-        // Reuse the next instruction within a block; each core has its own cursor.
-        let hit = self.slots[cursor.slot]
-            .as_ref()
-            .filter(|b| b.start == cursor.start)
-            .and_then(|b| b.instructions.get(cursor.index))
-            .filter(|i| i.pc == pc && i.words[0] == h)
-            .copied();
+        // A core's sequential cursor avoids hashing and family decoding on
+        // visits within a block. Complex forms need neither a block nor a JIT.
+        let hit = if cursor.next == pc {
+            self.slots[cursor.slot as usize]
+                .as_ref()
+                .filter(|b| b.start == cursor.start)
+                .and_then(|b| b.instructions.get(cursor.index as usize))
+                .filter(|i| i.pc == pc && i.words[0] == h)
+                .copied()
+        } else {
+            None
+        };
+        if hit.is_none() && !candidate(decode.first(h as u32), h) {
+            return None;
+        }
         let instruction = if let Some(i) = hit {
             i
         } else {
@@ -191,9 +219,10 @@ impl Cache {
                 self.slots[slot] = Some(build(bus, decode, pc, h));
             }
             *cursor = Cursor {
-                slot,
+                slot: slot as u16,
                 index: 0,
                 start: pc,
+                next: pc,
             };
             self.slots[slot].as_ref().unwrap().instructions[0]
         };
@@ -201,14 +230,66 @@ impl Cache {
         // must not be raised early, or cause speculative MMIO reads.
         for n in 1..instruction.length as usize / 2 {
             if bus.read(pc + n as u32 * 2, 2).ok()? != instruction.words[n] as u32 {
-                self.slots[cursor.slot] = None;
+                self.slots[cursor.slot as usize] = None;
                 return self.instruction(bus, decode, cursor, pc, h);
             }
         }
+        let block = self.slots[cursor.slot as usize].as_mut().unwrap();
+        let use_jit = {
+            #[cfg(test)]
+            {
+                self.jit_enabled
+            }
+            #[cfg(not(test))]
+            {
+                true
+            }
+        };
+        if !block.attempted && use_jit {
+            block.visits += 1;
+            if block.visits >= 32 {
+                block.attempted = true;
+                block.native = crate::jit::Code::compile(block.instructions.iter().map(|i| i.op));
+            }
+        }
+        let native = block
+            .native
+            .as_ref()
+            .and_then(|code| code.entry(cursor.index as usize));
+        #[cfg(test)]
+        if native.is_some() {
+            self.native_calls += 1;
+        }
         cursor.index += 1;
-        (!matches!(instruction.op, Op::Fallback)).then_some(instruction)
+        cursor.next = if instruction.ends_block() {
+            0
+        } else {
+            pc.wrapping_add(instruction.length as u32)
+        };
+        (!matches!(instruction.op, Op::Fallback)).then_some(Prepared {
+            instruction,
+            native,
+        })
     }
 }
+fn candidate(kind: First, h: u16) -> bool {
+    // Small loads, moves, logic and branches are already cheap in the original
+    // interpreter. Prioritize operations with literal/flag decoding to amortize
+    // lookup and native-call costs; blocks still prepare the intervening forms.
+    match kind {
+        First::MoveImmediate32
+        | First::MovImm16
+        | First::Arithmetic
+        | First::AddImm8
+        | First::AddSmall => true,
+        First::Extended(Extended::AddRegister) => true,
+        First::Extended(Extended::Wide) => {
+            h & 0xfff0 == 0xe1e0 || matches!(h, 0xe0b4 | 0xe190 | 0xe1c0 | 0xe1c4)
+        }
+        _ => false,
+    }
+}
+
 fn code_word(bus: &Bus, pc: u32) -> Option<u16> {
     // Reading ahead is permitted only in memory, never device register space.
     if (RAM..RAM + RAM_SIZE as u32).contains(&pc) || (XIP..XIP_END).contains(&pc) {
@@ -242,6 +323,9 @@ fn build(bus: &Bus, decode: &mut Decode, start: u32, first: u16) -> Block {
     Block {
         start,
         instructions,
+        visits: 0,
+        attempted: false,
+        native: None,
     }
 }
 fn prepare(bus: &Bus, decode: &mut Decode, pc: u32, word: u16) -> Option<Instruction> {
