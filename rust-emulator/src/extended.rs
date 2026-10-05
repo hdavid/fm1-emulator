@@ -465,6 +465,7 @@ pub(crate) fn execute(
             cpu.r[d] = match x & 3 {
                 0 => cpu.r[s].checked_shl(shift).unwrap_or(0),
                 2 => cpu.r[s].checked_shr(shift).unwrap_or(0),
+                3 => ((cpu.r[s] as i32) >> shift.min(31)) as u32,
                 _ => return Ok(None),
             };
             op = "shift_register_extended";
@@ -663,26 +664,51 @@ pub(crate) fn execute(
             } else {
                 packed(x)
             };
-            let test = match kind {
-                0x81..=0x83 => lhs == rhs,
-                0x89..=0x8b => lhs != rhs,
-                0x91..=0x93 => lhs >= rhs,
-                0x99 | 0x9b => lhs < rhs,
-                0xa1 => {
-                    if x & 128 == 0 {
-                        lhs & rhs == 0
-                    } else {
-                        lhs & rhs != 0
-                    }
+            let test = if matches!(kind, 0xd1 | 0xd9 | 0xe1 | 0xe9) && x & 128 != 0 {
+                // Vendor r3: bit 7 changes these register comparisons from
+                // signed integers to floating point (iff). Stock voice pitch
+                // calculation compares negative floats with this block form.
+                let lhs = f32::from_bits(lhs);
+                let rhs = f32::from_bits(rhs);
+                if !lhs.is_finite() || !rhs.is_finite() {
+                    return Err(Fault::Access {
+                        pc,
+                        fault: crate::bus::AccessFault {
+                            address: pc,
+                            size: 4,
+                            operation: "floating-point condition",
+                            reason: "exceptional floating-point comparison is not implemented",
+                        },
+                    });
                 }
-                0xa2 => lhs & rhs == 0,
-                0xa3 => lhs & rhs != 0,
-                0xc1 | 0xc3 => lhs > rhs,
-                0xc9..=0xcb => lhs <= rhs,
-                0xd1..=0xd3 => (lhs as i32) >= (rhs as i32),
-                0xd9..=0xdb => (lhs as i32) < (rhs as i32),
-                0xe1..=0xe3 => (lhs as i32) > (rhs as i32),
-                _ => (lhs as i32) <= (rhs as i32),
+                match kind {
+                    0xd1 => lhs >= rhs,
+                    0xd9 => lhs < rhs,
+                    0xe1 => lhs > rhs,
+                    _ => lhs <= rhs,
+                }
+            } else {
+                match kind {
+                    0x81..=0x83 => lhs == rhs,
+                    0x89..=0x8b => lhs != rhs,
+                    0x91..=0x93 => lhs >= rhs,
+                    0x99 | 0x9b => lhs < rhs,
+                    0xa1 => {
+                        if x & 128 == 0 {
+                            lhs & rhs == 0
+                        } else {
+                            lhs & rhs != 0
+                        }
+                    }
+                    0xa2 => lhs & rhs == 0,
+                    0xa3 => lhs & rhs != 0,
+                    0xc1 | 0xc3 => lhs > rhs,
+                    0xc9..=0xcb => lhs <= rhs,
+                    0xd1..=0xd3 => (lhs as i32) >= (rhs as i32),
+                    0xd9..=0xdb => (lhs as i32) < (rhs as i32),
+                    0xe1..=0xe3 => (lhs as i32) > (rhs as i32),
+                    _ => (lhs as i32) <= (rhs as i32),
+                }
             };
             next = cpu.conditional(test, x)?;
             op = "conditional_block";
@@ -761,7 +787,7 @@ pub(crate) fn execute(
                 next = next.wrapping_add((signed(x & 511, 9) * 2) as u32);
             }
             op = "branch_compare_immediate";
-        } else if matches!(h & 0xfff0, 0xee00 | 0xee80) && x & 0xe00 == 0x800 {
+        } else if matches!(h & 0xfff0, 0xed00 | 0xed80 | 0xee00 | 0xee80) && x & 0xe00 == 0x800 {
             let lhs = f32::from_bits(cpu.r[d]);
             let rhs = f32::from_bits(cpu.r[n]);
             if !lhs.is_finite() || !rhs.is_finite() {
@@ -775,7 +801,13 @@ pub(crate) fn execute(
                     },
                 });
             }
-            if if h & 0x80 == 0 { lhs > rhs } else { lhs <= rhs } {
+            let test = match h & 0xfff0 {
+                0xed00 => lhs >= rhs,
+                0xed80 => lhs < rhs,
+                0xee00 => lhs > rhs,
+                _ => lhs <= rhs,
+            };
+            if test {
                 next = next.wrapping_add((signed(x & 511, 9) * 2) as u32);
             }
             op = "branch_compare_float";

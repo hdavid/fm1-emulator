@@ -1541,6 +1541,30 @@ fn immediate_arithmetic_shift_extends_the_sign_in_mixer_interpolation() {
 }
 
 #[test]
+fn register_arithmetic_shift_preserves_the_synth_envelope_sign() {
+    // Stock 0x01C02028: r0 = r14 >>> r0. Capture the incoming count
+    // before replacing its aliased destination with the envelope value.
+    for (value, shift, expected) in [
+        (0x80000000, 0, 0x80000000),
+        (0x80000000, 1, 0xc0000000),
+        (0xfffff000, 12, u32::MAX),
+        (0x7fffffff, 31, 0),
+        (0x80000000, 31, u32::MAX),
+        (0x80000000, 32, u32::MAX),
+        (0x80000000, u32::MAX, u32::MAX),
+    ] {
+        let mut c = cpu(&[0xe1c8, 0x00e3]);
+        c.r[0] = shift;
+        c.r[14] = value;
+        c.sr[5] = 15;
+        c.step().unwrap();
+        assert_eq!(c.r[0], expected);
+        assert_eq!(c.r[14], value);
+        assert_eq!(c.sr[5], 15);
+    }
+}
+
+#[test]
 fn extended_halfword_load_separates_sign_extension_from_the_offset() {
     for (h, expected) in [(0xed51, 0xfedc), (0xed55, 0xfffffedc)] {
         let mut c = cpu(&[h, 0x120c]); // r1 = h[r0+300] (u/s)
@@ -1885,6 +1909,62 @@ fn floating_branches_match_the_fm1_994_capture_without_changing_psr() {
         c.r[1] = exceptional;
         assert!(c.step().is_err());
     }
+}
+
+#[test]
+fn floating_pitch_conditions_compare_values_instead_of_signed_bits() {
+    // Vendor r3 encodings from the stock voice pitch path. Negative floats
+    // distinguish float ordering from the signed-integer interpretation.
+    for (lhs, rhs, greater, greater_equal) in [
+        (0xc3000000, 0xc2fe0000, false, false), // -128 < -127
+        (0xc2fe0000, 0xc3000000, true, true),
+        (0xbf800000, 0xbf800000, false, true),
+        (0, 0x80000000, false, true),
+        (0x80000000, 0, false, true),
+        (0x42fe0000, 0x43000000, false, false), // 127 < 128
+        (0x43000000, 0x42fe0000, true, true),
+    ] {
+        for (h, taken) in [(0xed02, greater_equal), (0xed82, !greater_equal)] {
+            let mut c = cpu(&[h, 0x182a]); // iff (r1 >=/u< r2) goto 84
+            c.r[1] = lhs;
+            c.r[2] = rhs;
+            c.sr[5] = 15;
+            let registers = c.r;
+            c.step().unwrap();
+            assert_eq!(c.pc, XIP + if taken { 88 } else { 4 });
+            assert_eq!(c.r, registers);
+            assert_eq!(c.sr[5], 15);
+        }
+        for (h, taken) in [
+            (0xed11, greater_equal),
+            (0xed91, !greater_equal),
+            (0xee11, greater),
+            (0xee91, !greater),
+        ] {
+            let mut c = cpu(&[h, 0x0280, 0x2143, 0]); // iff (...) { r3=1 }
+            c.r[1] = lhs;
+            c.r[2] = rhs;
+            c.sr[5] = 15;
+            c.step().unwrap();
+            c.step().unwrap();
+            assert_eq!(c.r[3], u32::from(taken));
+            assert_eq!(c.r[1], lhs);
+            assert_eq!(c.r[2], rhs);
+            assert_eq!(c.sr[5], 15);
+            assert_eq!(c.pc, XIP + if taken { 6 } else { 8 });
+        }
+    }
+    for h in [0xed02, 0xed82, 0xed11, 0xed91, 0xee11, 0xee91] {
+        let mut c = cpu(&[h, if h & 0x10 == 0 { 0x182a } else { 0x0280 }]);
+        c.r[1] = 0x7fc00000;
+        assert!(c.step().is_err());
+    }
+    let mut c = cpu(&[0xed11, 0x0200, 0x2143, 0]); // integer mode: ifs
+    c.r[1] = 0xc3000000;
+    c.r[2] = 0xc2fe0000;
+    c.step().unwrap();
+    c.step().unwrap();
+    assert_eq!(c.r[3], 1); // Opposite ordering for signed integer bits.
 }
 
 #[test]
