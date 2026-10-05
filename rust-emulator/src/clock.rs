@@ -8,6 +8,8 @@ pub(crate) struct Clock {
     instruction_phase: u64,
     phase_hz: u32,
     issue_clock: Option<(u32, u32)>,
+    /// CPU clock cycles issued: one per instruction step of shared time.
+    cycles: u64,
 }
 impl Default for Clock {
     fn default() -> Self {
@@ -18,6 +20,7 @@ impl Default for Clock {
             instruction_phase: 0,
             phase_hz: 360_000_000,
             issue_clock: None,
+            cycles: 0,
         }
     }
 }
@@ -47,7 +50,11 @@ impl Clock {
         let sys = self.system_hz(clk_con3);
         sys / (((self.system[1] >> 16) & 3) + 1) / (((self.system[1] >> 8) & 7) + 1)
     }
+    pub(crate) fn cycles(&self) -> u64 {
+        self.cycles
+    }
     pub(crate) fn instruction_ticks(&mut self, clk_con3: u32) -> u32 {
+        self.cycles += 1;
         let hz = match self.issue_clock {
             Some((selector, hz)) if selector == clk_con3 => hz,
             _ => {
