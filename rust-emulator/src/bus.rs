@@ -35,6 +35,8 @@ pub struct Bus {
     cache: crate::cache::Cache,
     crc: crate::crc::Crc,
     clock: crate::clock::Clock,
+    /// Optional diagnostic counts of MMIO reads/writes by address.
+    pub mmio_stats: std::cell::RefCell<Option<std::collections::BTreeMap<u32, [u64; 2]>>>,
 }
 
 impl Bus {
@@ -64,6 +66,7 @@ impl Bus {
             cache: Default::default(),
             crc: Default::default(),
             clock: Default::default(),
+            mmio_stats: Default::default(),
         })
     }
 
@@ -78,6 +81,12 @@ impl Bus {
             size,
             operation,
             reason,
+        }
+    }
+
+    fn count_mmio(&self, address: u32, kind: usize) {
+        if let Some(stats) = self.mmio_stats.borrow_mut().as_mut() {
+            stats.entry(address).or_default()[kind] += 1;
         }
     }
 
@@ -128,6 +137,7 @@ impl Bus {
         } else if let Some(offset) = Self::offset(address, size, RAM, self.ram.len()) {
             &self.ram[offset..offset + size]
         } else {
+            self.count_mmio(address, 0);
             if let Some(value) = self.clock.read(address) {
                 return Ok(value);
             }
@@ -203,6 +213,9 @@ impl Bus {
 
     pub fn write(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
         Self::check(address, size, "write")?;
+        if Self::offset(address, size, RAM, self.ram.len()).is_none() {
+            self.count_mmio(address, 1);
+        }
         if self.clock.write(address, value).is_some() {
             return Ok(());
         }

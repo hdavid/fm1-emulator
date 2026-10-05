@@ -706,6 +706,23 @@ pub(crate) fn execute(
                 Some(address.wrapping_add(increment)),
             ));
             op = "word_postincrement_store";
+        } else if h == 0xecd8 && x & 3 == 0 {
+            // rD = [rS++=imm]: the load twin of the store above (Quarkslab
+            // "lw eregA, [eregB++=imm8]"). Word accesses have no signed
+            // indexed form, so x&3==0 is not [rS+rC]; the stock device table
+            // walk at 0x020347fc advances by 28 bytes this way.
+            let increment = (((x >> 8) & 15) << 4) | (x & 12);
+            let address = cpu.r[s];
+            mem = Some((
+                d,
+                s,
+                address,
+                4,
+                false,
+                false,
+                Some(address.wrapping_add(increment)),
+            ));
+            op = "word_postincrement_load";
         } else if matches!(h, 0xecd8 | 0xedd8 | 0xeed8) {
             let size = match h {
                 0xecd8 => 4,
