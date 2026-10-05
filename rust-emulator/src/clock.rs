@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Functional WL82 clock selectors/PLL configuration, not a PLL timing model.
-// Addresses: vendor WL82.h. Reset handoff: physical FM-1_982 clocks probe.
+// Addresses: vendor WL82.h. Reset handoff: physical FM-1_982/995 clocks probes.
 pub(crate) struct Clock {
     system: [u32; 4],
     pll: [u32; 4],
-    usb_phy: [u32; 3],
+    usb_phy: [u32; 6],
     instruction_phase: u64,
     phase_hz: u32,
 }
@@ -13,7 +13,7 @@ impl Default for Clock {
         Self {
             system: [0, 0x10200, 0x1c1, 2],
             pll: [0x45400203, 0x3f503026, 0x0940022b, 0x0750310c],
-            usb_phy: [0, 0x8881c3, 0],
+            usb_phy: [0, 0x8881c3, 0, 0, 0x6003f, 0],
             instruction_phase: 0,
             phase_hz: 360_000_000,
         }
@@ -65,7 +65,7 @@ impl Clock {
             0x10008 => Some(&self.system[1]),
             0x1000c => Some(&self.system[2]),
             0x10018 => Some(&self.system[3]),
-            0x16a00..=0x16a08 if a.is_multiple_of(4) => {
+            0x16a00..=0x16a14 if a.is_multiple_of(4) => {
                 Some(&self.usb_phy[((a - 0x16a00) / 4) as usize])
             }
             0x119a0..=0x119ac if a.is_multiple_of(4) => {
@@ -83,7 +83,7 @@ impl Clock {
             0x10008 => &mut self.system[1],
             0x1000c => &mut self.system[2],
             0x10018 => &mut self.system[3],
-            0x16a00..=0x16a08 if a.is_multiple_of(4) => {
+            0x16a00..=0x16a14 if a.is_multiple_of(4) => {
                 &mut self.usb_phy[((a - 0x16a00) / 4) as usize]
             }
             0x119a0..=0x119ac if a.is_multiple_of(4) => &mut self.pll[((a - 0x119a0) / 4) as usize],
@@ -97,6 +97,14 @@ impl Clock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn usb_phy_handoff_matches_the_fm1_995_capture() {
+        let c = Clock::default();
+        for (index, expected) in [0, 0x8881c3, 0, 0, 0x6003f, 0].into_iter().enumerate() {
+            assert_eq!(c.read(0x16a00 + index as u32 * 4), Some(expected));
+        }
+        assert_eq!(c.read(0x16a18), None);
+    }
     #[test]
     fn cpu_clock_retains_fractional_oscillator_time_when_clock_changes() {
         let mut c = Clock::default();
