@@ -19,6 +19,54 @@ fn cpu(bytes: &[u8]) -> Cpu {
 }
 
 #[test]
+fn cached_decoding_observes_both_changed_instruction_words_in_sram() {
+    let entry = RAM + 0x400;
+    let mut cpu = Cpu::new(Bus::new(vec![0; 8]).unwrap(), entry);
+    cpu.bus.write(entry, 0x4003e1e4, 4).unwrap(); // r4 = r4 * 3.
+    cpu.r[4] = 7;
+    cpu.step().unwrap();
+    assert_eq!(cpu.r[4], 21);
+
+    cpu.bus.write(entry + 2, 0x4005, 2).unwrap(); // Same PC/opcode, new immediate.
+    cpu.pc = entry;
+    cpu.r[4] = 7;
+    cpu.step().unwrap();
+    assert_eq!(cpu.r[4], 35);
+
+    cpu.bus.write(entry, 0xe0f4, 2).unwrap(); // Same PC/operand, now subtract.
+    cpu.pc = entry;
+    cpu.r[4] = 7;
+    cpu.step().unwrap();
+    assert_eq!(cpu.r[4], 2);
+
+    cpu.bus.write(entry, 0x1604, 2).unwrap(); // Replace wide instruction with r4 = r0.
+    cpu.pc = entry;
+    cpu.r[0] = 123;
+    cpu.step().unwrap();
+    assert_eq!(cpu.r[4], 123);
+    assert_eq!(cpu.pc, entry + 2);
+}
+
+#[test]
+fn cached_decoding_does_not_bypass_disabled_xip_or_unmapped_operands() {
+    let mut cpu = cpu(&0x4003e1e4u32.to_le_bytes());
+    cpu.r[4] = 7;
+    cpu.step().unwrap();
+    cpu.pc = XIP;
+    cpu.bus.write(0x40200, 0, 4).unwrap();
+    assert!(matches!(cpu.step(), Err(Fault::Access { .. })));
+    assert_eq!(cpu.r[4], 21);
+
+    let mut bus = Bus::new(vec![0; 8]).unwrap();
+    let last = RAM + RAM_SIZE as u32 - 2;
+    bus.write(last, 0xe1e4, 2).unwrap();
+    cpu = Cpu::new(bus, last);
+    cpu.r[4] = 7;
+    assert!(matches!(cpu.step(), Err(Fault::Access { .. })));
+    assert_eq!(cpu.r[4], 7);
+}
+
+#[test]
 fn elf_reconstructs_the_exact_flash_application() {
     let firmware = Firmware::load(&root().join("build/fm1-diag.elf")).unwrap();
     assert_eq!(

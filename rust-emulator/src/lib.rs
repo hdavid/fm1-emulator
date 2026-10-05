@@ -39,6 +39,7 @@ pub const NAMES: [&str; 12] = [
     "stack",
 ];
 
+mod decode;
 mod extended;
 
 pub mod system;

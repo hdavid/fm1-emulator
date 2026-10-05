@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Probe decodings mirror emu.py, checked against vendor objdump and the FM-1.
 // Startup-only additions use the pinned Quarkslab pi32v2 reference; see README.
+use crate::decode::{Cache as DecodeCache, First, Wide};
 use crate::{
     bus::{AccessFault, Bus},
     PROBE_RETURN, RESULT, USER_STACK,
@@ -153,6 +154,7 @@ struct Repeat {
 }
 
 pub struct Cpu {
+    decode: DecodeCache,
     pub bus: Bus,
     pub r: [u32; 16],
     pub sr: [u32; 16],
@@ -251,6 +253,7 @@ impl Cpu {
     }
     pub fn new(bus: Bus, entry: u32) -> Self {
         Self {
+            decode: DecodeCache::new(),
             bus,
             r: [0; 16],
             sr: [0; 16],
@@ -478,122 +481,139 @@ impl Cpu {
         }
     }
 
+    pub(crate) fn decoded_wide(&mut self, h: u32, x: u32) -> Wide {
+        self.decode.wide(h, x)
+    }
+
     fn execute(&mut self, h: u32) -> Result<&'static str, Fault> {
         let pc = self.pc;
         let a = (h & 7) as usize;
         let b = ((h >> 4) & 7) as usize;
         let mut next = pc.wrapping_add(2);
         let op;
-        if matches!(h & 0xfff0, 0xffc0 | 0xffe0) {
-            let value = self.read(pc + 2, 2)? | (self.read(pc + 4, 2)? << 16);
-            let n = (h & 15) as usize;
-            if h & 0xfff0 == 0xffc0 {
-                self.r[n] = value;
-                op = "mov_imm32";
-            } else if matches!(n, 0 | 12 | 13 | 14) {
-                self.sr[n] = value;
-                op = "stack_imm32";
-            } else {
-                return Err(Fault::Unsupported { pc, word: h as u16 });
+        match self.decode.first(h) {
+            First::MoveImmediate32 => {
+                let value = self.read(pc + 2, 2)? | (self.read(pc + 4, 2)? << 16);
+                let n = (h & 15) as usize;
+                if h & 0xfff0 == 0xffc0 {
+                    self.r[n] = value;
+                    op = "mov_imm32";
+                } else if matches!(n, 0 | 12 | 13 | 14) {
+                    self.sr[n] = value;
+                    op = "stack_imm32";
+                } else {
+                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                }
+                next = pc + 6;
             }
-            next = pc + 6;
-        } else if h & 0xff00 == 0x0300 {
-            if self.repeat.is_some() {
-                return Err(Fault::Unsupported { pc, word: h as u16 });
+            First::RepeatRegister => {
+                if self.repeat.is_some() {
+                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                }
+                let register = (h & 15) as usize;
+                let length = (((h >> 4) & 15) + 1) * 2;
+                let count = self.r[register];
+                if count == 0 {
+                    next = pc + 2 + length;
+                } else {
+                    // Measured on FM-1: 31 executes 31 times; 32 executes once
+                    // leaving 31; 63 executes 32 times leaving 31. Compiler loops
+                    // reissue REP until the remaining register count reaches zero.
+                    let iterations = if count < 32 { count } else { (count & 31) + 1 };
+                    self.repeat = Some(Repeat {
+                        start: pc + 2,
+                        end: pc + 2 + length,
+                        iterations,
+                        register: Some((register, count)),
+                    });
+                }
+                op = "repeat_register";
             }
-            let register = (h & 15) as usize;
-            let length = (((h >> 4) & 15) + 1) * 2;
-            let count = self.r[register];
-            if count == 0 {
-                next = pc + 2 + length;
-            } else {
-                // Measured on FM-1: 31 executes 31 times; 32 executes once
-                // leaving 31; 63 executes 32 times leaving 31. Compiler loops
-                // reissue REP until the remaining register count reaches zero.
-                let iterations = if count < 32 { count } else { (count & 31) + 1 };
+            First::RepeatImmediate => {
+                if self.repeat.is_some() {
+                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                }
+                let length = (((h >> 4) & 15) + 1) * 2;
+                let count = ((h >> 8) & 31) + 1;
                 self.repeat = Some(Repeat {
                     start: pc + 2,
                     end: pc + 2 + length,
-                    iterations,
-                    register: Some((register, count)),
+                    iterations: count,
+                    register: None,
                 });
+                op = "repeat_immediate";
             }
-            op = "repeat_register";
-        } else if h & 0xe00f == 0x8000 {
-            if self.repeat.is_some() {
-                return Err(Fault::Unsupported { pc, word: h as u16 });
-            }
-            let length = (((h >> 4) & 15) + 1) * 2;
-            let count = ((h >> 8) & 31) + 1;
-            self.repeat = Some(Repeat {
-                start: pc + 2,
-                end: pc + 2 + length,
-                iterations: count,
-                register: None,
-            });
-            op = "repeat_immediate";
-        } else if h == 0xe064 {
-            let extra = self.read(pc + 2, 2)?;
-            let reg = ((extra >> 12) & 15) as usize;
-            let special = ((extra >> 8) & 15) as usize;
-            // Deliberately exclude PC writes and unrecognized reserved encodings.
-            if special == 15 || !matches!(extra & 255, 0 | 128) {
-                return Err(Fault::Unsupported { pc, word: h as u16 });
-            }
-            if extra & 255 == 128 {
-                self.sr[special] = self.r[reg];
-                if special == 11 {
-                    self.interrupts_enabled = self.sr[11] & 0x200 != 0;
+            First::MovSpecial => {
+                let extra = self.read(pc + 2, 2)?;
+                let reg = ((extra >> 12) & 15) as usize;
+                let special = ((extra >> 8) & 15) as usize;
+                // Deliberately exclude PC writes and unrecognized reserved encodings.
+                if special == 15 || !matches!(extra & 255, 0 | 128) {
+                    return Err(Fault::Unsupported { pc, word: h as u16 });
                 }
-            } else {
-                self.r[reg] = self.sr[special];
+                if extra & 255 == 128 {
+                    self.sr[special] = self.r[reg];
+                    if special == 11 {
+                        self.interrupts_enabled = self.sr[11] & 0x200 != 0;
+                    }
+                } else {
+                    self.r[reg] = self.sr[special];
+                }
+                next = pc + 4;
+                op = "mov_special";
             }
-            next = pc + 4;
-            op = "mov_special";
-        } else if h == 0xe060 {
-            let extra = self.read(pc + 2, 2)?;
-            let mode = (extra >> 10) & 3;
-            if mode == 0 && extra & 0x0f00 > 0x0300 {
-                return Err(Fault::Unsupported { pc, word: h as u16 });
+            First::MovMask => {
+                let extra = self.read(pc + 2, 2)?;
+                let mode = (extra >> 10) & 3;
+                if mode == 0 && extra & 0x0f00 > 0x0300 {
+                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                }
+                self.r[((extra >> 12) & 15) as usize] = crate::extended::packed(extra);
+                next = pc + 4;
+                op = "mov_mask";
             }
-            self.r[((extra >> 12) & 15) as usize] = crate::extended::packed(extra);
-            next = pc + 4;
-            op = "mov_mask";
-        } else if h & 0xfff0 == 0xe040 {
-            self.r[(h & 15) as usize] = signed(self.read(pc + 2, 2)?, 16) as u32;
-            next = pc + 4;
-            op = "mov_imm16";
-        } else if h & 0xe0c0 == 0x2040 {
-            self.r[a] = (((h >> 3) & 7) << 5) | ((h >> 8) & 31);
-            op = "mov_imm8";
-        } else if h & 0xe0f8 == 0x2010 {
-            self.r[a] = 0xffff_ffe0 | ((h >> 8) & 31);
-            op = "mov_negative";
-        } else if h & 0xff00 == 0x1600 {
-            self.r[(h & 15) as usize] = self.r[((h >> 4) & 15) as usize];
-            op = "mov_reg";
-        } else if matches!(h & 0xfe00, 0x1c00 | 0x1e00) {
-            let c = (((h >> 7) & 3) * 2 + ((h >> 3) & 1)) as usize;
-            if h & 0xfe00 == 0x1e00 {
-                self.r[a] = self.arithmetic(self.r[b], self.r[c], true, 0);
-                op = "sub";
-            } else {
-                self.r[a] = self.arithmetic(self.r[b], self.r[c], false, 0);
-                op = "add";
+            First::MovImm16 => {
+                self.r[(h & 15) as usize] = signed(self.read(pc + 2, 2)?, 16) as u32;
+                next = pc + 4;
+                op = "mov_imm16";
             }
-        } else if h & 0xe0c0 == 0x20c0 {
-            let imm = signed((((h >> 3) & 7) << 5) | ((h >> 8) & 31), 8);
-            self.r[a] = self.arithmetic(self.r[a], imm as u32, false, 0);
-            op = "add_imm8";
-        } else if h & 0xe01f == 0x8002 {
-            let imm = (signed((h >> 5) & 7, 3) << 7) | (((h >> 8) & 31) << 2) as i32;
-            self.sr[14] = self.sr[14].wrapping_add(imm as u32);
-            op = "add_sp";
-        } else if h & 0xe088 == 0x8008 {
-            self.r[a] = self.arithmetic(self.r[b], (h >> 8) & 31, false, 0);
-            op = "add_small";
-        } else if matches!(h & 0xff88, 0x1900 | 0x1908 | 0x1980 | 0x1988) {
-            match h & 0xff88 {
+            First::MovImm8 => {
+                self.r[a] = (((h >> 3) & 7) << 5) | ((h >> 8) & 31);
+                op = "mov_imm8";
+            }
+            First::MovNegative => {
+                self.r[a] = 0xffff_ffe0 | ((h >> 8) & 31);
+                op = "mov_negative";
+            }
+            First::MovReg => {
+                self.r[(h & 15) as usize] = self.r[((h >> 4) & 15) as usize];
+                op = "mov_reg";
+            }
+            First::Arithmetic => {
+                let c = (((h >> 7) & 3) * 2 + ((h >> 3) & 1)) as usize;
+                if h & 0xfe00 == 0x1e00 {
+                    self.r[a] = self.arithmetic(self.r[b], self.r[c], true, 0);
+                    op = "sub";
+                } else {
+                    self.r[a] = self.arithmetic(self.r[b], self.r[c], false, 0);
+                    op = "add";
+                }
+            }
+            First::AddImm8 => {
+                let imm = signed((((h >> 3) & 7) << 5) | ((h >> 8) & 31), 8);
+                self.r[a] = self.arithmetic(self.r[a], imm as u32, false, 0);
+                op = "add_imm8";
+            }
+            First::AddSp => {
+                let imm = (signed((h >> 5) & 7, 3) << 7) | (((h >> 8) & 31) << 2) as i32;
+                self.sr[14] = self.sr[14].wrapping_add(imm as u32);
+                op = "add_sp";
+            }
+            First::AddSmall => {
+                self.r[a] = self.arithmetic(self.r[b], (h >> 8) & 31, false, 0);
+                op = "add_small";
+            }
+            First::Logic => match h & 0xff88 {
                 0x1900 => {
                     self.r[a] |= self.r[b];
                     op = "or";
@@ -610,223 +630,257 @@ impl Cpu {
                     self.r[a] = !self.r[b];
                     op = "not";
                 }
+            },
+            First::Asr => {
+                self.r[a] = ((self.r[b] as i32) >> ((h >> 8) & 31)) as u32;
+                op = "asr";
             }
-        } else if h & 0xe088 == 0xa088 {
-            self.r[a] = ((self.r[b] as i32) >> ((h >> 8) & 31)) as u32;
-            op = "asr";
-        } else if h & 0xe008 == 0xa000 {
-            let shift = (h >> 8) & 31;
-            if h & 0x80 != 0 {
-                self.r[a] = self.r[b] >> shift;
-                op = "lsr";
-            } else {
-                self.r[a] = self.r[b] << shift;
-                op = "lsl";
+            First::ShiftImmediate => {
+                let shift = (h >> 8) & 31;
+                if h & 0x80 != 0 {
+                    self.r[a] = self.r[b] >> shift;
+                    op = "lsr";
+                } else {
+                    self.r[a] = self.r[b] << shift;
+                    op = "lsl";
+                }
             }
-        } else if h & 0xe008 == 0x6000 {
-            let address = self.r[b].wrapping_add((signed((h >> 8) & 31, 5) * 4) as u32);
-            if h & 0x80 != 0 {
-                self.write(address, self.r[a])?;
-                op = "store32";
-            } else {
-                self.r[a] = self.read(address, 4)?;
-                op = "load32";
+            First::MemoryWord => {
+                let address = self.r[b].wrapping_add((signed((h >> 8) & 31, 5) * 4) as u32);
+                if h & 0x80 != 0 {
+                    self.write(address, self.r[a])?;
+                    op = "store32";
+                } else {
+                    self.r[a] = self.read(address, 4)?;
+                    op = "load32";
+                }
             }
-        } else if matches!(h, 0xe8d4 | 0xe8d5 | 0xe8d8 | 0xe8d9) {
-            let mask = self.read(pc + 2, 2)?;
-            next = pc + 4;
-            if h & 4 == 0 {
-                if h & 1 != 0 {
+            First::StackMask => {
+                let mask = self.read(pc + 2, 2)?;
+                next = pc + 4;
+                if h & 4 == 0 {
+                    if h & 1 != 0 {
+                        self.push(self.sr[3])?;
+                    }
+                    for n in (0..16).rev() {
+                        if mask & (1 << n) != 0 {
+                            self.push(self.r[n])?;
+                        }
+                    }
+                    op = "push_mask";
+                } else {
+                    for n in 0..16 {
+                        if mask & (1 << n) != 0 {
+                            self.r[n] = self.pop()?;
+                        }
+                    }
+                    if h & 1 != 0 {
+                        next = self.pop()?;
+                    }
+                    op = "pop_mask";
+                }
+            }
+            First::PushRegs => {
+                let boundary = (h & 15) as usize;
+                let range = if boundary < 4 {
+                    boundary..=3
+                } else {
+                    4..=boundary
+                };
+                for n in range.rev() {
+                    self.push(self.r[n])?;
+                }
+                op = "push_regs";
+            }
+            First::PopPc => {
+                next = self.pop()?;
+                op = "pop_pc";
+            }
+            First::PushRets => {
+                self.push(self.sr[3])?;
+                op = "push_rets";
+            }
+            First::PushReti => {
+                self.push(self.sr[0])?;
+                op = "push_reti";
+            }
+            First::PopReturnRegister => {
+                self.sr[if h == 0x0481 { 0 } else { 3 }] = self.pop()?;
+                op = "pop_return_register";
+            }
+            First::PopRegs => {
+                let boundary = (h & 15) as usize;
+                let range = if boundary < 4 {
+                    boundary..=3
+                } else {
+                    4..=boundary
+                };
+                for n in range {
+                    self.r[n] = self.pop()?;
+                }
+                op = "pop_regs";
+            }
+            First::PushRetsRegs => {
+                self.push(self.sr[3])?;
+                for n in (4..=(h & 15) as usize).rev() {
+                    self.push(self.r[n])?;
+                }
+                op = "push_rets_regs";
+            }
+            First::PopRetsRegs => {
+                for n in 4..=(h & 15) as usize {
+                    self.r[n] = self.pop()?;
+                }
+                self.sr[3] = self.pop()?;
+                op = "pop_rets_regs";
+            }
+            First::PopPcRegs => {
+                for n in 4..=(h & 15) as usize {
+                    self.r[n] = self.pop()?;
+                }
+                next = self.pop()?;
+                op = "pop_pc_regs";
+            }
+            First::MoveStackPointer => {
+                match h {
+                    0x1440 => self.sr[14] = self.sr[12],
+                    0x1441 => self.sr[14] = self.sr[13],
+                    0x1442 => self.sr[12] = self.sr[14],
+                    _ => self.sr[13] = self.sr[14],
+                }
+                op = "move_stack_pointer";
+            }
+            First::PushIrqFrame => {
+                self.push(self.sr[5])?;
+                if h != 0x04e1 {
                     self.push(self.sr[3])?;
                 }
-                for n in (0..16).rev() {
-                    if mask & (1 << n) != 0 {
-                        self.push(self.r[n])?;
-                    }
+                if h != 0x04e8 {
+                    self.push(self.sr[0])?;
                 }
-                op = "push_mask";
-            } else {
-                for n in 0..16 {
-                    if mask & (1 << n) != 0 {
-                        self.r[n] = self.pop()?;
-                    }
+                op = "push_irq_frame";
+            }
+            First::PopIrqFrame => {
+                if h != 0x04a8 {
+                    self.sr[0] = self.pop()?;
                 }
-                if h & 1 != 0 {
-                    next = self.pop()?;
+                if h != 0x04a1 {
+                    self.sr[3] = self.pop()?;
                 }
-                op = "pop_mask";
+                self.sr[5] = self.pop()?;
+                op = "pop_irq_frame";
             }
-        } else if h & 0xfff0 == 0x0460 {
-            let boundary = (h & 15) as usize;
-            let range = if boundary < 4 {
-                boundary..=3
-            } else {
-                4..=boundary
-            };
-            for n in range.rev() {
-                self.push(self.r[n])?;
+            First::CallRel32 => {
+                // Vendor startup uses a signed byte displacement after a 6-byte call.
+                let displacement = self.read(pc + 2, 2)? | (self.read(pc + 4, 2)? << 16);
+                self.sr[3] = pc + 6;
+                next = (pc + 6).wrapping_add(displacement);
+                op = "call_rel32";
             }
-            op = "push_regs";
-        } else if h == 0x0400 {
-            next = self.pop()?;
-            op = "pop_pc";
-        } else if h == 0x0410 {
-            self.push(self.sr[3])?;
-            op = "push_rets";
-        } else if h == 0x04c1 {
-            self.push(self.sr[0])?;
-            op = "push_reti";
-        } else if matches!(h, 0x0481 | 0x0488) {
-            self.sr[if h == 0x0481 { 0 } else { 3 }] = self.pop()?;
-            op = "pop_return_register";
-        } else if h & 0xfff0 == 0x0440 {
-            let boundary = (h & 15) as usize;
-            let range = if boundary < 4 {
-                boundary..=3
-            } else {
-                4..=boundary
-            };
-            for n in range {
-                self.r[n] = self.pop()?;
+            First::Relative22 => {
+                let displacement = signed(((h & 63) << 16) | self.read(pc + 2, 2)?, 22) * 2;
+                if h & 0xffc0 == 0xea80 {
+                    self.sr[3] = pc + 4;
+                    op = "call_rel22";
+                } else {
+                    op = "goto_rel22";
+                }
+                next = (pc + 4).wrapping_add(displacement as u32);
             }
-            op = "pop_regs";
-        } else if h & 0xfff0 == 0x0470 && h & 15 >= 4 {
-            self.push(self.sr[3])?;
-            for n in (4..=(h & 15) as usize).rev() {
-                self.push(self.r[n])?;
-            }
-            op = "push_rets_regs";
-        } else if h & 0xfff0 == 0x0430 && h & 15 >= 4 {
-            for n in 4..=(h & 15) as usize {
-                self.r[n] = self.pop()?;
-            }
-            self.sr[3] = self.pop()?;
-            op = "pop_rets_regs";
-        } else if h & 0xfff0 == 0x0450 && h & 15 >= 4 {
-            for n in 4..=(h & 15) as usize {
-                self.r[n] = self.pop()?;
-            }
-            next = self.pop()?;
-            op = "pop_pc_regs";
-        } else if matches!(h, 0x1440..=0x1443) {
-            match h {
-                0x1440 => self.sr[14] = self.sr[12],
-                0x1441 => self.sr[14] = self.sr[13],
-                0x1442 => self.sr[12] = self.sr[14],
-                _ => self.sr[13] = self.sr[14],
-            }
-            op = "move_stack_pointer";
-        } else if matches!(h, 0x04e1 | 0x04e8 | 0x04e9) {
-            self.push(self.sr[5])?;
-            if h != 0x04e1 {
-                self.push(self.sr[3])?;
-            }
-            if h != 0x04e8 {
-                self.push(self.sr[0])?;
-            }
-            op = "push_irq_frame";
-        } else if matches!(h, 0x04a1 | 0x04a8 | 0x04a9) {
-            if h != 0x04a8 {
-                self.sr[0] = self.pop()?;
-            }
-            if h != 0x04a1 {
-                self.sr[3] = self.pop()?;
-            }
-            self.sr[5] = self.pop()?;
-            op = "pop_irq_frame";
-        } else if h == 0xff80 {
-            // Vendor startup uses a signed byte displacement after a 6-byte call.
-            let displacement = self.read(pc + 2, 2)? | (self.read(pc + 4, 2)? << 16);
-            self.sr[3] = pc + 6;
-            next = (pc + 6).wrapping_add(displacement);
-            op = "call_rel32";
-        } else if matches!(h & 0xffc0, 0xea80 | 0xeac0) {
-            let displacement = signed(((h & 63) << 16) | self.read(pc + 2, 2)?, 22) * 2;
-            if h & 0xffc0 == 0xea80 {
-                self.sr[3] = pc + 4;
-                op = "call_rel22";
-            } else {
-                op = "goto_rel22";
-            }
-            next = (pc + 4).wrapping_add(displacement as u32);
-        } else if h & 0xe08f == 0x8001 {
-            // Vendor assembler's short relative call (signed 9-bit byte offset).
-            let displacement = signed((((h >> 4) & 7) << 6) | (((h >> 8) & 31) << 1), 9);
-            self.sr[3] = pc + 2;
-            next = (pc + 2).wrapping_add(displacement as u32);
-            op = "call_rel9";
-        } else if h & 0xe00c == 0x8004 {
-            let displacement = signed(
-                ((h & 3) << 10) | (((h >> 4) & 15) << 6) | (((h >> 8) & 31) << 1),
-                12,
-            );
-            next = (pc + 2).wrapping_add(displacement as u32);
-            op = "goto_rel12";
-        } else if h & 0xe008 == 0x4000 {
-            let displacement = signed((((h >> 4) & 7) << 6) | (((h >> 8) & 31) << 1), 9);
-            let nonzero = h & 0x80 != 0;
-            if (self.r[a] != 0) == nonzero {
+            First::CallRel9 => {
+                // Vendor assembler's short relative call (signed 9-bit byte offset).
+                let displacement = signed((((h >> 4) & 7) << 6) | (((h >> 8) & 31) << 1), 9);
+                self.sr[3] = pc + 2;
                 next = (pc + 2).wrapping_add(displacement as u32);
+                op = "call_rel9";
             }
-            op = if nonzero {
-                "branch_nonzero"
-            } else {
-                "branch_zero"
-            };
-        } else if h & 0xfff0 == 0x00b0 {
-            let address = self.r[(h & 15) as usize];
-            let old = self.read(address, 1)?;
-            self.bus
-                .write(address, 0xff, 1)
-                .map_err(|fault| Fault::Access { pc, fault })?;
-            // FM-1_982 physical probe: the old byte's low nibble is copied
-            // into the four PSR condition bits, not a comparison result.
-            self.sr[5] = (self.sr[5] & !15) | (old & 15);
-            op = "testset_byte";
-        } else if h == 0x0080 {
-            next = self.sr[3];
-            op = "return";
-        } else if h & 0xfff0 == 0x00c0 {
-            self.sr[3] = pc + 2;
-            next = self.r[(h & 15) as usize];
-            op = "call_reg";
-        } else if h == 0x0081 && self.in_interrupt {
-            next = self.sr[0];
-            self.sr[13] = self.sr[14];
-            self.sr[14] = self.sr[12];
-            self.in_interrupt = false;
-            self.predicate_skip = self.irq_predicate.take();
-            self.repeat = self.irq_repeat.take();
-            self.interrupts_enabled = true;
-            self.sr[11] = (self.sr[11] & !255) | 0x600;
-            op = "rti";
-        } else if h == 0x0060 {
-            self.interrupts_enabled = false;
-            self.sr[11] &= !0x200;
-            op = "cli";
-        } else if matches!(h, 0x0040 | 0x0041) {
-            // CPU bus ownership latch. With one executing core acquisition
-            // cannot contend; this does not replace the guest's memory locks.
-            self.bus_locked = h == 0x0041;
-            op = if self.bus_locked {
-                "lockset"
-            } else {
-                "lockclr"
-            };
-        } else if h == 0x0061 {
-            self.interrupts_enabled = true;
-            self.sr[11] |= 0x200;
-            op = "sti";
-        } else if h == 0x0001 {
-            self.idle = true;
-            op = "idle";
-        } else if h == 0x0020 || h == 0x0000 {
-            op = if h == 0x0020 { "csync" } else { "nop" };
-        } else if let Some((destination, name)) = crate::extended::execute(self, h, pc)? {
-            next = destination;
-            op = name;
-        } else {
-            return Err(Fault::Unsupported { pc, word: h as u16 });
+            First::GotoRel12 => {
+                let displacement = signed(
+                    ((h & 3) << 10) | (((h >> 4) & 15) << 6) | (((h >> 8) & 31) << 1),
+                    12,
+                );
+                next = (pc + 2).wrapping_add(displacement as u32);
+                op = "goto_rel12";
+            }
+            First::BranchZero => {
+                let displacement = signed((((h >> 4) & 7) << 6) | (((h >> 8) & 31) << 1), 9);
+                let nonzero = h & 0x80 != 0;
+                if (self.r[a] != 0) == nonzero {
+                    next = (pc + 2).wrapping_add(displacement as u32);
+                }
+                op = if nonzero {
+                    "branch_nonzero"
+                } else {
+                    "branch_zero"
+                };
+            }
+            First::TestsetByte => {
+                let address = self.r[(h & 15) as usize];
+                let old = self.read(address, 1)?;
+                self.bus
+                    .write(address, 0xff, 1)
+                    .map_err(|fault| Fault::Access { pc, fault })?;
+                // FM-1_982 physical probe: the old byte's low nibble is copied
+                // into the four PSR condition bits, not a comparison result.
+                self.sr[5] = (self.sr[5] & !15) | (old & 15);
+                op = "testset_byte";
+            }
+            First::Return => {
+                next = self.sr[3];
+                op = "return";
+            }
+            First::CallReg => {
+                self.sr[3] = pc + 2;
+                next = self.r[(h & 15) as usize];
+                op = "call_reg";
+            }
+            First::Rti if self.in_interrupt => {
+                next = self.sr[0];
+                self.sr[13] = self.sr[14];
+                self.sr[14] = self.sr[12];
+                self.in_interrupt = false;
+                self.predicate_skip = self.irq_predicate.take();
+                self.repeat = self.irq_repeat.take();
+                self.interrupts_enabled = true;
+                self.sr[11] = (self.sr[11] & !255) | 0x600;
+                op = "rti";
+            }
+            First::Cli => {
+                self.interrupts_enabled = false;
+                self.sr[11] &= !0x200;
+                op = "cli";
+            }
+            First::BusLock => {
+                // CPU bus ownership latch. With one executing core acquisition
+                // cannot contend; this does not replace the guest's memory locks.
+                self.bus_locked = h == 0x0041;
+                op = if self.bus_locked {
+                    "lockset"
+                } else {
+                    "lockclr"
+                };
+            }
+            First::Sti => {
+                self.interrupts_enabled = true;
+                self.sr[11] |= 0x200;
+                op = "sti";
+            }
+            First::Idle => {
+                self.idle = true;
+                op = "idle";
+            }
+            First::SyncOrNop => {
+                op = if h == 0x0020 { "csync" } else { "nop" };
+            }
+            First::Rti => return Err(Fault::Unsupported { pc, word: h as u16 }),
+            First::Extended(extended) => {
+                let Some((destination, name)) = crate::extended::execute(self, h, pc, extended)?
+                else {
+                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                };
+                next = destination;
+                op = name;
+            }
         }
         self.pc = next;
         Ok(op)
