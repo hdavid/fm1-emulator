@@ -193,6 +193,30 @@ register mappings were checked against the Apache-2.0
 [Quarkslab pi32v2 reference](https://github.com/quarkslab/ghidra-jieli/tree/e1bd0707874b77b759401555d24839ad43af1267/data/languages).
 New CPU/peripheral behavior needs separate hardware validation.
 
+## Instruction coverage scan
+
+`scripts/op-scan.sh` checks a firmware's code against the decoder without
+running it to each instruction. It disassembles the image with the vendor
+objdump (the JieLi toolchain in an amd64 Docker container, `-mattr=+fprev1`
+for the FPU), then `examples/op_scan` describes every listed instruction with
+`fm1_emu::describe` and executes it once on a scratch CPU:
+
+```sh
+rust-emulator/scripts/op-scan.sh --out /tmp/scan "$HOME/Downloads/FM-1.fwsc"
+rust-emulator/scripts/pi32-objdump.sh e868 12fc   # [r1+-4] += r2
+```
+
+The report groups by encoding the instructions the interpreter does not
+decode, rejects when executing, or gives another length or conditional skip
+length than objdump, and the reverse: words objdump cannot decode but the
+interpreter executes. For an ELF, code is what lies inside `STT_FUNC` symbols.
+Packages and raw images have no symbols, so the scan follows recursive descent
+from the entry, branch and call targets, jump tables and code pointers, and
+boots the image briefly to find the code startup copies to RAM. Against the
+ELFs of four SLOOP builds, every reachable instruction was an ELF instruction
+and reachability covered 99.5% of them. `examples/extract` writes the decoded
+application image of a package for offline disassembly.
+
 ## Agreed foundation checklist
 
 The completion criterion is five of these ten foundations exercised by booted
