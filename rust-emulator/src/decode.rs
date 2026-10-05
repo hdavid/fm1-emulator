@@ -29,6 +29,7 @@ pub(crate) enum Op {
     Shift,
     LoadStore32,
     BytePostIncrementRegister,
+    RotateRightImmediate,
     PushPopMask,
     PushRegs,
     PopPc,
@@ -358,6 +359,9 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         ShiftRegisterExtended
     } else if h == 0xeedc {
         BytePreincrement
+    } else if h == 0xe1c4 && (x >> 9) & 7 == 0 {
+        // "rD = rS <> n" in JieLi's objdump; x bit 11 is another form ("<c>").
+        RotateRightImmediate
     } else if h == 0xe1c0 && (x >> 10) & 3 != 1 {
         ShiftExtended
     } else if h == 0xe1d0 && (x >> 10) & 3 != 1 && x & 0x10f0 == 0 {

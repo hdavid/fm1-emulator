@@ -243,6 +243,13 @@ fn execute_wide(
                 _ => "memory_shift_arithmetic",
             };
         }
+        Op::RotateRightImmediate => {
+            // rD = rS rotated right by ((x >> 8) & 1) * 16 + (x & 15); 0 is 32
+            // (a full turn), as JieLi's objdump prints it.
+            let amount = ((x >> 8) & 1) * 16 + (x & 15);
+            cpu.r[d] = cpu.r[s].rotate_right(amount);
+            name = "rotate_right_immediate";
+        }
         Op::MemoryAddRegister => {
             let addr = cpu.r[d] + (x & 252);
             // x bits 0-1: 0 add, 2 sub (Quarkslab pi32v2; stock cbuf_read

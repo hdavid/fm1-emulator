@@ -764,3 +764,29 @@ fn byte_load_and_store_post_increment_by_a_register() {
     assert_eq!(c.bus.read(RAM + 0x41, 1).unwrap(), 0);
     assert_eq!(c.r[4], RAM + 0x41);
 }
+
+#[test]
+fn rotate_right_by_immediate() {
+    // Stock / Baud Girl 0x0201eaa8 (printf's length-letter switch): r0 = c - 'h';
+    // e1c4 0001; if (r0 > 9) ...; tbb [r0]. JieLi's objdump prints e1c4 0001 as
+    // "r0 = r0 <> 1" and decodes rD = x >> 12, rS = (x >> 4) & 15, amount =
+    // ((x >> 8) & 1) * 16 + (x & 15), 0 printed as 32. Right rotation is what
+    // makes the switch work: odd offsets become huge and fail the range check.
+    let mut c = cpu(&[0xe1c4, 0x0001]);
+    c.r[0] = 4; // 'l' - 'h'
+    c.step().unwrap();
+    assert_eq!(c.r[0], 2);
+    let mut c = cpu(&[0xe1c4, 0x0001]);
+    c.r[0] = 3; // 'k' - 'h': not a case
+    c.step().unwrap();
+    assert_eq!(c.r[0], 0x8000_0001);
+    let mut c = cpu(&[0xe1c4, 0x2101]); // r2 = r0 <> 17
+    c.r[0] = 0x0001_0000; // bit 16 rotated right by 17 lands on bit 31
+    c.step().unwrap();
+    assert_eq!(c.r[2], 0x8000_0000);
+    let mut c = cpu(&[0xe1c4, 0x0010]); // r0 = r1 <> 32
+    c.r[1] = 0x1234_5678;
+    c.step().unwrap();
+    assert_eq!(c.r[0], 0x1234_5678);
+    assert_eq!(c.pc, XIP + 4);
+}
