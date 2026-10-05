@@ -111,15 +111,15 @@ pub(crate) fn execute(
         let address = cpu.r[b].wrapping_add((signed((h >> 8) & 31, 5) * size as i32) as u32);
         mem = Some((a, b, address, size, h & 0x80 != 0, false, None));
         op = "memory_small";
-    } else if matches!(h & 0xff80, 0x0b80 | 0x0f80 | 0x1380) {
+    } else if matches!(h & 0xfc00, 0x0800 | 0x0c00 | 0x1000) {
         let store = h & 8 != 0;
         if !store && a == b {
             // Aliased load/writeback ordering needs hardware measurement.
             return Ok(None);
         }
-        let size = match h & 0xff80 {
-            0x0b80 => 4,
-            0x0f80 => 2,
+        let size = match h & 0xfc00 {
+            0x0800 => 4,
+            0x0c00 => 2,
             _ => 1,
         };
         let address = cpu.r[b];
@@ -130,9 +130,9 @@ pub(crate) fn execute(
             size,
             store,
             false,
-            Some(address.wrapping_add(cpu.r[15])),
+            Some(address.wrapping_add(cpu.r[8 + ((h >> 7) & 7) as usize])),
         ));
-        op = "memory_postincrement_r15";
+        op = "memory_postincrement_register";
     } else if (0x0500..0x0800).contains(&(h & 0xff80)) {
         let kind = (h >> 7) & 7;
         let size = match kind {
