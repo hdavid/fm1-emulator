@@ -1,11 +1,19 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
 set -eu
-if [ "$#" -ne 1 ]; then
-    echo 'usage: ./emulator <firmware.fwsc|application.elf|application.bin>' >&2
+usage() {
+    echo 'usage: ./emulator [--cpu-mhz N] <firmware.fwsc|application.elf|application.bin>' >&2
     echo 'example: ./emulator build/display/firmware.elf' >&2
     exit 2
-fi
+}
+cpu_mhz=
+while [ "$#" -gt 1 ]; do
+    case "$1" in
+        --cpu-mhz) cpu_mhz=$2; shift 2 ;;
+        *) usage ;;
+    esac
+done
+[ "$#" -eq 1 ] || usage
 case "$1" in
     /*) firmware=$1 ;;
     *) firmware=$PWD/$1 ;;
@@ -27,4 +35,4 @@ if [ "$(uname -s)" = Darwin ]; then
     fi
     binary="$app/MacOS/fm1-ui"
 fi
-exec "$binary" "$firmware"
+exec "$binary" ${cpu_mhz:+--cpu-mhz "$cpu_mhz"} "$firmware"
