@@ -51,7 +51,7 @@ fn timer5_prescaler_period_and_interrupt_masks() {
     assert_eq!(bus.devices.pending_irq(0x100), Some(63));
     bus.write(TIMER5, 0x4019, 4).unwrap();
     assert_eq!(bus.devices.pending_irq(0x100), None);
-    assert!(bus.write(TIMER5, 0x4029, 4).is_err());
+    assert!(bus.write(TIMER5, 0x4029, 4).is_ok());
     assert!(bus.write(TIMER5, 0x4005, 4).is_err());
     assert!(bus.write(TIMER5, 0, 1).is_err());
 }

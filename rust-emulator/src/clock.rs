@@ -16,6 +16,28 @@ impl Default for Clock {
     }
 }
 impl Clock {
+    // Vendor clock.c: CLK_CON3 selects the system PLL path; CLK_CON1
+    // divides it into HSB and LSB. Peripheral timers select LSB or OSC.
+    pub(crate) fn timer_hz(&self, clk_con3: u32) -> u32 {
+        let pll = (24_000_000 / (((self.pll[2] >> 2) & 31) + 2)) * ((self.pll[3] & 4095) + 2);
+        let sys = match clk_con3 & 15 {
+            source @ 0..=4 => {
+                let hz = [
+                    192_000_000,
+                    137_000_000,
+                    320_000_000,
+                    480_000_000,
+                    107_000_000,
+                ][source as usize];
+                hz / [1, 3, 5, 7][((clk_con3 >> 4) & 3) as usize]
+                    / [1, 2, 4, 8][((clk_con3 >> 6) & 3) as usize]
+            }
+            source @ 5..=7 => pll * 2 / [4, 3, 2][(source - 5) as usize],
+            8 => 192_000_000,
+            _ => 480_000_000,
+        };
+        sys / (((self.system[1] >> 16) & 3) + 1) / (((self.system[1] >> 8) & 7) + 1)
+    }
     fn register(&self, a: u32) -> Option<&u32> {
         match a {
             0x10200 => Some(&0x6f01), // Physical FM-1 chip revision, read-only.
@@ -49,5 +71,22 @@ impl Clock {
         };
         *r = v;
         Some(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn timer_clock_follows_pll_selection_and_both_bus_dividers() {
+        let mut c = Clock::default();
+        assert_eq!(c.timer_hz(6), 60_000_000);
+        assert_eq!(c.timer_hz(5), 45_000_000);
+        assert_eq!(c.timer_hz(7), 90_000_000);
+        c.write(0x10008, 0).unwrap();
+        assert_eq!(c.timer_hz(8), 192_000_000);
+        assert_eq!(c.timer_hz(3 | 1 << 4 | 2 << 6), 40_000_000);
+        c.write(0x10008, 1 << 16 | 3 << 8).unwrap();
+        assert_eq!(c.timer_hz(6), 45_000_000);
     }
 }

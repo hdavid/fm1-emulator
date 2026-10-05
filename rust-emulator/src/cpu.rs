@@ -357,7 +357,7 @@ impl Cpu {
             }
         }
         self.steps += 1;
-        self.bus.devices.advance(OSC_TICKS_PER_INSTRUCTION);
+        self.bus.advance_devices(OSC_TICKS_PER_INSTRUCTION);
         self.bus.advance_nor(OSC_TICKS_PER_INSTRUCTION);
         self.bus.advance_wireless(OSC_TICKS_PER_INSTRUCTION);
         self.bus

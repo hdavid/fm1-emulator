@@ -296,6 +296,11 @@ impl Bus {
     pub(crate) fn advance_wireless(&mut self, ticks: u32) {
         self.wireless.advance(ticks);
     }
+    pub(crate) fn advance_devices(&mut self, ticks: u32) {
+        let clk_con3 = self.audio.read(0x10014).unwrap();
+        self.devices
+            .advance_with_timer_clock(ticks, self.clock.timer_hz(clk_con3));
+    }
 
     pub fn advance_usb(&mut self, ticks: u32) -> Result<(), AccessFault> {
         self.usb

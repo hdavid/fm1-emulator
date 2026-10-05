@@ -144,8 +144,9 @@ impl Timer {
     fn write(&mut self, offset: u32, value: u32) -> Option<Result<(), &'static str>> {
         match offset {
             0 => {
-                // Only the source and dividers actually used by the FM-1 HAL.
-                if value & 3 > 1 || (value & 3 == 1 && (value & 12 != 8 || (value >> 4) & 15 > 1)) {
+                // Count mode, with LSB (0) or OSC (2) source. Edge capture
+                // and external clock inputs remain unsupported.
+                if value & 3 > 1 || (value & 3 == 1 && !matches!(value & 12, 0 | 8)) {
                     return Some(Err("unsupported timer clock source, mode, or divider"));
                 }
                 if value & (1 << 14) != 0 {
@@ -167,11 +168,24 @@ impl Timer {
     }
 
     pub fn advance(&mut self, oscillator_ticks: u32) {
+        self.advance_with_clock(oscillator_ticks, 60_000_000);
+    }
+
+    fn advance_with_clock(&mut self, oscillator_ticks: u32, peripheral_hz: u32) {
         if self.control & 3 != 1 {
             return;
         }
-        let divider = if (self.control >> 4) & 15 == 0 { 1 } else { 4 };
-        self.divider_phase += oscillator_ticks as u64;
+        // Vendor timer.c's non-monotonic 16-entry prescaler encoding.
+        let prescaler = [
+            1, 4, 16, 64, 2, 8, 32, 128, 256, 1024, 4096, 16384, 512, 2048, 8192, 32768,
+        ][((self.control >> 4) & 15) as usize];
+        let hz = if self.control & 12 == 8 {
+            24_000_000
+        } else {
+            peripheral_hz
+        };
+        let divider = 24_000_000 * prescaler as u64;
+        self.divider_phase += oscillator_ticks as u64 * hz as u64;
         let ticks = self.divider_phase / divider;
         self.divider_phase %= divider;
         let period = if self.period == u32::MAX {
@@ -326,12 +340,15 @@ impl Devices {
         }
     }
     pub fn advance(&mut self, ticks: u32) {
+        self.advance_with_timer_clock(ticks, 60_000_000);
+    }
+    pub(crate) fn advance_with_timer_clock(&mut self, ticks: u32, peripheral_hz: u32) {
         self.adc.advance(ticks);
         for timer in &mut self.startup_timers {
-            timer.advance(ticks);
+            timer.advance_with_clock(ticks, peripheral_hz);
         }
-        self.timer4.advance(ticks);
-        self.timer5.advance(ticks);
+        self.timer4.advance_with_clock(ticks, peripheral_hz);
+        self.timer5.advance_with_clock(ticks, peripheral_hz);
         self.tick.advance(ticks);
         self.tick_secondary.advance(ticks);
         self.rc_measurement.advance(ticks);
@@ -377,5 +394,45 @@ impl Devices {
     pub(crate) fn irq_priority_for(&self, source: usize, icfg: u32, core: usize) -> Option<u32> {
         let bits = self.irq_config[core][source >> 3] >> ((source & 7) * 4);
         (icfg & 0x100 != 0 && bits & 1 != 0).then_some((bits >> 1) & 7)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn peripheral_timer_accumulates_fractional_clock_ticks_across_rate_changes() {
+        let mut t = Timer::default();
+        t.write(8, 3).unwrap().unwrap();
+        t.write(0, 1).unwrap().unwrap();
+        t.advance_with_clock(7, 10_000_000);
+        assert_eq!(t.read(4), Some(2));
+        assert!(!t.pending);
+        t.advance_with_clock(1, 2_000_000);
+        assert_eq!(t.read(4), Some(0));
+        assert!(t.pending);
+        t.write(0, 0x4001).unwrap().unwrap();
+        assert!(!t.pending);
+    }
+    #[test]
+    fn all_timer_prescalers_count_without_losing_partial_periods() {
+        let mut t = Timer::default();
+        for (index, div) in [
+            1, 4, 16, 64, 2, 8, 32, 128, 256, 1024, 4096, 16384, 512, 2048, 8192, 32768,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            t.write(0, 0).unwrap().unwrap();
+            t.write(4, 0).unwrap().unwrap();
+            t.write(8, 2).unwrap().unwrap();
+            t.write(0, 0x4009 | (index as u32) << 4).unwrap().unwrap();
+            t.advance_with_clock(2 * div - 1, 60_000_000);
+            assert_eq!(t.read(4), Some(1));
+            assert!(!t.pending);
+            t.advance_with_clock(1, 60_000_000);
+            assert_eq!(t.read(4), Some(0));
+            assert!(t.pending);
+        }
     }
 }
