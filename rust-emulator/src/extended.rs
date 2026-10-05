@@ -538,9 +538,12 @@ fn execute_wide(
             };
             name = "logic_three";
         }
+        // Register lists transfer the lowest register at the base address and
+        // ascend (struct fields: Felucca's gr_grain_t {z, pos}, the stock
+        // linked-list nodes {next, prev}); the base register is unchanged.
         Op::StoreRegisterList => {
             let mut address = cpu.r[n];
-            for register in (0..16).rev() {
+            for register in 0..16 {
                 if x & (1 << register) != 0 {
                     cpu.write(address, cpu.r[register])?;
                     address = address.wrapping_add(4);
@@ -550,7 +553,7 @@ fn execute_wide(
         }
         Op::LoadRegisterList => {
             let mut address = cpu.r[n];
-            for register in (0..16).rev() {
+            for register in 0..16 {
                 if x & (1 << register) != 0 {
                     cpu.r[register] = cpu.read(address, 4)?;
                     address = address.wrapping_add(4);

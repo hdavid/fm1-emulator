@@ -186,3 +186,50 @@ fn register_shift_covers_both_left_forms_and_arithmetic_right() {
     c.step().unwrap();
     assert_eq!(c.r[2], 0xffff_ffff);
 }
+
+#[test]
+fn register_list_load_puts_the_lowest_register_at_the_base() {
+    // Felucca 0.9-beta 0x02011fcc (GRAIN, gr_run inlined): eb04 8004 loads
+    // g->z (offset 0) and g->pos (offset 4) of a gr_grain_t; the next
+    // instructions read z->n through r2. Descending order put pos in r2 and
+    // faulted on the read of [pos + 4].
+    let mut c = cpu(&[0xeb04, 0x8004]);
+    c.r[4] = RAM;
+    c.bus.write(RAM, 0x0201_2da4, 4).unwrap(); // z
+    c.bus.write(RAM + 4, 0x256c, 4).unwrap(); // pos
+    c.step().unwrap();
+    assert_eq!(c.r[2], 0x0201_2da4);
+    assert_eq!(c.r[15], 0x256c);
+    assert_eq!(c.r[4], RAM);
+    assert_eq!(c.pc, XIP + 4);
+}
+
+#[test]
+fn register_list_store_and_load_keep_stock_linked_lists_consistent() {
+    // Stock FM-1 0x02002284: list insertion before the head r1:
+    // 6112 r2 = [r1+4]; 6190 [r1+4] = r0; eb20 0006 {r1, r2} -> [r0];
+    // 60a0 [r2] = r0. Then 0x0201fb7a removes it again:
+    // eb00 0006 {r1, r2} <- [r0]; 6192 [r1+4] = r2; 60a1 [r2] = r1.
+    // Nodes are {next, prev}; the list starts as head <-> a.
+    let (head, a, node) = (RAM + 0x100, RAM + 0x180, RAM + 0x200);
+    let mut c = cpu(&[0x6112, 0x6190, 0xeb20, 0x0006, 0x60a0, 0xeb00, 0x0006, 0x6192, 0x60a1]);
+    for (at, value) in [(head, a), (head + 4, a), (a, head), (a + 4, head)] {
+        c.bus.write(at, value, 4).unwrap();
+    }
+    c.r[0] = node;
+    c.r[1] = head;
+    for _ in 0..4 {
+        c.step().unwrap();
+    }
+    // head <-> a <-> node <-> head
+    assert_eq!(c.bus.read(head + 4, 4).unwrap(), node); // head.prev
+    assert_eq!(c.bus.read(a, 4).unwrap(), node); // a.next
+    assert_eq!(c.bus.read(node, 4).unwrap(), head); // node.next
+    assert_eq!(c.bus.read(node + 4, 4).unwrap(), a); // node.prev
+    for _ in 0..3 {
+        c.step().unwrap();
+    }
+    for (at, value) in [(head, a), (head + 4, a), (a, head), (a + 4, head)] {
+        assert_eq!(c.bus.read(at, 4).unwrap(), value);
+    }
+}

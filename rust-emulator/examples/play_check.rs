@@ -4,7 +4,7 @@
 // Steps: run:SECONDS (guest time), turn:KNOB:DETENTS (SELECT ALGORITHM
 // PRESETS KNOB1..KNOB4), hold:ID,ID.. / release (matrix key ids, notes 14..40,
 // as fm1-ui's KEYMAP), png:PATH. Stops on a guest fault and prints the last
-// instructions with registers.
+// instructions with registers (PLAY_TRACE=N for the last N, default 40).
 #[path = "../src/ui_knobs.rs"]
 mod ui_knobs;
 use fm1_emu::{cpu::Cpu, firmware::Firmware, png};
@@ -23,6 +23,7 @@ struct Player {
     encoders: ui_knobs::Encoders,
     held: [bool; 41],
     recent: VecDeque<(u32, &'static str, [u32; 16])>,
+    trace: usize,
 }
 
 impl Player {
@@ -48,7 +49,7 @@ impl Player {
             let pc = self.cpu.pc;
             match self.cpu.step() {
                 Ok(op) => {
-                    if self.recent.len() == 40 {
+                    if self.recent.len() >= self.trace {
                         self.recent.pop_front();
                     }
                     self.recent.push_back((pc, op, self.cpu.r));
@@ -91,6 +92,7 @@ fn main() -> Result<(), String> {
         encoders: ui_knobs::Encoders::default(),
         held: [false; 41],
         recent: VecDeque::new(),
+        trace: env::var("PLAY_TRACE").ok().and_then(|v| v.parse().ok()).unwrap_or(40),
     };
     for step in steps {
         let parts: Vec<&str> = step.split(':').collect();
