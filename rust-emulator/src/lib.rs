@@ -13,6 +13,7 @@ pub mod gpio;
 pub mod lcd;
 mod package;
 mod shift_spi;
+mod simd;
 mod uart;
 mod wireless;
 

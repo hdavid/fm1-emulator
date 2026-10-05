@@ -145,6 +145,12 @@ pub(crate) enum Wide {
     Trigger,
     SaturateSigned16,
     MemoryIndexed,
+    HalfAddSubtract,
+    HalfMultiply,
+    HalfMultiplyWord,
+    Pack,
+    DualAddSubtract,
+    DualMultiply,
     Unknown,
 }
 
@@ -622,7 +628,27 @@ fn wide(h: u32, x: u32) -> Wide {
     if matches!(h, 0xecd8 | 0xedd8 | 0xeed8) {
         return Wide::MemoryIndexed;
     }
-    Wide::Unknown
+    simd(h, x)
+}
+
+/// The packed 16-bit forms of simd.rs: only the signed-saturating ones whose
+/// mode bits the vendor objdump prints (other bits stay unknown).
+fn simd(h: u32, x: u32) -> Wide {
+    if h == 0xe500 {
+        Wide::HalfAddSubtract
+    } else if matches!(h, 0xe541 | 0xe543) && x & 1 == 0 {
+        Wide::HalfMultiply
+    } else if matches!(h, 0xe551 | 0xe553) && x & 9 == 0 {
+        Wide::HalfMultiplyWord
+    } else if h == 0xe404 && x & 9 == 0 {
+        Wide::Pack
+    } else if h & 0xfff3 == 0xe511 {
+        Wide::DualAddSubtract
+    } else if h & 0xfff1 == 0xe561 && x & 12 == 0 {
+        Wide::DualMultiply
+    } else {
+        Wide::Unknown
+    }
 }
 
 static FIRST: OnceLock<Box<[First; 65536]>> = OnceLock::new();
