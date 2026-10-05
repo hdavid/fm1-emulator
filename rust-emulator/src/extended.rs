@@ -988,6 +988,16 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
             cpu.r[d] = value;
             name = "word_register_preincrement";
         }
+        Op::HalfwordRegisterPreincrementStore => {
+            // Vendor form: h[++rS=rC] = rD (x & 15 == 1) or = rD.h (3): the high half.
+            let address = cpu.r[s].wrapping_add(cpu.r[c]);
+            let value = if x & 2 != 0 { cpu.r[d] >> 16 } else { cpu.r[d] & 0xffff };
+            cpu.bus
+                .write(address, value, 2)
+                .map_err(|fault| Fault::Access { pc, fault })?;
+            cpu.r[s] = address;
+            name = "halfword_register_preincrement_store";
+        }
         Op::HalfwordRegisterPreincrement => {
             let address = cpu.r[s].wrapping_add(cpu.r[c]);
             let value = cpu.read(address, 2)?;

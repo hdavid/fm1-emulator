@@ -133,6 +133,7 @@ pub(crate) enum Op {
     WordRegisterPreincrementStore,
     WordRegisterPreincrement,
     HalfwordRegisterPreincrement,
+    HalfwordRegisterPreincrementStore,
     WordPostincrementStore,
     WordPostincrementLoad,
     MemoryIndexed,
@@ -442,6 +443,8 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         WordRegisterPreincrement
     } else if h == 0xeddc && matches!(x & 15, 0 | 2) {
         HalfwordRegisterPreincrement
+    } else if h == 0xeddc && matches!(x & 15, 1 | 3) {
+        HalfwordRegisterPreincrementStore
     } else if h == 0xecd8 && x & 3 == 1 {
         WordPostincrementStore
     } else if h == 0xecd8 && x & 3 == 0 {

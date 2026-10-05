@@ -622,6 +622,23 @@ fn halfword_register_preincrement_reads_signed_lookup_values() {
 }
 
 #[test]
+fn halfword_register_preincrement_stores_the_low_or_high_half() {
+    // Vendor objdump: eddc 4651 is h[++r5=r6] = r4, eddc 4653 is h[++r5=r6] = r4.h
+    // (SLOOP's sequencer event ring, PC 0x02002e86 of sloop-plus).
+    for (x, expected) in [(0x4651u16, 0x5678u32), (0x4653, 0x1234)] {
+        let mut c = cpu(&[0xeddc, x]);
+        c.r[5] = 6;
+        c.r[6] = RAM;
+        c.r[4] = 0x1234_5678;
+        c.bus.write(RAM + 4, 0xaaaa_aaaa, 4).unwrap();
+        c.step().unwrap();
+        assert_eq!(c.r[5], RAM + 6);
+        assert_eq!(c.bus.read(RAM + 6, 2).unwrap(), expected);
+        assert_eq!(c.bus.read(RAM + 4, 2).unwrap(), 0xaaaa); // the neighbour untouched
+    }
+}
+
+#[test]
 fn memory_shift_scales_the_stereo_output_word() {
     let mut c = cpu(&[0xe86c, 0x3704]); // [r3+4] <<= 7
     c.r[3] = RAM;
