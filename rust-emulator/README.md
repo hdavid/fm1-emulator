@@ -74,6 +74,31 @@ scripts/make-ui-sidecar.sh ~/GitHub/sloop v2.2 ~/GitHub/fm1-firmware/sloop-2.2.f
 - Requests with a Host other than 127.0.0.1 / localhost / [::1] on that port,
   and WebSocket Origins other than those, are refused (DNS rebinding).
 
+### USB audio host (UAC1) and interrupt nesting
+
+For firmware with USB audio (SLOOP `feat/usb-audio`, `FELUCCA_USB_AUDIO=1`; Melodee's layout),
+`usb.enable_audio_host(alt)` (alt 1 = 16 bit, 2 = 24 bit) makes the host model a USB audio host as
+well (and a MIDI host): it reads the whole configuration, checks it as a UAC1 class driver would
+(`usb_audio.rs`: structure, IADs, AC headers and terminals, type I formats, isochronous endpoints,
+explicit feedback), selects the alternate on every streaming interface, sets and reads the sampling
+rate (SET_CUR with its OUT data stage, GET_CUR), then every 1 ms frame (`usb_audio_host.rs`) takes
+the capture IN packet and the 10.14 feedback the device armed (an isochronous IN waits for its
+frame; nothing armed counts as a missed frame), and sends a playback OUT packet sized by the
+feedback from `audio_mut().play_queue` (silence when empty; a packet into a buffer the device still
+owns is lost and counted). Captured samples are in `audio().capture`; `usb_audio::wav_bytes` writes
+WAVs. Without the audio host nothing changes (the iso deferral is off), and a configuration without
+a CDC interface no longer stops the plain host.
+
+These builds let TIMER5 (USB service) preempt the audio render: `cpu.nested_irqs = true`
+(`FM1_NESTED_IRQ=1` for `diagnose`, `play_check`, `fm1-ui`) lets an interrupt of a higher priority
+than the running handler's enter once that handler re-enabled interrupts (`sti`); the preempted
+handler's source, priority level and block state are kept, the stack stays the system stack. Off by
+default; the Felucca / Jangada / SLOOP 2.2 baselines are the same with it on (they never re-enable
+interrupts inside a handler). Tests: `tests/usb_audio.rs`, `tests/usb_audio_host.rs` (a scripted
+device), `tests/timers.rs` (nesting), and with a build's ELF `tests/usb_audio_firmware.rs`
+(`USB_AUDIO_ELF=.../felucca.elf`, `--ignored`): stems equal the firmware's mix taps, DAC = mix +
+playback, no ring under/overruns, USB-MIDI SysEx alongside.
+
 The UI reads only the panel's 240×240 framebuffer, gated by display enable,
 sleep, and active-low PA2 backlight. There are no symbol-specific drawing hooks
 or substituted application functions. SPI1 commands and SRAM DMA implement
@@ -238,7 +263,7 @@ not a percentage of complete instruction-set or musical-feature coverage.
 | CPU | Guest executes real vendor machine code; twelve probe words match hardware | Further ISA forms, flags and independent instruction probes |
 | Memory/startup | ELF equals raw flash image; guest copies data and RAM code, clears dirty BSS, executes RAM code | ROM/SPL, reset retention, boot parameters |
 | Timers | Guest sees TIMER4 progress; TIMER5 produces a periodic event | Other sources/dividers and measured cycle timing |
-| Interrupts | IRQ63/ALNK11 vectors, masking, SSP handler frame, acknowledgment, `rti`, priority selection | Nested priorities, other IRQs, physical entry-state validation |
+| Interrupts | IRQ63/ALNK11 vectors, masking, SSP handler frame, acknowledgment, `rti`, priority selection; optional nesting by priority after `sti` (`nested_irqs`) | Physical validation of nesting and of the entry state (is IE cleared on entry?), other IRQs |
 | Controls | Guest scans eleven columns; released/pressed and multiple-key cases agree | Scheduled events and UI encoder input |
 | Flash | Startup JEDEC/status/NOR reads; plain XIP shares physical NOR storage | Erase/program, persistence, XIP busy behavior |
 | LCD | Display guest initializes SPI/DMA, draws RGB565 pixels and live timer/key data | Other controller modes, SPI timing, pixel-exact physical comparison |

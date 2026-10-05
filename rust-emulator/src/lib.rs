@@ -57,5 +57,7 @@ mod guards;
 mod nor;
 
 pub mod usb;
+pub mod usb_audio;
+pub mod usb_audio_host;
 pub mod usb_midi;
 pub mod web;

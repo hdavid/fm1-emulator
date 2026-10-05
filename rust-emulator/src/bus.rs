@@ -652,6 +652,11 @@ impl Bus {
             let offset = self.usb.setup_address().wrapping_sub(RAM) as usize;
             self.code.invalidate_ram(offset, 8);
         }
+        for (address, length) in self.usb.take_dma_writes() {
+            // ...or control OUT data, an isochronous audio OUT packet.
+            self.code
+                .invalidate_ram(address.wrapping_sub(RAM) as usize, length);
+        }
         if self.usb.midi_rx_packets() != midi_rx {
             // ...or a bulk OUT packet of USB-MIDI events.
             let (address, length) = self.usb.midi_last_rx();
