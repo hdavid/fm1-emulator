@@ -347,6 +347,29 @@ fn long_multiply_accumulate_adds_the_product_to_the_pair() {
 }
 
 #[test]
+fn memory_shift_high_form_sign_extends_ten_bit_rf_fields() {
+    // FM-1_093 btctrler at 0x0205d304: each word of the record at r1 gets
+    // bits 24-31 (e1a0 4c20) and 22-23 (e1a4 0b08) from RF registers, then
+    // e86d 1602 / 1607 = [r1+0] >>= 22 (logical) / [r1+4] >>= 22
+    // (arithmetic). h bit 0 is bit 4 of the shift amount (16 + 6); x bits
+    // 0-1 select the shift as in e1c8. e86c keeps amounts 0-15: Felucca's
+    // audio_block `out[2i + 1] <<= OUT_SHIFT` (7) is e86c 3704.
+    let mut c = cpu(&[0xe86d, 0x1602, 0xe86d, 0x1607, 0xe86c, 0x3704]);
+    c.r[1] = RAM;
+    c.r[3] = RAM + 0x40;
+    c.bus.write(RAM, 0xffc0_0000, 4).unwrap();
+    c.bus.write(RAM + 4, 0xffc0_0000, 4).unwrap();
+    c.bus.write(RAM + 0x44, 3, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM, 4).unwrap(), 0x3ff);
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 4, 4).unwrap(), 0xffff_ffff);
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x44, 4).unwrap(), 3 << 7);
+    assert_eq!(c.pc, XIP + 12);
+}
+
+#[test]
 fn register_repeat_with_a_zero_count_skips_its_block() {
     let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);
     c.r[1] = RAM;

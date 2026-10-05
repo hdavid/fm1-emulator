@@ -215,13 +215,25 @@ fn execute_wide(
             name = "branch_register_mask";
         }
         Op::MemoryShift => {
+            // [rD + off] shifted by an immediate: c plus h bit 0 as bit 4
+            // (btctrler 0x0205d304: e86d 1607 = [r1+4] >>= 22, arithmetic,
+            // sign-extending a 10-bit field built at bits 22-31). Mode in x
+            // bits 0-1: 0 left, 2 logical right, 3 arithmetic right.
             let address = cpu.r[d].wrapping_add(x & 252);
+            let shift = ((h & 1) << 4) | c as u32;
             let value = cpu.read(address, 4)?;
-            cpu.write(address, if x & 2 == 0 { value << c } else { value >> c })?;
-            name = if x & 2 == 0 {
-                "memory_shift_left"
-            } else {
-                "memory_shift_right"
+            cpu.write(
+                address,
+                match x & 3 {
+                    0 => value << shift,
+                    2 => value >> shift,
+                    _ => ((value as i32) >> shift) as u32,
+                },
+            )?;
+            name = match x & 3 {
+                0 => "memory_shift_left",
+                2 => "memory_shift_right",
+                _ => "memory_shift_arithmetic",
             };
         }
         Op::MemoryAddRegister => {

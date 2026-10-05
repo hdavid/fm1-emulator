@@ -294,7 +294,7 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
     use Op::*;
     if matches!(h & 0xff00, 0xfa00 | 0xfb00) {
         BranchRegisterMask
-    } else if h == 0xe86c && matches!(x & 3, 0 | 2) {
+    } else if matches!(h, 0xe86c | 0xe86d) && matches!(x & 3, 0 | 2 | 3) {
         MemoryShift
     } else if h == 0xe868 {
         MemoryAddRegister
