@@ -238,7 +238,7 @@ impl Cpu {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn read(&self, address: u32, size: usize) -> Step<u32> {
         self.bus
             .read(address, size)
@@ -536,12 +536,18 @@ impl Cpu {
 
     /// A code halfword after the instruction word: the decode cache's copy
     /// when it has one, otherwise a bus read (with the bus's faults).
-    #[inline]
+    #[inline(always)]
     pub(crate) fn operand(&self, known: Option<u16>, address: u32) -> Step<u32> {
         match known {
             Some(value) => Ok(value as u32),
-            None => self.read(address, 2),
+            None => self.operand_read(address),
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn operand_read(&self, address: u32) -> Step<u32> {
+        self.read(address, 2)
     }
 
     /// Execute the instruction word `h` at `self.pc`, classified as `op`.
