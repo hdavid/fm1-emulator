@@ -61,7 +61,7 @@ and Baud Girl results.
 
 ## Still to implement
 
-- [ ] Broaden JIT coverage and execute native blocks in batches for larger speed gains.
+- [ ] Execute native blocks in batches, then broaden JIT coverage; see the [performance plan](rust-emulator/PERFORMANCE.md).
 - [ ] Remaining CPU instructions, peripherals and firmware UI paths.
 - [ ] Host audio playback, rotary controls and USB MIDI.
 - [ ] Flash persistence, plus fuller encryption, interrupt and timing behavior.

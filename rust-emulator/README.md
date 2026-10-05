@@ -75,6 +75,9 @@ prepared interpretation if allocation is denied. Broader translation and native
 block batching remain performance work; this initial backend does not yet provide
 a substantial whole-firmware speedup.
 
+The [performance TODOs](PERFORMANCE.md) record the current measurements and the
+remaining batching, validation and profiling work.
+
 `build/display/firmware.elf` is the 17,056-byte FM-1_981 hardware application.
 It uses Felucca-derived startup, watchdog, recovery, input scanning, USB CDC and
 MIDI updater code. `firmware/display.S` draws labels, a buffered TIMER4 readout
