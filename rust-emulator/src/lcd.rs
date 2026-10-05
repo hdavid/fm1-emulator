@@ -3,6 +3,9 @@
 // Transfers complete synchronously; SPI baud timing and panel refresh are not modeled.
 pub const SPI: u32 = 0x11d00;
 pub const IOMAP: u32 = 0x51020;
+/// SPI1 interrupt source (Felucca fm1_irq.h FM1_IRQ_SPI1).
+pub const IRQ: usize = 16;
+const LSB_PER_OSC: u64 = 4;
 pub const WIDTH: usize = 240;
 pub const HEIGHT: usize = 240;
 /// ST7789V frame memory rows (240 x 320). Which 240 rows the FM-1 glass
@@ -30,6 +33,8 @@ pub struct Lcd {
     bgr: bool,
     registers: [u32; 5],
     iomap: u32,
+    /// lsb ticks until an interrupt-mode transfer completes (see write).
+    busy: u64,
 }
 
 impl Default for Lcd {
@@ -50,6 +55,7 @@ impl Default for Lcd {
             bgr: false,
             registers: [0; 5],
             iomap: 0,
+            busy: 0,
         }
     }
 }
@@ -71,6 +77,11 @@ impl Lcd {
         let mut all = self.pixels.clone();
         all.extend_from_slice(&self.offscreen);
         all
+    }
+
+    /// SPI1 interrupt request: pending (bit 15) with IE (bit 13).
+    pub fn pending_irq(&self) -> bool {
+        self.registers[0] & 0xa000 == 0xa000
     }
 
     pub fn dma_address(&self) -> u32 {
@@ -103,7 +114,9 @@ impl Lcd {
         if index != 2 && index != 4 {
             return Ok(());
         }
-        if self.registers[0] & 0x3fff != 0x21 || self.iomap & 0x10 == 0 {
+        // CON 0x21 (Felucca HAL) or 0x2021: the stock driver also sets bit
+        // 13, the interrupt enable (same layout as its SPI2 CON 0x6020).
+        if self.registers[0] & 0x1fff != 0x21 || self.iomap & 0x10 == 0 {
             return Err("unsupported LCD SPI configuration or pin routing");
         }
         if selected {
@@ -115,8 +128,35 @@ impl Lcd {
                 }
             }
         }
-        self.registers[0] |= 0x8000;
+        if self.registers[0] & 0x2000 != 0 {
+            // Interrupt mode (stock CON 0x2021): pending, and with it IRQ 16,
+            // comes after the shift time, bytes * 8 * (BAUD + 1) lsb ticks,
+            // with lsb_clk ASSUMED to be 4x the oscillator (as spi2.rs).
+            // The stock driver chains the next DMA from the interrupt, so
+            // instant completion kept the CPU in the handler until a queue
+            // lock overflowed (FreeRTOS assert at 0x0205a1fa). Polled mode
+            // (Felucca) keeps completing at once, as before.
+            let bytes = if index == 2 { 1 } else { dma.len() as u64 };
+            self.busy = (bytes * 8 * ((self.registers[1] & 0xff) as u64 + 1)).max(1);
+        } else {
+            self.registers[0] |= 0x8000;
+        }
         Ok(())
+    }
+
+    pub(crate) fn ticks_to_event(&self) -> Option<u64> {
+        (self.busy != 0).then(|| self.busy.div_ceil(LSB_PER_OSC))
+    }
+
+    /// Advance by oscillator ticks; a finished transfer sets pending.
+    pub fn advance(&mut self, ticks: u32) {
+        if self.busy == 0 {
+            return;
+        }
+        self.busy = self.busy.saturating_sub(ticks as u64 * LSB_PER_OSC);
+        if self.busy == 0 {
+            self.registers[0] |= 0x8000;
+        }
     }
 
     fn transfer(&mut self, byte: u8, data: bool) -> Result<(), &'static str> {

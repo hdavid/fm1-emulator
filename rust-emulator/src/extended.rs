@@ -28,13 +28,7 @@ fn unsupported(pc: u32, h: u32) -> Box<Fault> {
 /// Execute an extended.rs form; returns the next PC and records the form's
 /// name in the CPU.
 #[inline(always)]
-pub(crate) fn execute(
-    cpu: &mut Cpu,
-    op: Op,
-    h: u32,
-    pc: u32,
-    code: Operands,
-) -> Step<u32> {
+pub(crate) fn execute(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<u32> {
     let a = (h & 7) as usize;
     let b = ((h >> 4) & 7) as usize;
     let mut mem = None;
@@ -198,13 +192,7 @@ fn access(cpu: &mut Cpu, pc: u32, mem: Option<Memory>) -> Step<()> {
 
 /// Execute a 32- or 48-bit form; the extension halfword is already known.
 #[inline(always)]
-fn execute_wide(
-    cpu: &mut Cpu,
-    op: Op,
-    h: u32,
-    pc: u32,
-    code: Operands,
-) -> Step<u32> {
+fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<u32> {
     let x = cpu.operand(code.x, pc + 2)?;
     let n = (h & 15) as usize;
     let d = (x >> 12) as usize;
@@ -591,15 +579,24 @@ fn execute_wide(
             name = "shift_pair_register";
         }
         Op::FloatOp => {
-            // e53f, x = d c s op on IEEE single bits: rD = rS op rC with
-            // 0 add, 1 sub, 2 mul, 3 div (SDK rx_net_samples_avg: sum / n),
-            // 5 min, 6 max (clamp pairs), 7 rD += rS*rC, 8 rD -= rS*rC
-            // (stock complex multiply at 0x0208bd30). Op 15 is unary on rC
-            // with the sub-operation in s: 8 (float)i32, 9 (float)u32,
-            // 1 (i32) truncation. Rounding of 7/8 (fused or not), NaN
-            // ordering in min/max and conversion saturation are unverified.
+            // e53f, x = d c s op on IEEE single bits (JieLi objdump
+            // --mattr=+fprev1): rD = rS op rC with 0 add, 1 sub, 2 mul,
+            // 3 div, 5 fmin, 6 fmax, 7 rD += rS*rC, 8 rD -= rS*rC. Op 15 is
+            // unary on rC with the sub-operation in s: 0-3 ftoi and 4-7 ftou
+            // (round to even/trunc/ceil/floor), 8 itof, 9 utof, 10 rD.l =
+            // ftof(rC) (to binary16), 11 rD = ftof(rC.l) (from binary16),
+            // 12-15 round to an integral float (even/trunc/ceil/floor).
+            // Unverified: fused or separate rounding for 7/8, NaN handling
+            // and out-of-range conversion results (Rust saturates).
+            // Op 4 (fcmp) is not decoded: its flag results are unknown.
             let fl = |v: u32| f32::from_bits(v);
             let (a, b) = (fl(cpu.r[s]), fl(cpu.r[c]));
+            let round = |v: f32, mode: u32| match mode & 3 {
+                0 => v.round_ties_even(),
+                1 => v.trunc(),
+                2 => v.ceil(),
+                _ => v.floor(),
+            };
             cpu.r[d] = match x & 15 {
                 0 => (a + b).to_bits(),
                 1 => (a - b).to_bits(),
@@ -609,10 +606,14 @@ fn execute_wide(
                 6 => a.max(b).to_bits(),
                 7 => (fl(cpu.r[d]) + a * b).to_bits(),
                 8 => (fl(cpu.r[d]) - a * b).to_bits(),
-                _ => match (x >> 4) & 15 {
+                _ => match s {
+                    0..=3 => round(b, s as u32) as i32 as u32,
+                    4..=7 => round(b, s as u32) as u32,
                     8 => (cpu.r[c] as i32 as f32).to_bits(),
                     9 => (cpu.r[c] as f32).to_bits(),
-                    _ => b as i32 as u32,
+                    10 => (cpu.r[d] & 0xffff_0000) | u32::from(f32_to_f16(b)),
+                    11 => f16_to_f32(cpu.r[c] as u16).to_bits(),
+                    _ => round(b, s as u32).to_bits(),
                 },
             };
             name = "float_op";
@@ -889,20 +890,24 @@ fn execute_wide(
         Op::BranchCompareRegister => {
             let lhs = cpu.r[d];
             let rhs = cpu.r[n];
-            // x bit 11 compares IEEE singles. Inferred: every use (stock
-            // 0x02021d3c after e53f e120; SDK libVolcEngineRTCLite.a, e.g.
-            // ee02 1801 after e53f 2202 in rtp_packet_history) follows FPU
-            // code, and the integer-only Felucca/SLOOP/Jangada code never
-            // sets it. NaN and signed-zero behaviour are unverified.
+            // x bit 11 (bit 10 clear) compares IEEE singles: JieLi objdump
+            // prints these as iff (...), e.g. ee81 e8a5 = iff (r14 u<= r1).
             let float = if x & 0x800 != 0 {
                 let (a, b) = (f32::from_bits(lhs), f32::from_bits(rhs));
+                // JieLi objdump: e800 ==, e880 u!=, e900 u>=, e980 <,
+                // ec00 u>, ec80 <=, ed00 >=, ed80 u<, ee00 >, ee80 u<=
+                // (u: also taken when unordered, i.e. a NaN operand).
                 Some(match h & 0xfff0 {
                     0xe800 => a == b,
                     0xe880 => a != b,
+                    0xe900 => !(a < b),
+                    0xe980 => a < b,
+                    0xec00 => !(a <= b),
+                    0xec80 => a <= b,
                     0xed00 => a >= b,
-                    0xed80 => a < b,
+                    0xed80 => !(a >= b),
                     0xee00 => a > b,
-                    _ => a <= b,
+                    _ => !(a > b),
                 })
             } else {
                 None
@@ -1042,4 +1047,52 @@ fn execute_wide(
     access(cpu, pc, mem)?;
     cpu.name = name;
     Ok(next)
+}
+
+/// IEEE binary32 -> binary16, round to nearest even (vendor ftof to .l).
+fn f32_to_f16(v: f32) -> u16 {
+    let bits = v.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xff) as i32;
+    let mant = bits & 0x7f_ffff;
+    if exp == 0xff {
+        return sign | 0x7c00 | if mant != 0 { 0x200 } else { 0 };
+    }
+    let e = exp - 127 + 15;
+    if e >= 31 {
+        return sign | 0x7c00;
+    }
+    if e <= 0 {
+        if e < -10 {
+            return sign;
+        }
+        let m = mant | 0x80_0000;
+        let shift = (14 - e) as u32;
+        let half = m >> shift;
+        let rest = m & ((1 << shift) - 1);
+        let mid = 1 << (shift - 1);
+        let round = rest > mid || (rest == mid && half & 1 != 0);
+        return sign | (half + u32::from(round)) as u16;
+    }
+    let half = ((e as u32) << 10) | (mant >> 13);
+    let rest = mant & 0x1fff;
+    let round = rest > 0x1000 || (rest == 0x1000 && half & 1 != 0);
+    sign | (half + u32::from(round)) as u16
+}
+
+/// IEEE binary16 -> binary32 (exact).
+fn f16_to_f32(h: u16) -> f32 {
+    let sign = ((h as u32) & 0x8000) << 16;
+    let exp = ((h >> 10) & 31) as u32;
+    let mant = (h & 0x3ff) as u32;
+    let bits = match (exp, mant) {
+        (0, 0) => sign,
+        (0, m) => {
+            let v = m as f32 / 1024.0 / 16384.0;
+            return if sign != 0 { -v } else { v };
+        }
+        (31, m) => sign | 0x7f80_0000 | (m << 13),
+        (e, m) => sign | ((e + 112) << 23) | (m << 13),
+    };
+    f32::from_bits(bits)
 }

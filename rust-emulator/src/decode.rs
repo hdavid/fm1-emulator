@@ -372,10 +372,7 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         // As e1c8 (amount in rC, mode in bits 0-1) on the pair rD+1:rD;
         // only the even-pair, zero-source forms seen in the stock image.
         ShiftPairRegister
-    } else if h == 0xe53f
-        && (matches!(x & 15, 0 | 1 | 2 | 3 | 5 | 6 | 7 | 8)
-            || matches!(x & 255, 0x1f | 0x8f | 0x9f))
-    {
+    } else if h == 0xe53f && (matches!(x & 15, 0 | 1 | 2 | 3 | 5 | 6 | 7 | 8) || x & 15 == 15) {
         // Single-precision FPU (SDK -mfprev1); only the operations whose
         // meaning the stock image and SDK objects show.
         FloatOp
@@ -426,12 +423,7 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
     } else if matches!(
         h & 0xfff0,
         0xe800 | 0xe880 | 0xe900 | 0xe980 | 0xec00 | 0xec80 | 0xed00 | 0xed80 | 0xee00 | 0xee80
-    ) && (x & 0xe00 == 0
-        || (x & 0xe00 == 0x800
-            && matches!(
-                h & 0xfff0,
-                0xe800 | 0xe880 | 0xed00 | 0xed80 | 0xee00 | 0xee80
-            )))
+    ) && (x & 0xe00 == 0 || x & 0xc00 == 0x800)
     {
         // x bit 11: float compare (only the equality and signed kinds).
         BranchCompareRegister

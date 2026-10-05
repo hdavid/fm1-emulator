@@ -527,7 +527,19 @@ fn float_compare_branch_orders_singles() {
     // FM-1_093 0x02021d3c: ee81 e8a5 = if (r14 <= r1) goto +0x14a, float
     // (x bit 11), with r14 = 0.192f and r1 = 1.0f from the e53f add before.
     // Negative operands show the float ordering (integer order would invert).
-    for (r14, r1, taken) in [(0.192f32, 1.0f32, true), (2.0, 1.0, false), (-2.0, -1.0, true)] {
+    // JieLi objdump: ee81 e8a5 = iff (r14 u<= r1) goto 330: a NaN operand
+    // (unordered) also takes it; e801 2804 = iff (r2 == r1) does not.
+    let mut c = cpu(&[0xe801, 0x2804]);
+    c.r[2] = f32::NAN.to_bits();
+    c.r[1] = f32::NAN.to_bits();
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 4);
+    for (r14, r1, taken) in [
+        (0.192f32, 1.0f32, true),
+        (2.0, 1.0, false),
+        (-2.0, -1.0, true),
+        (f32::NAN, 1.0, true),
+    ] {
         let mut c = cpu(&[0xee81, 0xe8a5]);
         c.r[14] = r14.to_bits();
         c.r[1] = r1.to_bits();
@@ -543,6 +555,46 @@ fn idle_hint_continues_with_the_next_instruction() {
     let mut c = cpu(&[0x0001, 0x0000]);
     assert_eq!(c.step().unwrap(), "idle");
     assert_eq!(c.pc, XIP + 2);
+}
+
+#[test]
+fn float_to_integer_conversions_follow_the_vendor_rounding_modes() {
+    // JieLi objdump --mattr=+fprev1: e53f 0f12..3f12 = r1 = ftoi(r2)
+    // (even/trunc/ceil/floor), 4f..7f = ftou(...), cf..ff = r1 = ftof(r2)
+    // (even/trunc/ceil/floor). FM-1_093 0x0201e4a4: e53f 5f22 =
+    // r2 = ftou(r2) (trunc) after r2 = r2 + 0.5f.
+    let cases: [(u16, f32, u32); 12] = [
+        (0x120f, 2.5, 2),
+        (0x121f, -2.7, (-2i32) as u32),
+        (0x122f, -2.3, (-2i32) as u32),
+        (0x123f, -2.3, (-3i32) as u32),
+        (0x124f, 3.5, 4),
+        (0x125f, 7.9, 7),
+        (0x126f, 7.1, 8),
+        (0x127f, 7.9, 7),
+        (0x12cf, 2.5, 2.0f32.to_bits()),
+        (0x12df, -2.7, (-2.0f32).to_bits()),
+        (0x12ef, 2.1, 3.0f32.to_bits()),
+        (0x12ff, -2.1, (-3.0f32).to_bits()),
+    ];
+    for (x, input, expected) in cases {
+        let mut c = cpu(&[0xe53f, x]);
+        c.r[2] = input.to_bits();
+        c.step().unwrap();
+        assert_eq!(c.r[1], expected, "e53f {x:04x} on {input}");
+    }
+}
+
+#[test]
+fn half_precision_conversions_use_the_low_halfword() {
+    // objdump: e53f af12 = r1.l = ftof(r2); e53f bf12 = r1 = ftof(r2.l).
+    let mut c = cpu(&[0xe53f, 0x12af, 0xe53f, 0x31bf]);
+    c.r[1] = 0xabcd_0000;
+    c.r[2] = 1.5f32.to_bits();
+    c.step().unwrap();
+    assert_eq!(c.r[1], 0xabcd_3e00); // 1.5 as binary16 in the low half
+    c.step().unwrap(); // r3 = ftof(r1.l)
+    assert_eq!(c.r[3], 1.5f32.to_bits());
 }
 
 #[test]

@@ -198,6 +198,12 @@ fn run() -> Result<(), String> {
             cpu.bus.uart1.tx_dma_bytes
         );
     }
+    if cpu.bus.husb.accesses > 0 {
+        eprintln!(
+            "STUB HS USB (nothing attached): {} register writes",
+            cpu.bus.husb.accesses
+        );
+    }
     if cpu.bus.spi2.transfers > 0 {
         eprintln!(
             "STUB SPI2 (no device): {} transfers",
@@ -275,6 +281,23 @@ fn run() -> Result<(), String> {
                     .collect();
                 eprintln!("  {:08x}: {}", address + line, bytes.join(" "));
             }
+        }
+    }
+    // Optional: FM1_DUMPW=ADDRESS:WORDS[,...] dumps 32-bit words (for MMIO
+    // that only accepts word reads).
+    if let Ok(requests) = env::var("FM1_DUMPW") {
+        for request in requests.split(',') {
+            let (address, count) = request.split_once(':').ok_or("FM1_DUMPW needs A:N")?;
+            let address = u32::from_str_radix(address.trim_start_matches("0x"), 16)
+                .map_err(|_| "invalid FM1_DUMPW address")?;
+            let count: u32 = count.parse().map_err(|_| "invalid FM1_DUMPW count")?;
+            let words: Vec<_> = (0..count)
+                .map(|i| match cpu.bus.read(address + 4 * i, 4) {
+                    Ok(word) => format!("{word:08x}"),
+                    Err(_) => "????????".into(),
+                })
+                .collect();
+            eprintln!("  {address:08x}: {}", words.join(" "));
         }
     }
     // Optional: FM1_RAM=PATH saves all guest SRAM for offline inspection.
