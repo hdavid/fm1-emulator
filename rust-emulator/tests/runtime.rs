@@ -59,7 +59,10 @@ fn stock_can_disable_the_unused_high_speed_usb_controller() {
     let mut c = cpu(&[0]);
     c.bus.write(0x16800, 0, 4).unwrap();
     assert_eq!(c.bus.read(0x16800, 4).unwrap(), 0);
-    assert!(c.bus.write(0x16800, 1, 4).is_err());
+    // STUB (husb.rs): enabling (bits 0-1) reports ready in bit 4, as the
+    // stock usb id 1 init at 0x02006f64 polls for.
+    c.bus.write(0x16800, 3, 4).unwrap();
+    assert_eq!(c.bus.read(0x16800, 4).unwrap(), 0x13);
 }
 
 #[test]

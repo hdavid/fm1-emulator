@@ -95,7 +95,10 @@ mod lock_tests {
         assert_eq!(batched.run_steps(40).err(), single_fault);
         assert!(single_fault.is_some());
         assert_eq!(single.steps, 11);
-        assert_eq!((batched.pc, batched.r, batched.steps), (single.pc, single.r, single.steps));
+        assert_eq!(
+            (batched.pc, batched.r, batched.steps),
+            (single.pc, single.r, single.steps)
+        );
     }
 
     #[test]
@@ -393,13 +396,7 @@ impl Cpu {
     /// A parallel bundle at `pc`: the following slot, then the primary slot
     /// (word `h`, classified as `op`), both reading the incoming registers.
     #[inline(never)]
-    fn execute_bundle(
-        &mut self,
-        pc: u32,
-        h: u32,
-        op: Op,
-        code: Operands,
-    ) -> Step<()> {
+    fn execute_bundle(&mut self, pc: u32, h: u32, op: Op, code: Operands) -> Step<()> {
         let length = if h >> 13 == 6 { 2 } else { 4 };
         self.pc = pc + length;
         let (following, following_op, following_code) = self.following()?;
@@ -473,6 +470,7 @@ impl Cpu {
             .advance_audio(OSC_TICKS_PER_INSTRUCTION)
             .map_err(|fault| Fault::Access { pc, fault })?;
         self.bus.spi2.advance(OSC_TICKS_PER_INSTRUCTION);
+        self.bus.lcd.advance(OSC_TICKS_PER_INSTRUCTION);
         Ok(())
     }
 
@@ -1094,7 +1092,9 @@ impl Cpu {
         }
         let mut values = [0; 12];
         for (i, value) in values.iter_mut().enumerate() {
-            *value = self.read(RESULT + i as u32 * 4, 4).map_err(|fault| *fault)?;
+            *value = self
+                .read(RESULT + i as u32 * 4, 4)
+                .map_err(|fault| *fault)?;
         }
         Ok(values)
     }

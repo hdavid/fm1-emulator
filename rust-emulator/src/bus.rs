@@ -44,6 +44,7 @@ pub struct Bus {
     pub radio: crate::radio::Radio,
     pub spi2: crate::spi2::Spi2,
     pub uart1: crate::uart1::Uart1,
+    pub husb: crate::husb::Husb,
     code: crate::code_cache::CodeCache,
     /// NOR generation the code cache was last synchronized with.
     nor_generation: u64,
@@ -96,6 +97,7 @@ impl Bus {
             radio: Default::default(),
             spi2: Default::default(),
             uart1: Default::default(),
+            husb: Default::default(),
             code: Default::default(),
             nor_generation: 0,
             mmio_stats: Default::default(),
@@ -239,6 +241,9 @@ impl Bus {
             }
             if crate::uart1::Uart1::contains(address) {
                 return Ok(self.uart1.read(address, size));
+            }
+            if crate::husb::Husb::contains(address) {
+                return Ok(self.husb.read(address, size));
             }
             if crate::spi2::Spi2::contains(address) {
                 return if size == 4 && address.is_multiple_of(4) {
@@ -459,6 +464,7 @@ impl Bus {
         self.advance_usb(ticks)?;
         self.advance_audio(ticks)?;
         self.spi2.advance(ticks);
+        self.lcd.advance(ticks);
         Ok(())
     }
 
@@ -471,6 +477,7 @@ impl Bus {
             self.usb.ticks_to_event(),
             self.audio.ticks_to_event(),
             self.spi2.ticks_to_event(),
+            self.lcd.ticks_to_event(),
         ]
         .into_iter()
         .flatten()
@@ -499,6 +506,10 @@ impl Bus {
         }
         if crate::uart1::Uart1::contains(address) {
             self.uart1.write(address, value, size);
+            return Ok(());
+        }
+        if crate::husb::Husb::contains(address) {
+            self.husb.write(address, value, size);
             return Ok(());
         }
         if crate::spi2::Spi2::contains(address) {
@@ -661,7 +672,10 @@ impl Bus {
     /// `pending_irq_for` returns None for every core and configuration.
     #[inline(always)]
     pub(crate) fn any_irq_pending(&self) -> bool {
-        self.devices.any_pending() || self.audio.pending_irq() || self.spi2.pending_irq()
+        self.devices.any_pending()
+            || self.audio.pending_irq()
+            || self.spi2.pending_irq()
+            || self.lcd.pending_irq()
     }
 
     pub fn pending_irq(&self, icfg: u32) -> Option<usize> {
@@ -684,6 +698,7 @@ impl Bus {
         for (source, pending) in [
             (crate::audio::IRQ, self.audio.pending_irq()),
             (crate::spi2::IRQ, self.spi2.pending_irq()),
+            (crate::lcd::IRQ, self.lcd.pending_irq()),
         ] {
             if !pending {
                 continue;

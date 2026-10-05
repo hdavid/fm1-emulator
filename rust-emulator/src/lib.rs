@@ -11,15 +11,16 @@ mod decode;
 pub mod devices;
 pub mod firmware;
 pub mod gpio;
+pub mod husb;
 pub mod lcd;
 mod package;
 pub mod player;
 pub mod png;
 pub mod radio;
-pub mod spi2;
-pub mod uart1;
 mod resample;
 mod rng;
+pub mod spi2;
+pub mod uart1;
 pub mod ui_knobs;
 
 pub const XIP: u32 = 0x0200_0120;
