@@ -297,7 +297,7 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         BranchRegisterMask
     } else if matches!(h, 0xe86c | 0xe86d) && matches!(x & 3, 0 | 2 | 3) {
         MemoryShift
-    } else if h == 0xe868 {
+    } else if h == 0xe868 && matches!(x & 3, 0 | 2) {
         MemoryAddRegister
     } else if h & 0xfff8 == 0xed50 || h & 0xfff8 == 0xed58 {
         HalfwordExtended

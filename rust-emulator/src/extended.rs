@@ -238,8 +238,22 @@ fn execute_wide(
         }
         Op::MemoryAddRegister => {
             let addr = cpu.r[d] + (x & 252);
-            cpu.write(addr, cpu.read(addr, 4)?.wrapping_add(cpu.r[c]))?;
-            name = "memory_add_register";
+            // x bits 0-1: 0 add, 2 sub (Quarkslab pi32v2; stock cbuf_read
+            // does data_len -= n with e868 6c1a).
+            let old = cpu.read(addr, 4)?;
+            cpu.write(
+                addr,
+                if x & 2 == 0 {
+                    old.wrapping_add(cpu.r[c])
+                } else {
+                    old.wrapping_sub(cpu.r[c])
+                },
+            )?;
+            name = if x & 2 == 0 {
+                "memory_add_register"
+            } else {
+                "memory_sub_register"
+            };
         }
         Op::HalfwordExtended => {
             let store = x & 1 != 0;

@@ -503,6 +503,26 @@ fn special_register_frame_without_rets_saves_psr_and_reti() {
 }
 
 #[test]
+fn memory_register_add_mode_two_subtracts() {
+    // FM-1_093 cbuf_read at 0x0202834e: e868 6c1a; e868 6c16 =
+    // cbuf->data_len -= n; cbuf->tmp_len -= n (SDK circular_buf.h:
+    // tmp_len at +0x14, data_len at +0x18; Quarkslab pi32v2: 0x868 with
+    // imm1617 = 2 is sub). Adding made the btstack task re-read the same
+    // HCI message forever, starving usr_app_task (and the LCD).
+    let mut c = cpu(&[0xe868, 0x6c1a, 0xe868, 0x6c16, 0xe868, 0x6c18]);
+    c.r[6] = RAM;
+    c.r[12] = 4;
+    c.bus.write(RAM + 0x18, 0x2c, 4).unwrap();
+    c.bus.write(RAM + 0x14, 0x30, 4).unwrap();
+    c.step().unwrap();
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x18, 4).unwrap(), 0x28);
+    assert_eq!(c.bus.read(RAM + 0x14, 4).unwrap(), 0x2c);
+    c.step().unwrap(); // mode 0 still adds
+    assert_eq!(c.bus.read(RAM + 0x18, 4).unwrap(), 0x2c);
+}
+
+#[test]
 fn register_repeat_with_a_zero_count_skips_its_block() {
     let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);
     c.r[1] = RAM;
