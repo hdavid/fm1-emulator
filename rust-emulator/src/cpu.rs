@@ -164,6 +164,10 @@ pub struct Cpu {
     pub steps: u64,
     pub interrupts_enabled: bool,
     pub irq_entries: u64,
+    /// CPU exceptions (vector 1) entered.
+    pub exception_entries: u64,
+    /// The PC of an instruction that raised a CPU exception in this step.
+    exception: Option<u32>,
     in_interrupt: bool,
     predicate_skip: Option<(u32, u32)>,
     irq_predicate: Option<(u32, u32)>,
@@ -268,6 +272,8 @@ impl Cpu {
             steps: 0,
             interrupts_enabled: false,
             irq_entries: 0,
+            exception_entries: 0,
+            exception: None,
             in_interrupt: false,
             predicate_skip: None,
             irq_predicate: None,
@@ -417,6 +423,9 @@ impl Cpu {
                 }
             }
         };
+        if let Some(at) = self.exception.take() {
+            self.enter_exception(at)?;
+        }
         // FM-1_988: conditional bundles finish and skip their unselected
         // arm before a pending interrupt can enter.
         if let Some((at, end)) = self.predicate_skip {
@@ -905,6 +914,64 @@ impl Cpu {
         }
         self.pc = next;
         Ok(op)
+    }
+
+    /// A divide by zero at `pc`. With EMU_CON bit 2 set (vendor debug.c
+    /// debug_init sets BIT(2); emu_msg bit 2 is "div0_err") it latches
+    /// EMU_MSG bit 2 and returns true: the instruction leaves its
+    /// destination unwritten and vector 1 is entered after it.
+    pub(crate) fn divide_by_zero(&mut self, pc: u32) -> Result<bool, Fault> {
+        let core = self.sr[6] as usize;
+        if self.bus.emu_con(core) & 4 == 0 {
+            return Ok(false);
+        }
+        self.bus.raise_emu_msg(core, 4);
+        self.exception = Some(pc);
+        Ok(true)
+    }
+
+    /// Enter the CPU exception (source 1, vendor IRQ_EXCEPTION_IDX) raised
+    /// by the instruction at `at`. It is synchronous: unlike an interrupt
+    /// it does not wait for a handler, a repeat or a conditional block to
+    /// end (X0X's float divide-by-zero crash on hardware was inside its
+    /// audio interrupt). reti holds the faulting instruction, which the
+    /// SDK's exception report prints as the crash address; whether the
+    /// hardware stores it or the next PC is unmeasured. ICFG takes the
+    /// FM-1_989 interrupt-entry layout.
+    fn enter_exception(&mut self, at: u32) -> Result<(), Fault> {
+        const SOURCE: usize = 1;
+        let core = self.sr[6] as usize;
+        let Some(priority) = self.bus.devices.irq_priority_for(SOURCE, self.sr[11], core) else {
+            return Err(Fault::Access {
+                pc: at,
+                fault: AccessFault {
+                    address: at,
+                    size: 4,
+                    operation: "divide-by-zero exception",
+                    reason: "exception vector 1 is not enabled; undelivered entry is unmeasured",
+                },
+            });
+        };
+        let handler = self.read(0x01c7_fe00 + SOURCE as u32 * 4, 4)?;
+        self.bus
+            .fetch(handler)
+            .map_err(|fault| Fault::Access { pc: at, fault })?;
+        self.sr[0] = at;
+        if !self.in_interrupt {
+            self.sr[12] = self.sr[14];
+            self.sr[14] = self.sr[13];
+        }
+        self.pc = handler;
+        self.sr[11] = (self.sr[11] & !0x077f04ff)
+            | ((SOURCE as u32) << 16)
+            | (priority << 24)
+            | (1 << priority);
+        self.in_interrupt = true;
+        self.idle = false;
+        self.irq_predicate = self.predicate_skip.take();
+        self.irq_repeat = self.repeat.take();
+        self.exception_entries += 1;
+        Ok(())
     }
 
     fn dispatch_interrupt(&mut self) -> Result<(), Fault> {
