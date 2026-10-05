@@ -256,3 +256,32 @@ The guest's last result is `0x0050F00D`. See `build/foundation/verification.txt`
 
 Current suite: 65 ordinary Rust tests and an opt-in full Felucca test pass.
 See `build/display/verification.txt` for the display milestone and limitations.
+
+## Scripted playback and profiling
+
+`examples/play_check` replays what a user does at the panel, headless and
+deterministic, through `fm1_emu::player` (the same key matrix and encoder
+model as the window):
+
+```sh
+cargo run --release --example play_check -- FIRMWARE.fwsc \
+  run:4 hold:18,20,22 level:1 release turn:PRESETS:2 run:1 png:after.png
+```
+
+Steps: `run:SECONDS` of guest time, `hold:ID,ID` and `release` for matrix
+keys (notes are 14..40), `turn:KNOB:DETENTS`, `level:SECONDS` (RMS and peak
+of the guest output), `wav:SECONDS:PATH` (the exact 24-bit samples),
+`png:PATH`, `words:ADDRESS:N` and `halves:ADDRESS:N`. A guest fault prints
+the last instructions with their registers (`PLAY_TRACE=N`). `FM1_CPU_MHZ=N`
+sets the instruction clock.
+
+`FM1_HOT=N` counts every primary-core instruction by PC and reports the top
+N functions, using the sized `STT_FUNC` symbols of `FM1_ELF` (or an `.elf`
+next to the firmware), then the hot address ranges (loop bodies) inside
+them; `hot:on`, `hot:off` and `hot:print` limit it to part of a session,
+`peek:SYMBOL:WORDS` reads guest variables, and `FM1_HOT_DUMP=FILE` writes
+every executed PC with its count. Counts are instructions, not cycles.
+
+`examples/preset_sweep FIRMWARE OUT_DIR` clicks PRESETS through every preset,
+plays a chord on each and reports silent presets and guest faults; a fault
+reboots and continues from the next preset.
