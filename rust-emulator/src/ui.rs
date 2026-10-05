@@ -472,7 +472,9 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::new(Emulator::new(PathBuf::from(path))))
+            let app = Emulator::new(PathBuf::from(path));
+            app.worker.read_stdin();
+            Ok(Box::new(app))
         }),
     )
 }

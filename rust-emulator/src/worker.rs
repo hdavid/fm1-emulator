@@ -2,7 +2,7 @@
 // Private GUI worker: one owner of the CPU, and one replaceable UI snapshot.
 use fm1_emu::{cpu::Cpu, firmware::Firmware};
 use std::{
-    io::{self, Write},
+    io::{self, Read, Write},
     path::PathBuf,
     sync::{mpsc, Arc, Mutex},
     thread::{self, JoinHandle},
@@ -28,6 +28,7 @@ enum Command {
 
 pub(super) struct Worker {
     commands: mpsc::Sender<Command>,
+    serial: mpsc::SyncSender<Vec<u8>>,
     snapshot: Arc<Mutex<Option<Snapshot>>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -153,23 +154,44 @@ impl Machine {
 impl Worker {
     pub fn new() -> Self {
         let (commands, receiver) = mpsc::channel();
+        let (serial, serial_receiver) = mpsc::sync_channel(16);
         let snapshot = Arc::new(Mutex::new(None));
         let mailbox = Arc::clone(&snapshot);
         let thread = thread::spawn(move || {
             let mut machine = Machine::new();
+            let mut pending_serial: Option<Vec<u8>> = None;
             let mut next_frame = Instant::now();
             loop {
                 while let Ok(command) = receiver.try_recv() {
+                    if matches!(&command, Command::Restart(..)) && machine.generation != 0 {
+                        pending_serial = None;
+                        while serial_receiver.try_recv().is_ok() {}
+                    }
                     if !machine.command(command) {
                         return;
                     }
                     machine.publish(&mailbox);
+                }
+                if let Some(cpu) = &mut machine.cpu {
+                    if pending_serial.is_none() {
+                        pending_serial = serial_receiver.try_recv().ok();
+                    }
+                    if pending_serial
+                        .as_ref()
+                        .is_some_and(|bytes| cpu.bus.usb.receive_serial(bytes))
+                    {
+                        pending_serial = None;
+                    }
                 }
                 if machine.running() {
                     machine.execute();
                 } else {
                     match receiver.recv_timeout(Duration::from_millis(16)) {
                         Ok(command) => {
+                            if matches!(&command, Command::Restart(..)) && machine.generation != 0 {
+                                pending_serial = None;
+                                while serial_receiver.try_recv().is_ok() {}
+                            }
                             if !machine.command(command) {
                                 return;
                             }
@@ -187,6 +209,7 @@ impl Worker {
         });
         Self {
             commands,
+            serial,
             snapshot,
             thread: Some(thread),
         }
@@ -202,6 +225,31 @@ impl Worker {
     }
     pub fn snapshot(&self) -> Option<Snapshot> {
         self.snapshot.lock().unwrap().take()
+    }
+    pub fn read_stdin(&self) {
+        let serial = self.serial.clone();
+        // A separate reader can block on a terminal without stopping either the
+        // CPU or the window. The bounded queue also backpressures piped input.
+        // Do not join it on close: portable stdin reads cannot be cancelled.
+        thread::spawn(move || {
+            let mut input = io::stdin().lock();
+            let mut bytes = [0; 64];
+            loop {
+                match input.read(&mut bytes) {
+                    Ok(0) => return,
+                    Ok(n) => {
+                        if serial.send(bytes[..n].to_vec()).is_err() {
+                            return;
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        eprintln!("USB serial stdin: {error}");
+                        return;
+                    }
+                }
+            }
+        });
     }
     #[cfg(test)]
     pub fn inspect<T: Send + 'static>(

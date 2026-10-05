@@ -27,6 +27,7 @@ fn published_felucca_package_boots_and_renders_a_note() {
     assert_eq!(cpu.bus.usb.setups, 5);
     let serial: Vec<_> = cpu.bus.usb.serial.drain(..).collect();
     assert!(String::from_utf8_lossy(&serial).contains("Felucca 0.9-BETA console"));
+    exercise_console(&mut cpu);
     assert!(cpu.bus.audio.samples.iter().all(|frame| *frame == [0, 0]));
     cpu.bus.audio.samples.clear();
     cpu.bus.devices.gpio.press(3, 4, true).unwrap();
@@ -63,6 +64,7 @@ fn unchanged_felucca_boots_and_responds_to_a_matrix_note() {
     assert!(cpu.bus.lcd.pixels_written > 1_000_000);
     let serial: Vec<_> = cpu.bus.usb.serial.drain(..).collect();
     assert!(String::from_utf8_lossy(&serial).contains("Felucca 0.9-BETA console"));
+    exercise_console(&mut cpu);
 
     let before = cpu.bus.lcd.pixels.clone();
     assert_eq!(cpu.bus.read(inputs, 4).unwrap(), 0);
@@ -110,6 +112,26 @@ fn unchanged_felucca_boots_and_responds_to_a_matrix_note() {
         cpu.bus.read(dbg + 28, 4).unwrap(),
         cpu.bus.read(dbg + 4, 4).unwrap(),
         cpu.bus.system.watchdog_feeds
+    );
+}
+
+fn exercise_console(cpu: &mut Cpu) {
+    assert!(cpu.bus.usb.receive_serial(b"help\r\n"));
+    let mut reply = Vec::new();
+    for step in 0..50_000_000 {
+        cpu.step().unwrap();
+        if step % 1024 == 0 {
+            reply.extend(cpu.bus.usb.serial.drain(..));
+            let text = String::from_utf8_lossy(&reply);
+            if text.contains("memr ADDR [LEN]") && text.ends_with("> ") {
+                eprintln!("Felucca USB CDC help reply: {text:?}");
+                return;
+            }
+        }
+    }
+    panic!(
+        "guest did not answer help through USB CDC: {:?}",
+        String::from_utf8_lossy(&reply)
     );
 }
 

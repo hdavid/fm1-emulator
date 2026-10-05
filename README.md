@@ -3,7 +3,8 @@
 # FM-1 emulator
 
 A Rust emulator for the M-VAVE FM-1. Load firmware and interact with its own
-screen and buttons. USB serial output from the firmware appears in your terminal.
+screen and buttons. The firmware's USB serial console uses your terminal; type
+commands such as Felucca's `help` and press Enter.
 
 ## Download and run
 
@@ -48,7 +49,7 @@ other firmware paths can stop emulation.
 
 | Firmware | Status | Verified behavior / blocker |
 | --- | --- | --- |
-| Felucca 0.9-beta (`FM-1_909`, `.fwsc`) | Partial | LCD, USB console output, watchdog, note audio/DMA and FX pass; full UI coverage remains incomplete |
+| Felucca 0.9-beta (`FM-1_909`, `.fwsc`) | Partial | LCD, USB console (`help`), watchdog, note audio/DMA and FX pass; full UI coverage remains incomplete |
 | Felucca source build (`1e838e1`, `.elf`) | Partial | Boot, note press/release, FX, HOME and ENV pass; other UI paths need broader coverage |
 | Official `FM-1_015` (`FM-1.fwsc`) | Partial | LCD boot, PIANO 1, FX/HOME and note audio/DMA pass |
 | Baud Girl `FM-1_093` (`FM-1_093.fwsc`) | Partial | LCD boot and FX/HOME pass; its factory preset payload fails integrity validation |
@@ -62,8 +63,6 @@ and Baud Girl results.
 
 - [ ] Cache decoded instructions/blocks to reduce interpreter overhead.
 - [ ] Add a JIT to improve guest execution speed.
-- [ ] USB serial input: forward terminal input through emulated CDC OUT. Felucca
-  prints its console banner, but typing `help` currently has no effect.
 - [ ] Remaining CPU instructions, peripherals and firmware UI paths.
 - [ ] Host audio playback, rotary controls and USB MIDI.
 - [ ] Flash persistence, plus fuller encryption, interrupt and timing behavior.

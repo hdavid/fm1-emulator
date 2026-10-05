@@ -72,7 +72,12 @@ ring, USB endpoint DMA and the emulator host before stdout receives
 `KEY <id> down` or `KEY <id> up`. The host performs GET_DESCRIPTOR,
 SET_ADDRESS, SET_CONFIGURATION and CDC SET_CONTROL_LINE_STATE requests.
 It discovers the CDC interface and IN endpoint from the configuration descriptor.
-Host-to-device console input and USB MIDI host transport are not implemented.
+Terminal stdin reaches the descriptor-selected CDC OUT endpoint through bounded
+host queues, SRAM DMA, RX packet/count registers and the receive interrupt latch.
+An unread packet stays intact until the guest acknowledges it. Type commands and
+press Enter; EOF stops the input reader while guest execution continues.
+The unchanged local and published Felucca builds answer `help` through this path.
+USB MIDI host transport is not implemented.
 The hardware firmware retains both its serial console and MIDI updater.
 
 P33 accesses model watchdog arming/feeding and stop with an expiry fault if

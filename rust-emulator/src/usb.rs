@@ -18,11 +18,116 @@ pub struct Usb {
     response: Vec<u8>,
     cdc_interface: Option<u8>,
     cdc_endpoint: Option<usize>,
+    cdc_out: Option<(usize, usize)>,
+    input: VecDeque<u8>,
     pub serial: VecDeque<u8>,
     pub setups: u64,
     pub packets: u64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn configured() -> (Usb, Vec<u8>) {
+        let mut usb = Usb::default();
+        usb.io = 0x40;
+        usb.regs[0] = 4;
+        usb.attached = true;
+        usb.phase = 2;
+        // MIDI OUT 1 must be ignored. CDC OUT 2 and IN 3 are deliberately
+        // distinct so neither direction can be guessed from the other.
+        usb.response = vec![
+            9, 4, 1, 0, 1, 1, 3, 0, 0, 7, 5, 1, 2, 64, 0, 0, 9, 4, 2, 0, 0, 2, 2, 1, 0, 9, 4, 3, 0,
+            2, 10, 0, 0, 0, 7, 5, 2, 2, 32, 0, 0, 7, 5, 0x83, 2, 64, 0, 0,
+        ];
+        usb.complete();
+        usb.phase = 5;
+        usb.regs[10] = RAM + 64; // EP2 RX DMA.
+        usb.endpoints[2][3] = 0xff;
+        (usb, vec![0; 256])
+    }
+    fn sie_write(usb: &mut Usb, ram: &mut [u8], register: u32, value: u32) {
+        usb.write(0x11804, register << 8 | value, ram)
+            .unwrap()
+            .unwrap();
+    }
+    fn sie_read(usb: &mut Usb, ram: &mut [u8], register: u32) -> u32 {
+        usb.write(0x11804, register << 8 | 0x4000, ram)
+            .unwrap()
+            .unwrap();
+        usb.read(0x11804).unwrap() & 255
+    }
+
+    #[test]
+    fn cdc_out_discovers_its_endpoint_and_preserves_packets_until_guest_ack() {
+        let (mut usb, mut ram) = configured();
+        let bytes: Vec<_> = (0..70).collect();
+        assert!(usb.receive_serial(&bytes));
+        usb.advance(1, &mut ram).unwrap();
+        assert_eq!(&ram[64..96], &bytes[..32]);
+        assert_eq!(sie_read(&mut usb, &mut ram, 4), 1 << 2);
+        assert_eq!(sie_read(&mut usb, &mut ram, 4), 0); // IRQ read acknowledges latch.
+        sie_write(&mut usb, &mut ram, 14, 2);
+        assert_eq!(sie_read(&mut usb, &mut ram, 22), 32);
+        assert_eq!(sie_read(&mut usb, &mut ram, 20) & 1, 1);
+        usb.advance(24_000, &mut ram).unwrap();
+        assert_eq!(&ram[64..96], &bytes[..32]); // NAK: unread packet stays intact.
+        assert_eq!(usb.input.len(), 38);
+        sie_write(&mut usb, &mut ram, 20, 0x11); // Guest RX FIFO flush/ack.
+        usb.advance(1, &mut ram).unwrap();
+        assert_eq!(&ram[64..96], &bytes[32..64]);
+        assert_eq!(sie_read(&mut usb, &mut ram, 4), 1 << 2);
+        sie_write(&mut usb, &mut ram, 20, 0); // Clear RXPKTRDY without flush.
+        usb.advance(1, &mut ram).unwrap();
+        assert_eq!(&ram[64..70], &bytes[64..]);
+        assert_eq!(sie_read(&mut usb, &mut ram, 22), 6);
+        assert!(usb.input.is_empty());
+    }
+
+    #[test]
+    fn cdc_out_waits_for_configuration_enable_and_valid_dma() {
+        let (mut usb, mut ram) = configured();
+        assert!(usb.receive_serial(b"help\n"));
+        usb.phase = 4;
+        usb.waiting = true;
+        usb.advance(1, &mut ram).unwrap();
+        assert_eq!(&ram[64..69], &[0; 5]);
+        usb.phase = 5;
+        usb.regs[0] |= 1 << 21; // EP2 disabled.
+        usb.advance(1, &mut ram).unwrap();
+        assert_eq!(usb.input.len(), 5);
+        usb.regs[0] &= !(1 << 21);
+        usb.regs[10] = RAM + 255;
+        assert_eq!(usb.advance(1, &mut ram), Err("USB DMA exceeds SRAM"));
+        assert_eq!(usb.input.len(), 5); // Fault must not lose host bytes.
+        usb.regs[10] = RAM + 64;
+        usb.advance(1, &mut ram).unwrap();
+        assert_eq!(&ram[64..69], b"help\n");
+    }
+
+    #[test]
+    fn host_input_is_bounded_and_failed_enqueue_keeps_existing_bytes() {
+        let (mut usb, mut ram) = configured();
+        assert!(usb.receive_serial(&vec![42; 4096]));
+        assert!(!usb.receive_serial(b"discard nothing"));
+        assert_eq!(usb.input.len(), 4096);
+        usb.advance(1, &mut ram).unwrap();
+        assert!(usb.receive_serial(&[7; 32]));
+        assert!(!usb.receive_serial(b"x"));
+        assert_eq!(usb.input.back(), Some(&7));
+    }
+}
 impl Usb {
+    /// Queue terminal bytes for the guest's CDC bulk OUT endpoint. Backpressure
+    /// keeps host input bounded while the guest is paused or its RX FIFO is full.
+    pub fn receive_serial(&mut self, bytes: &[u8]) -> bool {
+        if bytes.len() > 4096 - self.input.len() {
+            return false;
+        }
+        self.input.extend(bytes.iter().copied());
+        true
+    }
     pub fn read(&self, a: u32) -> Option<u32> {
         match a {
             0x51000 => Some(self.io),
@@ -59,8 +164,13 @@ impl Usb {
                     }
                     cdc_data = d[5] == 10;
                 }
-                if d[1] == 5 && n >= 7 && cdc_data && d[2] & 128 != 0 && d[3] & 3 == 2 {
-                    self.cdc_endpoint = Some((d[2] & 15) as usize);
+                if d[1] == 5 && n >= 7 && cdc_data && d[3] & 3 == 2 {
+                    let endpoint = (d[2] & 15) as usize;
+                    if d[2] & 128 != 0 {
+                        self.cdc_endpoint = Some(endpoint);
+                    } else {
+                        self.cdc_out = Some((endpoint, u16::from_le_bytes([d[4], d[5]]) as usize));
+                    }
                 }
                 i += n;
             }
@@ -114,6 +224,9 @@ impl Usb {
                     self.waiting = false;
                     self.sie = [0; 16];
                     self.endpoints = [[0; 8]; 4];
+                    self.cdc_interface = None;
+                    self.cdc_endpoint = None;
+                    self.cdc_out = None;
                 }
             }
             0x11804 => {
@@ -165,6 +278,16 @@ impl Usb {
                                 self.send(self.index, ram)?;
                             }
                         }
+                    } else if r == 20 && self.index != 0 {
+                        // RXCSR: flush FIFO and clear data toggle are commands.
+                        // A held RXPKTRDY packet must survive polling until the
+                        // guest clears it or explicitly flushes the FIFO.
+                        self.endpoints[self.index][4] = data & !0x90;
+                        if data & 0x10 != 0 || data & 1 == 0 {
+                            self.endpoints[self.index][4] &= !1;
+                            self.endpoints[self.index][6] = 0;
+                            self.endpoints[self.index][7] = 0;
+                        }
                     } else {
                         self.endpoints[self.index][r - 16] = data;
                     }
@@ -191,6 +314,9 @@ impl Usb {
             self.attached = true;
             self.sie[6] |= 4;
             self.deadline = self.ticks + 120000;
+        }
+        if self.phase >= 5 && !self.input.is_empty() {
+            self.receive(ram)?;
         }
         if self.waiting || self.ticks < self.deadline || self.phase >= 5 {
             return Ok(());
@@ -219,6 +345,32 @@ impl Usb {
         self.sie[2] |= 1;
         self.waiting = true;
         self.setups += 1;
+        Ok(())
+    }
+
+    fn receive(&mut self, ram: &mut [u8]) -> Result<(), &'static str> {
+        let Some((ep, packet_size)) = self.cdc_out else {
+            return Ok(());
+        };
+        if !(1..=3).contains(&ep) || !(1..=64).contains(&packet_size) {
+            return Err("CDC OUT endpoint exceeds modeled full-speed controller");
+        }
+        if self.regs[0] & (1 << (19 + ep)) != 0
+            || self.endpoints[ep][3] == 0
+            || self.endpoints[ep][4] & 0x21 != 0
+        {
+            return Ok(()); // Endpoint disabled, stalled, or still holding a packet (NAK).
+        }
+        let n = self.input.len().min(packet_size);
+        let destination = Self::dma(ram, self.regs[8 + (ep - 1) * 2], n)?;
+        for (byte, &input) in destination.iter_mut().zip(self.input.iter()) {
+            *byte = input;
+        }
+        self.input.drain(..n);
+        self.endpoints[ep][4] |= 1;
+        self.endpoints[ep][6] = n as u8;
+        self.endpoints[ep][7] = 0;
+        self.sie[4] |= 1 << ep;
         Ok(())
     }
 }
