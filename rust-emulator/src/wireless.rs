@@ -35,6 +35,15 @@ pub(crate) struct Wireless {
     ble_anchor_data: u32,
     ble_anchor_result: u32,
     ble_anchors: [[u32; 64]; 17],
+    bt_clock_ticks: u64,
+    bt_sample_ticks: u32,
+    bt_clock_sample: u32,
+    bt_fine_sample: u32,
+    bt_alarm: u32,
+    bt_clock_pending: bool,
+    slot_alarms: [u32; 8],
+    slot_enabled: u8,
+    slot_pending: u8,
 }
 impl Default for Wireless {
     fn default() -> Self {
@@ -55,6 +64,15 @@ impl Default for Wireless {
             ble_anchor_data: 0,
             ble_anchor_result: 0,
             ble_anchors: [[0; 64]; 17],
+            bt_clock_ticks: 0,
+            bt_sample_ticks: 0,
+            bt_clock_sample: 0,
+            bt_fine_sample: 0,
+            bt_alarm: 0,
+            bt_clock_pending: false,
+            slot_alarms: [0; 8],
+            slot_enabled: 0,
+            slot_pending: 0,
         }
     }
 }
@@ -66,6 +84,43 @@ impl Wireless {
     }
     pub(crate) fn advance(&mut self, ticks: u32) {
         self.filter_ticks = self.filter_ticks.saturating_sub(ticks);
+        // Vendor bredr_frame.c uses full 625 us slots and fine microseconds;
+        // slot_timer wraps at 27 bits. Functional nominal crystal timing,
+        // not a measured RF clock/power/reset model.
+        const SLOT: u64 = 15_000; // 24 MHz * 625 us.
+        const WRAP: u64 = SLOT * (1 << 27);
+        if self.bt_configuration[Self::bt_index(0x20000).unwrap()] & 1 != 0 {
+            let old = self.bt_clock_ticks;
+            let distance = ((self.bt_alarm as u64).wrapping_sub(old / SLOT)) & ((1 << 27) - 1);
+            let until = if distance == 0 { WRAP } else { distance * SLOT } - old % SLOT;
+            if self.bt_configuration[Self::bt_index(0x2000c).unwrap()] & 512 != 0
+                && ticks as u64 >= until
+            {
+                self.bt_clock_pending = true;
+            }
+            self.bt_clock_ticks = (old + ticks as u64) % WRAP;
+            for (channel, alarm) in self.slot_alarms.iter().enumerate() {
+                let distance = ((*alarm as u64).wrapping_sub(old / SLOT)) & ((1 << 27) - 1);
+                let until = if distance == 0 { WRAP } else { distance * SLOT } - old % SLOT;
+                if self.slot_enabled & (1 << channel) != 0 && ticks as u64 >= until {
+                    self.slot_pending |= 1 << channel;
+                }
+            }
+        }
+        if self.bt_sample_ticks != 0 {
+            self.bt_sample_ticks = self.bt_sample_ticks.saturating_sub(ticks);
+            if self.bt_sample_ticks == 0 {
+                self.bt_clock_sample = (self.bt_clock_ticks / SLOT) as u32;
+                self.bt_fine_sample = ((self.bt_clock_ticks % SLOT) / 24) as u32;
+            }
+        }
+    }
+    pub(crate) fn clock_pending_irq(&self) -> bool {
+        self.bt_clock_pending
+            && self.bt_configuration[Self::bt_index(0x2000c).unwrap()] & 512 != 0
+    }
+    pub(crate) fn slot_pending_irq(&self) -> bool {
+        self.slot_pending & self.slot_enabled != 0
     }
     // Vendor wf_phy_mac_init/wl_hw_init setup words, reached through
     // wl30_mmc_io_rw_extended's direct MAC mapping (0x30000 + offset).
@@ -87,6 +142,28 @@ impl Wireless {
         }
     }
     pub(crate) fn read(&self, address: u32, size: usize) -> Option<Result<u32, &'static str>> {
+        if (0x2fd40..=0x2fd60).contains(&(address & !3)) {
+            return Some(if size != 4 {
+                Err("wireless registers require word accesses")
+            } else if address == 0x2fd40 {
+                Ok(self.slot_enabled as u32 | (self.slot_pending as u32) << 16)
+            } else {
+                Ok(self.slot_alarms[((address - 0x2fd44) / 4) as usize])
+            });
+        }
+        if matches!(address & !3, 0x20010 | 0x2001c | 0x20020 | 0x20024 | 0x200e4) {
+            return Some(if size != 4 {
+                Err("wireless registers require word accesses")
+            } else {
+                match address {
+                    0x20010 => Ok(if self.bt_clock_pending { 512 } else { 0 }),
+                    0x2001c => Ok((self.bt_sample_ticks != 0) as u32),
+                    0x20020 => Ok(self.bt_clock_sample),
+                    0x20024 => Ok(self.bt_fine_sample),
+                    _ => Err("Bluetooth clock alarm readback is not implemented"),
+                }
+            });
+        }
         if address & !3 == 0x200c0 {
             // Vendor bredr_frame.c __write_reg_txericntl packs a descriptor
             // offset and two control fields here. Configuration only: neither
@@ -164,6 +241,55 @@ impl Wireless {
         value: u32,
         size: usize,
     ) -> Option<Result<(), &'static str>> {
+        if (0x2fd40..=0x2fd60).contains(&(address & !3)) {
+            return Some(if size != 4 {
+                Err("wireless registers require word accesses")
+            } else {
+                if address == 0x2fd40 {
+                    // Vendor bredr_slot_timer.c: enables 0..7, ACK 8..15,
+                    // pending 16..23. Pending bits cannot be set by a store.
+                    self.slot_enabled = value as u8;
+                    self.slot_pending &= !((value >> 8) as u8);
+                } else {
+                    self.slot_alarms[((address - 0x2fd44) / 4) as usize] = value & 0x07ff_ffff;
+                }
+                Ok(())
+            });
+        }
+        if matches!(address & !3, 0x20010 | 0x2001c | 0x20020 | 0x20024 | 0x200e4) {
+            return Some(if size != 4 {
+                Err("wireless registers require word accesses")
+            } else {
+                match address {
+                    0x2001c if value == 1 => {
+                        // READ_SLOT_CLK requests a coherent clock/fine pair,
+                        // then polls until the request is consumed.
+                        self.bt_sample_ticks = 1;
+                        Ok(())
+                    }
+                    0x200e4 => {
+                        self.bt_alarm = value & 0x07ff_ffff;
+                        Ok(())
+                    }
+                    0x2001c => Err("unsupported Bluetooth clock sample command"),
+                    _ => Err("Bluetooth clock/status registers are read-only"),
+                }
+            });
+        }
+        if address & !3 == 0x20018 {
+            return Some(if size != 4 {
+                Err("wireless registers require word accesses")
+            } else if value & !65535 != 0 {
+                Err("unsupported Bluetooth event acknowledgement")
+            } else {
+                // Vendor __timer_register and the slot timer ISR acknowledge
+                // the clock event with bit 9. Other radio events are absent.
+                if value & 512 != 0 {
+                    self.bt_clock_pending = false;
+                }
+                Ok(())
+            });
+        }
         if address & !3 == 0x28038 {
             return Some(if size != 4 {
                 Err("wireless registers require word accesses")
@@ -318,6 +444,91 @@ impl Wireless {
         }
         self.registers[index] = value;
         Some(Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+    fn sample(w: &mut Wireless) -> (u32, u32) {
+        w.write(0x2001c, 1, 4).unwrap().unwrap();
+        assert_eq!(w.read(0x2001c, 4), Some(Ok(1)));
+        w.advance(1);
+        assert_eq!(w.read(0x2001c, 4), Some(Ok(0)));
+        (w.read(0x20020, 4).unwrap().unwrap(), w.read(0x20024, 4).unwrap().unwrap())
+    }
+    #[test]
+    fn sampled_slot_and_fine_time_are_coherent_and_use_625_microseconds() {
+        let mut w = Wireless::default();
+        w.write(0x20000, 0x107, 4).unwrap().unwrap();
+        w.advance(14_998);
+        assert_eq!(sample(&mut w), (0, 624));
+        assert_eq!(sample(&mut w), (1, 0));
+        w.advance(15_000 + 24 * 123 - 1);
+        assert_eq!(sample(&mut w), (2, 123));
+        w.advance(30_000);
+        assert_eq!(w.read(0x20020, 4), Some(Ok(2)));
+        assert_eq!(w.read(0x20024, 4), Some(Ok(123)));
+        assert_eq!(sample(&mut w), (4, 123));
+        assert!(w.write(0x20020, 1, 4).unwrap().is_err());
+        assert!(w.write(0x2001c, 2, 4).unwrap().is_err());
+        assert!(w.read(0x20024, 2).unwrap().is_err());
+    }
+    #[test]
+    fn link_timeout_latches_and_acknowledges_only_at_the_programmed_slot() {
+        let mut w = Wireless::default();
+        w.write(0x20000, 0x107, 4).unwrap().unwrap();
+        w.write(0x200e4, 3, 4).unwrap().unwrap();
+        w.write(0x2000c, 512, 4).unwrap().unwrap();
+        w.advance(44_999);
+        assert!(!w.clock_pending_irq());
+        w.advance(1);
+        assert!(w.clock_pending_irq());
+        assert_eq!(w.read(0x20010, 4), Some(Ok(512)));
+        w.write(0x20018, 1, 4).unwrap().unwrap();
+        assert!(w.clock_pending_irq());
+        w.write(0x20018, 512, 4).unwrap().unwrap();
+        assert!(!w.clock_pending_irq());
+        assert_eq!(w.read(0x20018, 4), Some(Ok(0)));
+    }
+    #[test]
+    fn eight_slot_timers_have_separate_deadlines_and_acknowledgements() {
+        let mut w = Wireless::default();
+        w.write(0x20000, 0x107, 4).unwrap().unwrap();
+        for i in 0..8 {
+            w.write(0x2fd44 + i * 4, i + 1, 4).unwrap().unwrap();
+        }
+        w.write(0x2fd40, 0xff00, 4).unwrap().unwrap();
+        w.advance(1_000);
+        assert!(!w.slot_pending_irq());
+        w.write(0x2fd40, 255, 4).unwrap().unwrap();
+        w.advance(13_999);
+        assert!(!w.slot_pending_irq());
+        w.advance(1);
+        assert_eq!(w.read(0x2fd40, 4), Some(Ok(0x100ff)));
+        w.advance(15_000 * 7);
+        assert_eq!(w.read(0x2fd40, 4), Some(Ok(0xff00ff)));
+        w.write(0x2fd40, 0x0100 | 255, 4).unwrap().unwrap();
+        assert_eq!(w.read(0x2fd40, 4), Some(Ok(0xfe00ff)));
+        w.write(0x2fd40, 0xff00, 4).unwrap().unwrap();
+        assert_eq!(w.read(0x2fd40, 4), Some(Ok(0)));
+        assert!(!w.slot_pending_irq());
+        assert!(w.read(0x2fd64, 4).is_none());
+    }
+    #[test]
+    fn clock_and_alarms_wrap_at_27_bits_and_pause_when_disabled() {
+        let mut w = Wireless::default();
+        w.write(0x20000, 0x107, 4).unwrap().unwrap();
+        w.bt_clock_ticks = 15_000 * (1 << 27) - 2;
+        w.write(0x2fd44, 0, 4).unwrap().unwrap();
+        w.write(0x2fd40, 1, 4).unwrap().unwrap();
+        assert_eq!(sample(&mut w), (0x7ffffff, 624));
+        assert!(!w.slot_pending_irq());
+        assert_eq!(sample(&mut w), (0, 0));
+        assert!(w.slot_pending_irq());
+        w.write(0x20000, 0, 4).unwrap().unwrap();
+        w.advance(1_000_000);
+        assert_eq!(sample(&mut w), (0, 0));
     }
 }
 

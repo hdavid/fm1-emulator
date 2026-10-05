@@ -308,6 +308,39 @@ fn core_tick_timer_wraps_acknowledges_and_obeys_irq_priority() {
 }
 
 #[test]
+fn stock_slot_timer_raises_irq_41_at_a_real_clock_deadline() {
+    use fm1_emu::devices::IRQ_CONFIG;
+    let mut c = cpu(&vec![0; 230_000]);
+    c.bus.write(0x10014, 6, 4).unwrap(); // Nominal 360 MHz CPU.
+    c.bus.write(0x20000, 0x107, 4).unwrap();
+    c.bus.write(0x2fd44, 1, 4).unwrap(); // One 625 us slot.
+    c.bus.write(0x2fd40, 0x100, 4).unwrap();
+    c.bus.write(0x2fd40, 1, 4).unwrap();
+    c.bus.write(IRQ_CONFIG + 5 * 4, 0x5f, 4).unwrap();
+    c.bus.write(0x01c7fe00 + 41 * 4, RAM, 4).unwrap();
+    c.bus.write(RAM, 0x0081, 2).unwrap();
+    c.sr[14] = RAM + 256;
+    c.sr[13] = RAM + 512;
+    c.sr[11] = 0x100;
+    c.interrupts_enabled = true;
+    for _ in 0..224_999 {
+        c.step().unwrap();
+    }
+    assert_eq!(c.irq_entries, 0);
+    assert_eq!(c.bus.read(0x2fd40, 4).unwrap(), 1);
+    c.step().unwrap();
+    assert_eq!(c.pc, RAM);
+    assert_eq!(c.sr[0], XIP + 450_000);
+    assert_eq!(c.irq_entries, 1);
+    assert_eq!(c.bus.read(0x2fd40, 4).unwrap(), 0x10001);
+    assert_eq!(c.bus.pending_irq(0x100), Some(41));
+    c.bus.write(0x2fd40, 0x100, 4).unwrap();
+    assert_eq!(c.bus.pending_irq(0x100), None);
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 450_000);
+}
+
+#[test]
 fn stock_rc_calibration_measures_and_rearms_the_low_speed_clock() {
     use fm1_emu::devices::{IRQ_CONFIG, IRQ_PENDING};
     let mut c = cpu(&[0]);

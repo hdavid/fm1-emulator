@@ -386,6 +386,8 @@ impl Bus {
         for (source, pending) in [
             (crate::audio::IRQ, self.audio.pending_irq()),
             (crate::shift_spi::IRQ, self.shift_spi.pending_irq()),
+            (40, self.wireless.clock_pending_irq()),
+            (41, self.wireless.slot_pending_irq()),
         ] {
             if let Some(priority) = pending
                 .then(|| self.devices.irq_priority_for(source, icfg, core))
