@@ -406,7 +406,9 @@ impl Cpu {
 
     pub fn set_cpu_mhz(&mut self, mhz: u32) -> Result<(), String> {
         if mhz == 0 || mhz % 24 != 0 {
-            return Err(format!("CPU clock {mhz} MHz: use a multiple of 24 (24, 96, 192, 312...)"));
+            return Err(format!(
+                "CPU clock {mhz} MHz: use a multiple of 24 (24, 96, 192, 312...)"
+            ));
         }
         self.instructions_per_tick = mhz / 24;
         self.subtick = 0;
@@ -863,7 +865,14 @@ impl Cpu {
                 name = "sti";
             }
             Op::Nop => {
-                name = if h == 0x0020 { "csync" } else { "nop" };
+                // 0x0001 is the SDK's asm("idle") (wait for interrupt; FM-1_093
+                // IDLE0 task at 0x0205b8da). Treated as a hint: execution
+                // continues, which only costs instructions while idle.
+                name = match h {
+                    0x0020 => "csync",
+                    0x0001 => "idle",
+                    _ => "nop",
+                };
             }
             Op::Wide => {
                 // The extension halfword selects the form.
@@ -899,10 +908,7 @@ impl Cpu {
         // 04a9 + e8d8/e8d4), so no hidden block state can survive an
         // interrupt that switches tasks; restoring it on rti leaked one
         // task's repeat into another (FM-1_093: a nested rep at 0x01c05026).
-        if !self.interrupts_enabled
-            || self.in_interrupt
-            || self.inside_block()
-        {
+        if !self.interrupts_enabled || self.in_interrupt || self.inside_block() {
             return Ok(());
         }
         if let Some(source) = self.bus.pending_irq_for(self.sr[11], self.sr[6] as usize) {

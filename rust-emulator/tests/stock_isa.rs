@@ -537,6 +537,15 @@ fn float_compare_branch_orders_singles() {
 }
 
 #[test]
+fn idle_hint_continues_with_the_next_instruction() {
+    // FM-1_093 IDLE0 task at 0x0205b8da: e930 0002 eabf e7d9 0001 ff80 ...
+    // 0x0001 is asm("idle") (SDK init.c / adc_api.c wait-for-interrupt).
+    let mut c = cpu(&[0x0001, 0x0000]);
+    assert_eq!(c.step().unwrap(), "idle");
+    assert_eq!(c.pc, XIP + 2);
+}
+
+#[test]
 fn register_repeat_with_a_zero_count_skips_its_block() {
     let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);
     c.r[1] = RAM;

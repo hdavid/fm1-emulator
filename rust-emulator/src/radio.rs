@@ -23,6 +23,10 @@ const BT_CORE: std::ops::Range<u32> = 0x20000..0x40000;
 const ANALOG: std::ops::Range<u32> = 0x11904..0x119a0;
 const RF_PORT: u32 = 0x3101c;
 const RF_BUSY: u32 = 1 << 17;
+// Third inferred behaviour: 0x2001c is a self-clearing command register.
+// btctrler (0x0206f096, called from 0x02071844 with interrupts off) writes
+// it and spins until it reads 0, so only hardware can clear it.
+const BT_COMMAND: u32 = 0x2001c;
 const ANALOG_STATUS: u32 = 0x11978;
 const ANALOG_READY: u32 = 1 << 5;
 
@@ -71,6 +75,8 @@ impl Radio {
             if BT_CORE.contains(&address) || ANALOG.contains(&address) {
                 let value = if address & !3 == RF_PORT {
                     value & !RF_BUSY
+                } else if address & !3 == BT_COMMAND {
+                    0
                 } else {
                     value
                 };

@@ -32,42 +32,49 @@ core, so it is larger than the loop limit.
 | 17 | nested `rep` at 0x01c05026 | A repeat restored by rti leaked into another task. The RTOS context switch saves only r0-r15 and {psr, rets, reti}, so no interrupt is now taken inside a repeat or conditional block | f9c871f | runs the full loop |
 | 18 | `04e1` in the SPI2 interrupt handler | special-register bitmap {reti, psr}, popped by `04a1` | cf9d6bd | runs the full loop |
 
-## Current state (FM1_CPU_MHZ=192, 300M loop = 479,175,657 instructions)
+| 19 | btstack task spinning on the HCI buffer | **The busy-poll was an emulator bug, not a missing controller.** The cbuf did hold data: `cbuf_read(cb, buf, 4)` at 0x02028286 copied 4 bytes and returned 4. Its bookkeeping `e868 6c1a; e868 6c16` is `data_len -= n; tmp_len -= n` (SDK `circular_buf.h`: tmp_len at +0x14, data_len at +0x18; Quarkslab pi32v2 lists 0x868 imm1617 = 2 as sub). The emulator added instead, so data_len grew (0x2c) and btstack re-read the same message forever. No HCI traffic was invented | fa64637 | 207.2M, usr_app_task runs |
+| 20 | `ee81 e8a5` at 0x02021d3c | Float compare-branch (x bit 11): r14 = 0.192f vs r1 = 1.0f after an e53f add. Every use, in stock and in the SDK ELF objects, follows FPU code; integer-only Felucca/SLOOP/Jangada code never sets the bit. Decoded for eq/ne and the signed kinds only | 20c5598 | 207.6M |
+| 21 | read of 0x16a0c (0x020356a8) | HUSB_PHY0_CON0..2 (WL82.h husb_phy_base); reset value unmeasured, 0 assumed | see log | |
+| 22 | read of 0x51028 (0x02023b6a, usr_app_task) | JL_IOMAP CON2-4 and CON6-8 (WL82.h psfr 0x1007): plain pin-mux registers, reset value unmeasured (0) | see log | |
+| 23 | 2-byte write of 0x12100 (0x02023be2) | JL_UART1 = the MIDI DIN port (hal/fm1_uart.h). Pending bits follow the SDK's debug.c putchar (bit 15 TX pending, bit 13 clears it) and fm1_uart.h. No MIDI input is connected; TX completes at once; BUF bytes are logged (a `UART1 (MIDI out)` diagnose line) | see log | |
+| 24 | `0x0001` at 0x0205b8da (IDLE0 task) | `asm("idle")` (SDK init.c / adc_api.c wait-for-interrupt), executed as a hint | see log | |
+| 25 | btctrler spin on 0x2001c (0x0206f096, interrupts off) | **STUB, inferred**: a self-clearing BT command register. The code writes it and then polls it until 0 with interrupts disabled, so only hardware can clear it | see log | 248M |
+| 26 | SPI1 DMA from flash 0x0204f8b2 (0x02023de0); CASET 0..240; ST7789V config commands (b2, b7, bb, c0, c2-c4, c6, d0, e0, e1, e7, 51) | The stock app sends its panel init table from XIP flash, so DMA from flash is allowed. Window addresses past the frame memory are accepted and their pixels dropped: this follows my reading of the ST7789V datasheet's CASET/RASET note, which I have not re-checked against the document. Frame memory is 240x320 (stock uses RASET 40..279). Config commands have no frame-memory effect | see log | 57,361 pixels |
 
-- Stable main loop: no fault, watchdog fed (54k feeds), interrupts running.
-- Audio DMA active: 62,652 stereo frames, 978 halves.
-- **No LCD pixels.**
-- Stock and Baud Girl are still identical.
+## Current state (FM1_CPU_MHZ=192)
 
-## Blocker: the display task never runs (btstack busy-polls)
+- **First screen output.** The stock LCD driver in `usr_app_task` runs the
+  full ST7789V init table and clears the panel: 57,361 pixels written, all
+  black, display on.
+  - `~/GitHub/fm1-firmware/screens/baudgirl-192mhz-first-fill.png`: rows
+    0-239.
+  - `baudgirl-192mhz-first-fill-ram240x320.png`: the whole frame memory,
+    from the new diagnose option `FM1_PNG_RAM`.
+- **Stock and Baud Girl now diverge** (248,378,369 vs 248,668,070
+  instructions): Baud Girl's changes are reached.
+- **Open question for someone with the hardware:** which 240 of the 320
+  frame-memory rows does the FM-1 glass show? Felucca draws rows 0-239 and
+  the stock app rows 40-279, both with MADCTL 0. `lcd.pixels` keeps rows
+  0-239, so the regression baselines are unchanged.
 
-- **The stock LCD driver exists but is never reached.** It drives SPI1
-  (0x11d00) with `CON = 0x4021`, the same value as Felucca's HAL, at
-  0x02023d68. That code is inside the `usr_app_task` entry 0x02023b46.
-- **`usr_app_task` is created but never scheduled.** It is created at
-  0x02004c46 (priority 5, stack 0x400). Its initial frame at 0x01c64744
-  (entry wrapper 0x0205bd18, arg 0x01c636a0) is never consumed. Its task
-  record flag is 0, while every task that ran shows 0xa3. `midi_route` is
-  in the same never-run state.
-- **The `btstack` task takes the CPU time** (sp around 0x01c27a18). It loops
-  at 0x0207d174..0x0207d39a. There, `cbuf_read(4)` (0x02028286) on an empty
-  HCI buffer returns 0, and state word 0x2c keeps it polling without ever
-  blocking. Lower-priority tasks starve.
-- **Why the buffer stays empty (inferred):** the Bluetooth controller
-  (btctrler) would fill it, and it normally runs from BT baseband
-  interrupts. No BT core or baseband is emulated (radio.rs only keeps
-  register values), so no HCI event arrives.
-- **What progress needs:** either a minimal BT controller model (HCI
-  command complete for the reset sequence) or the BT core interrupt
-  sources. Neither was done: there is no documentation, and inventing HCI
-  traffic would be a fake.
-- **The secondary core is also stuck behind this.** It waits at 0x01c02480
-  for byte 0x01c192e0 or 0x01c192e1 to become 2. The setters (0x0201dc8e,
-  0x0201dda4) are called from UI/LCD code (0x02023eb8), so they never run
-  either.
+## Blocker: `0x13c0` at 0x0200de98 (both images)
 
-New diagnose options: `FM1_CALLERS=PC` (rets histogram in the hot window),
-`FM1_SPI2_LOG=1`, and a `secondary core:` line.
+- **Where it is:** in a text loop. The code just before tests r6 != 13
+  (CR) and r7 != 10 (LF), adds r13 to the counter at [sp+0x14], and sets
+  r4 = r10 (a buffer pointer, 0x01c654e0). The code after compares r0
+  with 10 and 13 and later loads r0 = b[r4].
+- **Why I didn't implement it:** 0x12xx/0x13xx appears nowhere else as a
+  standalone instruction. Every other occurrence, in stock, Felucca, SLOOP,
+  Jangada and the SDK ELF objects, is an operand halfword. The Quarkslab
+  spec has no `ins0712 = 0x27` form.
+- **The path into it looks valid** (goto at 0x0200dd3e to 0x0200de5a, a
+  branch to 0x0200de78, then straight-line code). So either this is a rare
+  instruction (a byte load or a three-register op on r0/r4/r7 would fit
+  the use) or an earlier instruction was executed with the wrong
+  semantics. Not implemented: no evidence.
+
+New diagnose options: `FM1_CALLERS=PC`, `FM1_SPI2_LOG=1`, `FM1_PNG_RAM`,
+a `secondary core:` line and a `UART1 (MIDI out)` line.
 
 ## Earlier blockers (default 24 MHz clock)
 

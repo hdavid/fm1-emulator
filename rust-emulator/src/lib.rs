@@ -17,6 +17,7 @@ pub mod player;
 pub mod png;
 pub mod radio;
 pub mod spi2;
+pub mod uart1;
 mod resample;
 mod rng;
 pub mod ui_knobs;

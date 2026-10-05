@@ -7,6 +7,10 @@ pub const DIR: u32 = 8;
 pub const DIE: u32 = 12;
 pub const PU: u32 = 16;
 pub const PD: u32 = 20;
+/// JL_IOMAP CON2-CON4 and CON6-CON8 (SDK WL82.h psfr 0x1007: CON0 at
+/// 0x5101c). CON0, CON1 and CON5 are modelled with their users (nor.rs,
+/// lcd.rs, audio.rs). Pin-mux routing only; reset value unmeasured (0).
+const IOMAP_OTHER: [u32; 6] = [0x51024, 0x51028, 0x5102c, 0x51034, 0x51038, 0x5103c];
 
 pub struct Gpio {
     ports: [[u32; 8]; 8],
@@ -17,6 +21,7 @@ pub struct Gpio {
     /// Port A input reads while each matrix column was selected: how many
     /// times the guest has sampled that column's contacts (encoder pacing).
     scans: [std::cell::Cell<u32>; 11],
+    iomap: [u32; 6],
 }
 
 impl Default for Gpio {
@@ -32,6 +37,7 @@ impl Default for Gpio {
             latched: u16::MAX,
             previous_driven_a: 0,
             scans: Default::default(),
+            iomap: [0; 6],
         }
     }
 }
@@ -92,6 +98,9 @@ impl Gpio {
     }
 
     pub fn read(&self, address: u32) -> Option<u32> {
+        if let Some(i) = IOMAP_OTHER.iter().position(|&a| a == address) {
+            return Some(self.iomap[i]);
+        }
         let offset = address.checked_sub(GPIO)?;
         let port = (offset / 0x40) as usize;
         let register = offset % 0x40;
@@ -107,6 +116,10 @@ impl Gpio {
 
     pub fn write(&mut self, address: u32, value: u32) -> Option<Result<(), &'static str>> {
         self.read(address)?;
+        if let Some(i) = IOMAP_OTHER.iter().position(|&a| a == address) {
+            self.iomap[i] = value;
+            return Some(Ok(()));
+        }
         let offset = address - GPIO;
         let port = (offset / 0x40) as usize;
         let register = offset % 0x40;

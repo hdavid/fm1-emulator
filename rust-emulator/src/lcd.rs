@@ -5,9 +5,18 @@ pub const SPI: u32 = 0x11d00;
 pub const IOMAP: u32 = 0x51020;
 pub const WIDTH: usize = 240;
 pub const HEIGHT: usize = 240;
+/// ST7789V frame memory rows (240 x 320). Which 240 rows the FM-1 glass
+/// shows is not established: Felucca draws rows 0-239, the stock app 40-279
+/// (RASET 0x28..0x117, both with MADCTL 0). `pixels` keeps rows 0-239.
+pub const RAM_ROWS: usize = 320;
+const CONFIG_COMMANDS: [u8; 13] = [
+    0x51, 0xb2, 0xb7, 0xbb, 0xc0, 0xc2, 0xc3, 0xc4, 0xc6, 0xd0, 0xe0, 0xe1, 0xe7,
+];
 
 pub struct Lcd {
     pub pixels: Vec<u32>,
+    /// Frame memory rows 240..320.
+    offscreen: Vec<u32>,
     pub pixels_written: u64,
     pub display_on: bool,
     pub sleeping: bool,
@@ -27,6 +36,7 @@ impl Default for Lcd {
     fn default() -> Self {
         Self {
             pixels: vec![0; WIDTH * HEIGHT],
+            offscreen: vec![0; WIDTH * (RAM_ROWS - HEIGHT)],
             pixels_written: 0,
             display_on: false,
             sleeping: true,
@@ -54,6 +64,13 @@ impl Lcd {
         } else {
             None
         }
+    }
+
+    /// The whole 240 x 320 frame memory, rows 0-239 then 240-319.
+    pub fn frame_memory(&self) -> Vec<u32> {
+        let mut all = self.pixels.clone();
+        all.extend_from_slice(&self.offscreen);
+        all
     }
 
     pub fn dma_address(&self) -> u32 {
@@ -111,6 +128,7 @@ impl Lcd {
                 0x01 => {
                     // Software reset affects the panel, not the host SPI registers.
                     self.pixels.fill(0);
+                    self.offscreen.fill(0);
                     self.display_on = false;
                     self.sleeping = true;
                     self.columns = [0, WIDTH - 1];
@@ -126,6 +144,10 @@ impl Lcd {
                 // Inversion is the panel's electrical drive mode. RGB565 values
                 // represent visible colors for the FM-1's normal INVON setup.
                 0x13 | 0x20 | 0x21 | 0x2a | 0x2b | 0x36 | 0x3a => (),
+                // ST7789V porch, gate, VCOM, power, frame-rate, gamma, SPI and
+                // brightness settings from the stock init table (flash
+                // 0x0204f8d4..): analog setup with no frame-memory effect.
+                c if CONFIG_COMMANDS.contains(&c) => (),
                 _ => return Err("unsupported LCD command"),
             }
         } else if self.command == 0x2c {
@@ -144,8 +166,14 @@ impl Lcd {
                     | (((g << 2) | (g >> 4)) << 8)
                     | (b << 3)
                     | (b >> 2);
-                self.pixels[self.cursor[1] * WIDTH + self.cursor[0]] = rgb;
-                self.pixels_written += 1;
+                let [x, y] = self.cursor;
+                if x < WIDTH && y < HEIGHT {
+                    self.pixels[y * WIDTH + x] = rgb;
+                    self.pixels_written += 1;
+                } else if x < WIDTH && y < RAM_ROWS {
+                    self.offscreen[(y - HEIGHT) * WIDTH + x] = rgb;
+                    self.pixels_written += 1;
+                }
                 self.cursor[0] += 1;
                 if self.cursor[0] > self.columns[1] {
                     self.cursor[0] = self.columns[0];
@@ -167,8 +195,12 @@ impl Lcd {
                     if self.args.len() == 4 {
                         let start = u16::from_be_bytes([self.args[0], self.args[1]]) as usize;
                         let end = u16::from_be_bytes([self.args[2], self.args[3]]) as usize;
-                        if start > end || end >= WIDTH {
-                            return Err("LCD window outside 240x240 panel");
+                        // ST7789V CASET/RASET: XS <= XE is required; addresses
+                        // beyond the frame memory are accepted and the data
+                        // sent to them is ignored (datasheet note). The stock
+                        // app sends CASET 0..240 (0x02022286).
+                        if start > end {
+                            return Err("LCD window start after its end");
                         }
                         if self.command == 0x2a {
                             self.columns = [start, end];
@@ -177,6 +209,7 @@ impl Lcd {
                         }
                     }
                 }
+                c if CONFIG_COMMANDS.contains(&c) => (),
                 0x3a if self.args.len() == 1 && byte == 0x55 => self.format = byte,
                 0x36 if self.args.len() == 1 && byte & !8 == 0 => self.bgr = byte & 8 != 0,
                 _ => return Err("unsupported LCD data or pixel orientation"),

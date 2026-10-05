@@ -59,6 +59,8 @@ fn radio_stub_retains_registers_and_completes_rf_port_writes() {
     assert_eq!(b.read(0x30f04, 4).unwrap(), 7);
     b.write(0x3101c, 0x000a_1600, 4).unwrap();
     assert_eq!(b.read(0x3101c, 4).unwrap(), 0x0008_1600);
+    b.write(0x2001c, 0x1001, 4).unwrap(); // self-clearing BT command (inferred)
+    assert_eq!(b.read(0x2001c, 4).unwrap(), 0);
     b.write(0x11978, 0, 4).unwrap(); // WLA_CON30: bit 5 reads as ready (inferred)
     assert_eq!(b.read(0x11978, 4).unwrap(), 0x20);
     assert!(b.radio.accesses.get() >= 6);

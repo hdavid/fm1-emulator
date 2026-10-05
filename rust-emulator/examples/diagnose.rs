@@ -182,6 +182,22 @@ fn run() -> Result<(), String> {
     if cpu.bus.devices.timer4.lsb_stub_used || cpu.bus.devices.timer5.lsb_stub_used {
         eprintln!("STUB timer: lsb_clk source counted at the oscillator rate");
     }
+    if !cpu.bus.uart1.tx.is_empty() || cpu.bus.uart1.tx_dma_bytes > 0 {
+        let head: Vec<_> = cpu
+            .bus
+            .uart1
+            .tx
+            .iter()
+            .take(32)
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        eprintln!(
+            "UART1 (MIDI out): {} BUF bytes [{}], {} DMA bytes",
+            cpu.bus.uart1.tx.len(),
+            head.join(" "),
+            cpu.bus.uart1.tx_dma_bytes
+        );
+    }
     if cpu.bus.spi2.transfers > 0 {
         eprintln!(
             "STUB SPI2 (no device): {} transfers",
@@ -268,6 +284,16 @@ fn run() -> Result<(), String> {
             .collect();
         std::fs::write(&path, ram).map_err(|e| format!("{path}: {e}"))?;
         eprintln!("RAM: saved {path}");
+    }
+    // Optional: FM1_PNG_RAM=PATH saves the whole 240x320 ST7789V memory.
+    if let Ok(path) = env::var("FM1_PNG_RAM") {
+        let png = fm1_emu::png::encode_rgb(
+            fm1_emu::lcd::WIDTH,
+            fm1_emu::lcd::RAM_ROWS,
+            &cpu.bus.lcd.frame_memory(),
+        )?;
+        std::fs::write(&path, png).map_err(|e| format!("{path}: {e}"))?;
+        eprintln!("frame memory: saved {path}");
     }
     // Optional: FM1_PNG=PATH saves the raw panel framebuffer (ungated).
     if let Ok(path) = env::var("FM1_PNG") {

@@ -90,7 +90,9 @@ fn invalid_dma_and_unsupported_commands_fault() {
     let mut bus = init();
     write(&mut bus, SPI + 12, RAM + 512 * 1024 - 1);
     assert!(bus.write(SPI + 16, 2, 4).is_err());
-    write(&mut bus, SPI + 12, 0x02000120);
+    // XIP flash is a valid DMA source: the stock app sends its panel init
+    // table from flash (0x0204f8b2, SPI1 DMA at 0x02023de0).
+    write(&mut bus, SPI + 12, 0x0100_0000);
     assert!(bus.write(SPI + 16, 2, 4).is_err());
     assert!(bus.write(SPI, 0, 1).is_err());
     assert!(bus.read(SPI + 1, 1).is_err());
@@ -101,5 +103,13 @@ fn invalid_dma_and_unsupported_commands_fault() {
     for byte in [0, 0, 0] {
         write(&mut bus, SPI + 8, byte);
     }
-    assert!(bus.write(SPI + 8, 240, 4).is_err());
+    // XE = 240 is past the 240 columns: accepted, data there is ignored
+    // (the stock app sends CASET 0..240); XS > XE still faults.
+    assert!(bus.write(SPI + 8, 240, 4).is_ok());
+    cmd(&mut bus, 0x2a);
+    write(&mut bus, 0x50080, 0x100);
+    for byte in [0, 9, 0] {
+        write(&mut bus, SPI + 8, byte);
+    }
+    assert!(bus.write(SPI + 8, 8, 4).is_err());
 }

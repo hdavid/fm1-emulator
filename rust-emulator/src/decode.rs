@@ -240,7 +240,8 @@ pub(crate) fn decode(h: u32) -> Op {
         Lock
     } else if h == 0x0061 {
         Sti
-    } else if h == 0x0020 || h == 0x0000 {
+    } else if matches!(h, 0x0020 | 0x0000 | 0x0001) {
+        // 0x0001: idle (wait for interrupt), see Cpu::execute.
         Nop
     } else {
         decode_extended(h)
@@ -363,7 +364,8 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         // only the even-pair, zero-source forms seen in the stock image.
         ShiftPairRegister
     } else if h == 0xe53f
-        && (matches!(x & 15, 0 | 1 | 2 | 3 | 5 | 6 | 7 | 8) || matches!(x & 255, 0x1f | 0x8f | 0x9f))
+        && (matches!(x & 15, 0 | 1 | 2 | 3 | 5 | 6 | 7 | 8)
+            || matches!(x & 255, 0x1f | 0x8f | 0x9f))
     {
         // Single-precision FPU (SDK -mfprev1); only the operations whose
         // meaning the stock image and SDK objects show.
@@ -417,7 +419,10 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         0xe800 | 0xe880 | 0xe900 | 0xe980 | 0xec00 | 0xec80 | 0xed00 | 0xed80 | 0xee00 | 0xee80
     ) && (x & 0xe00 == 0
         || (x & 0xe00 == 0x800
-            && matches!(h & 0xfff0, 0xe800 | 0xe880 | 0xed00 | 0xed80 | 0xee00 | 0xee80)))
+            && matches!(
+                h & 0xfff0,
+                0xe800 | 0xe880 | 0xed00 | 0xed80 | 0xee00 | 0xee80
+            )))
     {
         // x bit 11: float compare (only the equality and signed kinds).
         BranchCompareRegister

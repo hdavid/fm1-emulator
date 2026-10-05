@@ -39,6 +39,7 @@ pub struct Bus {
     rng: crate::rng::Rng,
     pub radio: crate::radio::Radio,
     pub spi2: crate::spi2::Spi2,
+    pub uart1: crate::uart1::Uart1,
     code: crate::code_cache::CodeCache,
     /// NOR generation the code cache was last synchronized with.
     nor_generation: u64,
@@ -81,6 +82,7 @@ impl Bus {
             rng: Default::default(),
             radio: Default::default(),
             spi2: Default::default(),
+            uart1: Default::default(),
             code: Default::default(),
             nor_generation: 0,
             mmio_stats: Default::default(),
@@ -171,6 +173,9 @@ impl Bus {
             }
             if let Some(value) = self.crc.read(address) {
                 return Ok(value);
+            }
+            if crate::uart1::Uart1::contains(address) {
+                return Ok(self.uart1.read(address, size));
             }
             if crate::spi2::Spi2::contains(address) {
                 return if size == 4 && address.is_multiple_of(4) {
@@ -343,6 +348,10 @@ impl Bus {
         if self.crc.write(address, value).is_some() {
             return Ok(());
         }
+        if crate::uart1::Uart1::contains(address) {
+            self.uart1.write(address, value, size);
+            return Ok(());
+        }
         if crate::spi2::Spi2::contains(address) {
             if size != 4 {
                 return Err(Self::fault(
@@ -423,18 +432,26 @@ impl Bus {
                     "SPI registers require word accesses",
                 ));
             }
-            let bytes = if address == SPI + 16 {
+            // DMA source: SRAM, or the XIP-mapped flash (the stock app sends
+            // its panel init table from flash, 0x0204f8b2 at 0x02023de0).
+            let flash_bytes: Vec<u8>;
+            let bytes: &[u8] = if address == SPI + 16 {
                 let source = self.lcd.dma_address();
-                let offset =
-                    Self::offset(source, value as usize, RAM, self.ram.len()).ok_or_else(|| {
-                        Self::fault(
-                            source,
-                            value as usize,
-                            "DMA read",
-                            "LCD DMA source must be in SRAM",
-                        )
-                    })?;
-                &self.ram[offset..offset + value as usize]
+                if let Some(offset) = Self::offset(source, value as usize, RAM, self.ram.len()) {
+                    &self.ram[offset..offset + value as usize]
+                } else if Self::offset(source, value as usize, XIP, self.flash.len()).is_some() {
+                    flash_bytes = (0..value)
+                        .map(|i| self.read_as(source + i, 1, "DMA read").map(|b| b as u8))
+                        .collect::<Result<_, _>>()?;
+                    &flash_bytes
+                } else {
+                    return Err(Self::fault(
+                        source,
+                        value as usize,
+                        "DMA read",
+                        "LCD DMA source must be in SRAM or XIP flash",
+                    ));
+                }
             } else {
                 &[]
             };
@@ -501,7 +518,10 @@ impl Bus {
         }
         let timer = self.devices.pending_irq_for(icfg, core);
         let mut best = timer.map(|source| {
-            (source, self.devices.irq_priority_for(source, icfg, core).unwrap())
+            (
+                source,
+                self.devices.irq_priority_for(source, icfg, core).unwrap(),
+            )
         });
         // Peripheral sources outside devices.rs; a strictly higher priority
         // wins, so the timer keeps ties (unchanged ordering for audio).
