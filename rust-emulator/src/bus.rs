@@ -22,6 +22,10 @@ impl fmt::Display for AccessFault {
     }
 }
 
+/// MMIO access counts keyed by (address, PC of the accessing instruction):
+/// [reads, writes].
+pub type MmioStats = std::collections::BTreeMap<(u32, u32), [u64; 2]>;
+
 pub struct Bus {
     flash: Vec<u8>,
     pub devices: Devices,
@@ -44,7 +48,9 @@ pub struct Bus {
     nor_generation: u64,
     /// Optional diagnostic counts of MMIO reads/writes by address.
     /// Keyed by (address, PC of the accessing instruction).
-    pub mmio_stats: std::cell::RefCell<Option<std::collections::BTreeMap<(u32, u32), [u64; 2]>>>,
+    mmio_stats: std::cell::RefCell<Option<MmioStats>>,
+    /// Whether `mmio_stats` is collecting (checked on every access).
+    mmio_counting: bool,
     /// PC of the instruction being executed (diagnostics only).
     pub pc_hint: std::cell::Cell<u32>,
     /// Oscillator ticks since reset (the CPU counts them).
@@ -91,6 +97,7 @@ impl Bus {
             code: Default::default(),
             nor_generation: 0,
             mmio_stats: Default::default(),
+            mmio_counting: false,
             pc_hint: Default::default(),
             now: 0,
             synced: 0,
@@ -112,8 +119,27 @@ impl Bus {
         }
     }
 
-    #[inline]
+    /// Start counting MMIO reads and writes (diagnostics), from zero.
+    pub fn start_mmio_stats(&mut self) {
+        *self.mmio_stats.get_mut() = Some(MmioStats::new());
+        self.mmio_counting = true;
+    }
+
+    /// Stop counting and return the counts, if counting was started.
+    pub fn take_mmio_stats(&mut self) -> Option<MmioStats> {
+        self.mmio_counting = false;
+        self.mmio_stats.get_mut().take()
+    }
+
+    #[inline(always)]
     fn count_mmio(&self, address: u32, kind: usize) {
+        if self.mmio_counting {
+            self.record_mmio(address, kind);
+        }
+    }
+
+    #[cold]
+    fn record_mmio(&self, address: u32, kind: usize) {
         if let Some(stats) = self.mmio_stats.borrow_mut().as_mut() {
             stats.entry((address, self.pc_hint.get())).or_default()[kind] += 1;
         }
@@ -335,11 +361,16 @@ impl Bus {
     }
 
     /// The decoded instruction at `pc`, if it lies in cacheable memory.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn decoded(&mut self, pc: u32) -> Option<crate::code_cache::Entry> {
         if let Some(entry) = self.code.get(pc) {
             return Some(entry);
         }
+        self.decode_miss(pc)
+    }
+
+    #[inline(never)]
+    fn decode_miss(&mut self, pc: u32) -> Option<crate::code_cache::Entry> {
         let h = self.code_halfword(pc)?;
         let x = self.code_halfword(pc.wrapping_add(2));
         let y = self.code_halfword(pc.wrapping_add(4));

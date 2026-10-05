@@ -113,7 +113,7 @@ fn run() -> Result<(), String> {
             }
         }
         if mmio_window > 0 && step + mmio_window == limit {
-            *cpu.bus.mmio_stats.borrow_mut() = Some(BTreeMap::new());
+            cpu.bus.start_mmio_stats();
         }
         match cpu.step() {
             Ok(op) => {
@@ -231,7 +231,7 @@ fn run() -> Result<(), String> {
             eprintln!("  {count:>9} {}", location(&firmware.symbols, pc));
         }
     }
-    if let Some(stats) = cpu.bus.mmio_stats.borrow_mut().take() {
+    if let Some(stats) = cpu.bus.take_mmio_stats() {
         let mmio_top: usize = env::var("FM1_MMIO_TOP")
             .ok()
             .and_then(|value| value.parse().ok())

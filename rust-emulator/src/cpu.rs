@@ -247,7 +247,7 @@ impl Cpu {
 
     pub fn step(&mut self) -> Result<&'static str, Fault> {
         let control = self.bus.core_control(1);
-        if control & 2 != 0 {
+        if control & 2 != 0 && self.secondary.is_some() {
             self.secondary = None;
         }
         if self.secondary.is_none() && control & 10 == 8 {

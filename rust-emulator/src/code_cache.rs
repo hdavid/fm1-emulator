@@ -58,7 +58,7 @@ const PAGE_SHIFT: u32 = 8;
 const SPAN: u32 = 6;
 
 pub(crate) struct CodeCache {
-    entries: Vec<Entry>,
+    entries: Box<[Entry; 1 << BITS]>,
     epoch: u32,
     ram_pages: Vec<bool>,
 }
@@ -66,7 +66,10 @@ pub(crate) struct CodeCache {
 impl Default for CodeCache {
     fn default() -> Self {
         Self {
-            entries: vec![Entry::EMPTY; 1 << BITS],
+            entries: vec![Entry::EMPTY; 1 << BITS]
+                .into_boxed_slice()
+                .try_into()
+                .unwrap_or_else(|_| unreachable!()),
             epoch: 1,
             ram_pages: vec![false; RAM_SIZE >> PAGE_SHIFT],
         }
