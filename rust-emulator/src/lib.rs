@@ -16,6 +16,7 @@ pub mod lcd;
 mod package;
 pub mod player;
 pub mod png;
+pub mod profile;
 pub mod radio;
 mod resample;
 mod rng;
