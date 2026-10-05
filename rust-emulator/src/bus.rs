@@ -38,6 +38,7 @@ pub struct Bus {
     resample: crate::resample::Resampler,
     rng: crate::rng::Rng,
     pub radio: crate::radio::Radio,
+    pub spi2: crate::spi2::Spi2,
     code: crate::code_cache::CodeCache,
     /// NOR generation the code cache was last synchronized with.
     nor_generation: u64,
@@ -79,6 +80,7 @@ impl Bus {
             resample: Default::default(),
             rng: Default::default(),
             radio: Default::default(),
+            spi2: Default::default(),
             code: Default::default(),
             nor_generation: 0,
             mmio_stats: Default::default(),
@@ -169,6 +171,18 @@ impl Bus {
             }
             if let Some(value) = self.crc.read(address) {
                 return Ok(value);
+            }
+            if crate::spi2::Spi2::contains(address) {
+                return if size == 4 && address.is_multiple_of(4) {
+                    Ok(self.spi2.read(address))
+                } else {
+                    Err(Self::fault(
+                        address,
+                        size,
+                        operation,
+                        "SPI registers require word accesses",
+                    ))
+                };
             }
             if crate::radio::Radio::contains(address) {
                 return match (size, self.radio.read(address)) {
@@ -329,6 +343,18 @@ impl Bus {
         if self.crc.write(address, value).is_some() {
             return Ok(());
         }
+        if crate::spi2::Spi2::contains(address) {
+            if size != 4 {
+                return Err(Self::fault(
+                    address,
+                    size,
+                    "write",
+                    "SPI registers require word accesses",
+                ));
+            }
+            self.spi2.write(address, value);
+            return Ok(());
+        }
         if crate::radio::Radio::contains(address) {
             if size != 4 {
                 return Err(Self::fault(
@@ -474,16 +500,24 @@ impl Bus {
             return None;
         }
         let timer = self.devices.pending_irq_for(icfg, core);
-        let audio_priority = self.devices.irq_priority_for(crate::audio::IRQ, icfg, core);
-        if self.audio.pending_irq() {
-            if let Some(priority) = audio_priority {
-                if timer.is_none_or(|source| {
-                    priority > self.devices.irq_priority_for(source, icfg, core).unwrap()
-                }) {
-                    return Some(crate::audio::IRQ);
+        let mut best = timer.map(|source| {
+            (source, self.devices.irq_priority_for(source, icfg, core).unwrap())
+        });
+        // Peripheral sources outside devices.rs; a strictly higher priority
+        // wins, so the timer keeps ties (unchanged ordering for audio).
+        for (source, pending) in [
+            (crate::audio::IRQ, self.audio.pending_irq()),
+            (crate::spi2::IRQ, self.spi2.pending_irq()),
+        ] {
+            if !pending {
+                continue;
+            }
+            if let Some(priority) = self.devices.irq_priority_for(source, icfg, core) {
+                if best.is_none_or(|(_, highest)| priority > highest) {
+                    best = Some((source, priority));
                 }
             }
         }
-        timer
+        best.map(|(source, _)| source)
     }
 }

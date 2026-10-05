@@ -267,7 +267,9 @@ fn immediate_repeat_clears_twenty_words_and_copies_multiword_blocks() {
 }
 
 #[test]
-fn an_interrupt_preserves_the_unfinished_repeat() {
+fn an_interrupt_waits_for_the_unfinished_repeat() {
+    // The stock RTOS context switch saves only r0-r15 and {psr, rets, reti},
+    // so a pending interrupt is taken once the repeat block has finished.
     use fm1_emu::devices::{IRQ_CONFIG, TIMER5};
     let mut c = cpu(&[0x8200, 0x0592, 0x0000, 0x0081]);
     c.r[1] = RAM;
@@ -280,16 +282,15 @@ fn an_interrupt_preserves_the_unfinished_repeat() {
     c.bus.write(TIMER5 + 8, 1, 4).unwrap();
     c.bus.write(TIMER5, 9, 4).unwrap();
     c.interrupts_enabled = true;
-    c.step().unwrap();
-    assert_eq!(c.pc, XIP + 6);
-    c.bus.write(TIMER5, 0x4000, 4).unwrap();
-    c.step().unwrap(); // rti
-    while c.pc != XIP + 4 {
+    c.step().unwrap(); // rep 3
+    for _ in 0..3 {
+        assert_ne!(c.pc, XIP + 6);
         c.step().unwrap();
-        assert!(c.steps <= 5);
     }
     assert_eq!(c.r[1], RAM + 12);
     assert_eq!(c.bus.read(RAM + 8, 4).unwrap(), 42);
+    c.step().unwrap(); // the interrupt is delivered after the block
+    assert_eq!(c.sr[0], XIP + 4);
 }
 
 #[test]

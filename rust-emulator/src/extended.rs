@@ -215,13 +215,25 @@ fn execute_wide(
             name = "branch_register_mask";
         }
         Op::MemoryShift => {
+            // [rD + off] shifted by an immediate: c plus h bit 0 as bit 4
+            // (btctrler 0x0205d304: e86d 1607 = [r1+4] >>= 22, arithmetic,
+            // sign-extending a 10-bit field built at bits 22-31). Mode in x
+            // bits 0-1: 0 left, 2 logical right, 3 arithmetic right.
             let address = cpu.r[d].wrapping_add(x & 252);
+            let shift = ((h & 1) << 4) | c as u32;
             let value = cpu.read(address, 4)?;
-            cpu.write(address, if x & 2 == 0 { value << c } else { value >> c })?;
-            name = if x & 2 == 0 {
-                "memory_shift_left"
-            } else {
-                "memory_shift_right"
+            cpu.write(
+                address,
+                match x & 3 {
+                    0 => value << shift,
+                    2 => value >> shift,
+                    _ => ((value as i32) >> shift) as u32,
+                },
+            )?;
+            name = match x & 3 {
+                0 => "memory_shift_left",
+                2 => "memory_shift_right",
+                _ => "memory_shift_arithmetic",
             };
         }
         Op::MemoryAddRegister => {
@@ -550,6 +562,33 @@ fn execute_wide(
             cpu.r[d + 1] = (value >> 32) as u32;
             name = "shift_pair_register";
         }
+        Op::FloatOp => {
+            // e53f, x = d c s op on IEEE single bits: rD = rS op rC with
+            // 0 add, 1 sub, 2 mul, 3 div (SDK rx_net_samples_avg: sum / n),
+            // 5 min, 6 max (clamp pairs), 7 rD += rS*rC, 8 rD -= rS*rC
+            // (stock complex multiply at 0x0208bd30). Op 15 is unary on rC
+            // with the sub-operation in s: 8 (float)i32, 9 (float)u32,
+            // 1 (i32) truncation. Rounding of 7/8 (fused or not), NaN
+            // ordering in min/max and conversion saturation are unverified.
+            let fl = |v: u32| f32::from_bits(v);
+            let (a, b) = (fl(cpu.r[s]), fl(cpu.r[c]));
+            cpu.r[d] = match x & 15 {
+                0 => (a + b).to_bits(),
+                1 => (a - b).to_bits(),
+                2 => (a * b).to_bits(),
+                3 => (a / b).to_bits(),
+                5 => a.min(b).to_bits(),
+                6 => a.max(b).to_bits(),
+                7 => (fl(cpu.r[d]) + a * b).to_bits(),
+                8 => (fl(cpu.r[d]) - a * b).to_bits(),
+                _ => match (x >> 4) & 15 {
+                    8 => (cpu.r[c] as i32 as f32).to_bits(),
+                    9 => (cpu.r[c] as f32).to_bits(),
+                    _ => b as i32 as u32,
+                },
+            };
+            name = "float_op";
+        }
         Op::BranchLong => {
             let value = match h & 0x60 {
                 0 => x & 4095,
@@ -702,7 +741,7 @@ fn execute_wide(
             let lhs = cpu.r[n];
             let rhs = if kind & 7 == 1 {
                 cpu.r[c]
-            } else if matches!(kind, 0x83 | 0x93 | 0x9b | 0xd3 | 0xdb | 0xeb) {
+            } else if matches!(kind, 0x83 | 0x93 | 0x9b | 0xd3 | 0xdb | 0xe3 | 0xeb) {
                 signed(x & 4095, 12) as u32
             } else if kind == 0xcb {
                 // Plain imm12, not packed as Quarkslab lists it: SLOOP's
@@ -731,7 +770,7 @@ fn execute_wide(
                 0xd9..=0xdb => (lhs as i32) < (rhs as i32),
                 // Same condition order as the compare-branches: 0xee00 is
                 // signed >, 0xee80 signed <= (FM-1_093 0x02002bea: ee15).
-                0xe1 => (lhs as i32) > (rhs as i32),
+                0xe1 | 0xe3 => (lhs as i32) > (rhs as i32),
                 _ => (lhs as i32) <= (rhs as i32),
             };
             next = cpu.conditional(test, x)?;

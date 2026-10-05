@@ -105,6 +105,7 @@ pub(crate) enum Op {
     ShiftExtended,
     ShiftPair,
     ShiftPairRegister,
+    FloatOp,
     BranchLong,
     LogicThree,
     StoreRegisterList,
@@ -189,7 +190,7 @@ pub(crate) fn decode(h: u32) -> Op {
         Shift
     } else if h & 0xe008 == 0x6000 {
         LoadStore32
-    } else if h == 0xe8d8 || h == 0xe8d4 {
+    } else if matches!(h, 0xe8d8 | 0xe8d4 | 0xe8d9 | 0xe8d5) {
         PushPopMask
     } else if h & 0xfff0 == 0x0460 {
         PushRegs
@@ -207,9 +208,9 @@ pub(crate) fn decode(h: u32) -> Op {
         PopPcRegs
     } else if matches!(h, 0x1440..=0x1443) {
         MoveStackPointer
-    } else if matches!(h, 0x04e8 | 0x04e9) {
+    } else if matches!(h, 0x04e8 | 0x04e9 | 0x04e1) {
         PushIrqFrame
-    } else if matches!(h, 0x04a8 | 0x04a9) {
+    } else if matches!(h, 0x04a8 | 0x04a9 | 0x04a1) {
         PopIrqFrame
     } else if h & 0xfff0 == 0x0480 && h & 15 != 0 {
         PopSpecial
@@ -294,7 +295,7 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
     use Op::*;
     if matches!(h & 0xff00, 0xfa00 | 0xfb00) {
         BranchRegisterMask
-    } else if h == 0xe86c && matches!(x & 3, 0 | 2) {
+    } else if matches!(h, 0xe86c | 0xe86d) && matches!(x & 3, 0 | 2 | 3) {
         MemoryShift
     } else if h == 0xe868 {
         MemoryAddRegister
@@ -361,6 +362,12 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         // As e1c8 (amount in rC, mode in bits 0-1) on the pair rD+1:rD;
         // only the even-pair, zero-source forms seen in the stock image.
         ShiftPairRegister
+    } else if h == 0xe53f
+        && (matches!(x & 15, 0 | 1 | 2 | 3 | 5 | 6 | 7 | 8) || matches!(x & 255, 0x1f | 0x8f | 0x9f))
+    {
+        // Single-precision FPU (SDK -mfprev1); only the operations whose
+        // meaning the stock image and SDK objects show.
+        FloatOp
     } else if h & 0xff80 == 0xff00 && matches!(h & 15, 0 | 1 | 2 | 3 | 8 | 9 | 10 | 11 | 12 | 13) {
         BranchLong
     } else if h == 0xe190 && x & 15 <= 3 {
@@ -463,6 +470,8 @@ fn conditional_kind(kind: u32) -> bool {
             | 0xda
             | 0xdb
             | 0xe1
+            // ifs (rA > #imm12): FM-1_093 0x02004872 ee37 5fff (r7 > -1).
+            | 0xe3
             | 0xe9
             // ifs (rA <= #packed): SLOOP's fx.c gain_next and punch.c sweeps
             // (eea3 0d80 = <= 0x1000; eea2 0d08 / 0cb0 = <= 0x2200 / 0x5800).

@@ -347,6 +347,162 @@ fn long_multiply_accumulate_adds_the_product_to_the_pair() {
 }
 
 #[test]
+fn memory_shift_high_form_sign_extends_ten_bit_rf_fields() {
+    // FM-1_093 btctrler at 0x0205d304: each word of the record at r1 gets
+    // bits 24-31 (e1a0 4c20) and 22-23 (e1a4 0b08) from RF registers, then
+    // e86d 1602 / 1607 = [r1+0] >>= 22 (logical) / [r1+4] >>= 22
+    // (arithmetic). h bit 0 is bit 4 of the shift amount (16 + 6); x bits
+    // 0-1 select the shift as in e1c8. e86c keeps amounts 0-15: Felucca's
+    // audio_block `out[2i + 1] <<= OUT_SHIFT` (7) is e86c 3704.
+    let mut c = cpu(&[0xe86d, 0x1602, 0xe86d, 0x1607, 0xe86c, 0x3704]);
+    c.r[1] = RAM;
+    c.r[3] = RAM + 0x40;
+    c.bus.write(RAM, 0xffc0_0000, 4).unwrap();
+    c.bus.write(RAM + 4, 0xffc0_0000, 4).unwrap();
+    c.bus.write(RAM + 0x44, 3, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM, 4).unwrap(), 0x3ff);
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 4, 4).unwrap(), 0xffff_ffff);
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x44, 4).unwrap(), 3 << 7);
+    assert_eq!(c.pc, XIP + 12);
+}
+
+#[test]
+fn signed_greater_than_immediate_conditional_keeps_non_negative_bytes() {
+    // FM-1_093 0x02004872: ee37 5fff 4cbf 21c5 4cb9 =
+    // if (r7 > -1) { b[r3+12] = r7; r5 += 1 } else { b[r3+12] = r1 }
+    // after r7 = b[r3+1] (signed). Kind 0xe3: signed >, signed imm12.
+    for (r7, stored, count) in [(5u32, 5u32, 1u32), (0, 0, 1), (0xffff_ff80, 0xff, 0)] {
+        let mut c = cpu(&[0xee37, 0x5fff, 0x4cbf, 0x21c5, 0x4cb9, 0x0000]);
+        c.r[1] = 0xff;
+        c.r[3] = RAM;
+        c.r[7] = r7;
+        // Taken: the skip over the else slot happens on the next step, which
+        // then also runs the trailing nop.
+        while c.pc < XIP + 10 {
+            c.step().unwrap();
+            assert!(c.steps <= 4);
+        }
+        assert_eq!(c.bus.read(RAM + 12, 1).unwrap(), stored, "r7 = {r7:#x}");
+        assert_eq!(c.r[5], count, "r7 = {r7:#x}");
+    }
+}
+
+fn f(value: f32) -> u32 {
+    value.to_bits()
+}
+
+#[test]
+fn single_float_arithmetic_follows_the_sdk_library_patterns() {
+    // e53f x = d c s op: rD = rS op rC. AC79 SDK libVolcEngineRTCLite.a
+    // (fprev1 ELF objects): rx_net_samples_avg is r1 = (float)r1
+    // (e53f 119f); r0 = r0 / r1 (e53f 0103). Stock FM-1_093 clamps with
+    // r0 = max(r0, r3); r4 = 100.0f; r0 = min(r0, r4) (e53f 0306, 0405 at
+    // 0x0201ac16), and its complex multiply (0x0208bd30) is r8 = r4*r6;
+    // r9 = r6*r5; r8 -= r5*r7 (e53f 8758); r9 += r4*r7 (e53f 9747).
+    let mut c = cpu(&[0xe53f, 0x119f, 0xe53f, 0x0103]);
+    c.r[0] = f(10.0);
+    c.r[1] = 4;
+    c.step().unwrap();
+    assert_eq!(c.r[1], f(4.0));
+    c.step().unwrap();
+    assert_eq!(c.r[0], f(2.5));
+    for (x, clamped) in [(-3.0f32, 0.0f32), (42.5, 42.5), (250.0, 100.0)] {
+        let mut c = cpu(&[0xe53f, 0x0306, 0xe53f, 0x0405]);
+        c.r[0] = f(x);
+        c.r[3] = f(0.0);
+        c.r[4] = f(100.0);
+        c.step().unwrap();
+        c.step().unwrap();
+        assert_eq!(c.r[0], f(clamped), "x = {x}");
+    }
+    let (a, b, cc, d) = (1.5f32, -2.0f32, 0.5f32, 3.0f32);
+    let mut c = cpu(&[0xe53f, 0x8642, 0xe53f, 0x9562, 0xe53f, 0x8758, 0xe53f, 0x9747]);
+    c.r[4] = f(a);
+    c.r[5] = f(b);
+    c.r[6] = f(cc);
+    c.r[7] = f(d);
+    for _ in 0..4 {
+        c.step().unwrap();
+    }
+    assert_eq!(c.r[8], f(a * cc - b * d));
+    assert_eq!(c.r[9], f(b * cc + a * d));
+    let mut c = cpu(&[0xe53f, 0x0101, 0xe53f, 0x0100]); // r0 = r0 - r1; r0 = r0 + r1
+    c.r[0] = f(1.0);
+    c.r[1] = f(0.25);
+    c.step().unwrap();
+    assert_eq!(c.r[0], f(0.75));
+    c.step().unwrap();
+    assert_eq!(c.r[0], f(1.0));
+}
+
+#[test]
+fn float_integer_conversions_select_signedness_by_sub_operation() {
+    // 0x8f signed and 0x9f unsigned int -> float (stock 0x02004ade converts
+    // the result of an unsigned min with 9f); 0x1f float -> int, truncating.
+    let mut c = cpu(&[0xe53f, 0x008f, 0xe53f, 0x119f, 0xe53f, 0x221f]);
+    c.r[0] = 0xffff_fffe;
+    c.r[1] = 0xffff_fffe;
+    c.r[2] = f(-7.75);
+    c.step().unwrap();
+    c.step().unwrap();
+    c.step().unwrap();
+    assert_eq!(c.r[0], f(-2.0));
+    assert_eq!(c.r[1], f(4294967294.0));
+    assert_eq!(c.r[2], (-7i32) as u32);
+}
+
+#[test]
+fn masked_push_and_pop_with_bit_zero_save_rets_and_return() {
+    // FM-1_093 0x02074b18: e8d9 0df0 opens a function whose last
+    // instruction is e8d5 0df0 (0x02074ba2, the next function follows), so
+    // h bit 0 adds rets to the push and pc to the pop, like push/pop
+    // {rets, r4..rN} (0x047n / 0x045n).
+    let mut c = cpu(&[0xe8d9, 0x0df0, 0xe8d5, 0x0df0]);
+    c.sr[14] = RAM + 0x100;
+    c.sr[3] = XIP + 0x40;
+    for n in 0..16 {
+        c.r[n] = 0x100 + n as u32;
+    }
+    c.step().unwrap();
+    assert_eq!(c.sr[14], RAM + 0x100 - 4 * 8);
+    assert_eq!(c.bus.read(RAM + 0xfc, 4).unwrap(), XIP + 0x40);
+    assert_eq!(c.bus.read(RAM + 0xe0, 4).unwrap(), 0x104);
+    for n in [4, 5, 6, 7, 8, 10, 11] {
+        c.r[n] = 0;
+    }
+    c.step().unwrap();
+    assert_eq!(c.pc, XIP + 0x40);
+    assert_eq!(c.sr[14], RAM + 0x100);
+    for n in [4, 5, 6, 7, 8, 10, 11] {
+        assert_eq!(c.r[n], 0x100 + n as u32);
+    }
+}
+
+#[test]
+fn special_register_frame_without_rets_saves_psr_and_reti() {
+    // FM-1_093 SPI interrupt handler (flash 0x020887f0, run from RAM):
+    // 04e1; e8d8 01ff; ... e8d4 01ff; 04a1; csync; rti. Bitmap 0x21 =
+    // {reti (bit 0), psr (bit 5)}, the same layout as 04e9/04a9 without rets.
+    let mut c = cpu(&[0x04e1, 0x04a1]);
+    c.sr[14] = RAM + 0x100;
+    c.sr[0] = 0x0200_1234;
+    c.sr[3] = 0x0200_5678;
+    c.sr[5] = 0x2;
+    c.step().unwrap();
+    assert_eq!(c.sr[14], RAM + 0xf8);
+    assert_eq!(c.bus.read(RAM + 0xfc, 4).unwrap(), 0x2);
+    assert_eq!(c.bus.read(RAM + 0xf8, 4).unwrap(), 0x0200_1234);
+    c.sr[0] = 0;
+    c.sr[5] = 0;
+    c.step().unwrap();
+    assert_eq!((c.sr[0], c.sr[3], c.sr[5]), (0x0200_1234, 0x0200_5678, 0x2));
+    assert_eq!(c.sr[14], RAM + 0x100);
+}
+
+#[test]
 fn register_repeat_with_a_zero_count_skips_its_block() {
     let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);
     c.r[1] = RAM;

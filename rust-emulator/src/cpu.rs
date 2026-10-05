@@ -394,10 +394,16 @@ impl Cpu {
         self.bus
             .advance_audio(OSC_TICKS_PER_INSTRUCTION)
             .map_err(|fault| Fault::Access { pc, fault })?;
+        self.bus.spi2.advance(OSC_TICKS_PER_INSTRUCTION);
         Ok(())
     }
 
     /// Set the emulated CPU clock in MHz: a multiple of the 24 MHz oscillator.
+    /// Diagnostics: the secondary core's PC, if it has been started.
+    pub fn secondary_pc(&self) -> Option<u32> {
+        self.secondary.as_ref().map(|core| core.pc)
+    }
+
     pub fn set_cpu_mhz(&mut self, mhz: u32) -> Result<(), String> {
         if mhz == 0 || mhz % 24 != 0 {
             return Err(format!("CPU clock {mhz} MHz: use a multiple of 24 (24, 96, 192, 312...)"));
@@ -641,7 +647,12 @@ impl Cpu {
             }
             Op::PushPopMask => {
                 let mask = self.operand(code.x, pc + 2)?;
-                if h == 0xe8d8 {
+                // h bit 0 adds rets to the push and pc to the pop (FM-1_093
+                // pairs e8d9/e8d5 as function prologue/epilogue).
+                if h & !1 == 0xe8d8 {
+                    if h & 1 != 0 {
+                        self.push(self.sr[3])?;
+                    }
                     for n in (0..16).rev() {
                         if mask & (1 << n) != 0 {
                             self.push(self.r[n])?;
@@ -657,6 +668,9 @@ impl Cpu {
                     name = "pop_mask";
                 }
                 next = pc + 4;
+                if h == 0xe8d5 {
+                    next = self.pop()?;
+                }
             }
             Op::PushRegs => {
                 let boundary = (h & 15) as usize;
@@ -721,19 +735,21 @@ impl Cpu {
                 name = "move_stack_pointer";
             }
             Op::PushIrqFrame => {
-                self.push(self.sr[5])?;
-                self.push(self.sr[3])?;
-                if h == 0x04e9 {
-                    self.push(self.sr[0])?;
+                // 0x04c0 | mask over {reti 0, rets 3, psr 5}, highest first
+                // (04e9 = {psr, rets, reti}; 04e1 = {psr, reti}).
+                for index in [5, 3, 0] {
+                    if h & (1 << index) != 0 {
+                        self.push(self.sr[index])?;
+                    }
                 }
                 name = "push_irq_frame";
             }
             Op::PopIrqFrame => {
-                if h == 0x04a9 {
-                    self.sr[0] = self.pop()?;
+                for index in [0, 3, 5] {
+                    if h & (1 << index) != 0 {
+                        self.sr[index] = self.pop()?;
+                    }
                 }
-                self.sr[3] = self.pop()?;
-                self.sr[5] = self.pop()?;
                 name = "pop_irq_frame";
             }
             Op::PopSpecial => {
@@ -869,8 +885,24 @@ impl Cpu {
         Ok(name)
     }
 
+    /// Whether the PC is inside an active repeat block or the then-part of
+    /// a conditional block (stale state after a branch out does not count).
+    fn inside_block(&self) -> bool {
+        let pc = self.pc;
+        matches!(self.repeat, Some((start, end, _)) if (start..end).contains(&pc))
+            || matches!(self.predicate_skip, Some((at, _)) if pc < at && at - pc <= 32)
+    }
+
     fn dispatch_interrupt(&mut self) -> Result<(), Fault> {
-        if !self.interrupts_enabled || self.in_interrupt {
+        // No interrupt inside a repeat or conditional block. The stock RTOS
+        // context switch saves only r0-r15 and {psr, rets, reti} (04e9 /
+        // 04a9 + e8d8/e8d4), so no hidden block state can survive an
+        // interrupt that switches tasks; restoring it on rti leaked one
+        // task's repeat into another (FM-1_093: a nested rep at 0x01c05026).
+        if !self.interrupts_enabled
+            || self.in_interrupt
+            || self.inside_block()
+        {
             return Ok(());
         }
         if let Some(source) = self.bus.pending_irq_for(self.sr[11], self.sr[6] as usize) {

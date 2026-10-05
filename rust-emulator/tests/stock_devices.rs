@@ -63,3 +63,23 @@ fn radio_stub_retains_registers_and_completes_rf_port_writes() {
     assert_eq!(b.read(0x11978, 4).unwrap(), 0x20);
     assert!(b.radio.accesses.get() >= 6);
 }
+
+#[test]
+fn spi2_stub_completes_after_the_shift_time_and_interrupts_when_enabled() {
+    // STUB (spi2.rs): stock CON = 0x6020, BAUD 29, 2-byte DMA, then CON |= 1.
+    // 16 bits * 30 lsb ticks at the assumed 4 lsb ticks per oscillator tick.
+    let mut b = bus();
+    b.write(0x11e00, 0x6020, 4).unwrap();
+    b.write(0x11e04, 29, 4).unwrap();
+    b.write(0x11e10, 2, 4).unwrap();
+    b.write(0x11e00, 0x2021, 4).unwrap();
+    for _ in 0..119 {
+        b.spi2.advance(1);
+    }
+    assert!(!b.spi2.pending_irq());
+    b.spi2.advance(1);
+    assert!(b.spi2.pending_irq());
+    assert_eq!(b.read(0x11e00, 4).unwrap() & 0x8000, 0x8000);
+    b.write(0x11e00, 0x6021, 4).unwrap(); // clear pending
+    assert!(!b.spi2.pending_irq());
+}
