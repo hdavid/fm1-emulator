@@ -2,7 +2,7 @@
 // Instruction forms first reached by the SLOOP 2.2 application. Each test
 // encodes the exact halfwords seen in that image; SLOOP's C source (GPL-3.0)
 // says what each one must compute.
-use fm1_emu::{bus::Bus, cpu::Cpu, XIP};
+use fm1_emu::{bus::Bus, cpu::Cpu, RAM, XIP};
 
 fn cpu(words: &[u16]) -> Cpu {
     Cpu::new(
@@ -51,6 +51,26 @@ fn punch_filter_sweeps_floor_at_their_packed_bounds() {
         assert_eq!(c.pc, XIP + 8);
         assert_eq!(c.r[1], 7);
     }
+}
+
+#[test]
+fn pop_special_registers_restores_rets_before_a_tail_goto() {
+    // 0x020108cc: `pop {rets}` then `goto` (a tail call), bytes 88 04,
+    // ff ea 53 c4. The 0x048X bitmap is {reti, rete, retx, rets} from bit 0
+    // (stock FM-1 0x02000628 ends an interrupt with pop {reti}; rti).
+    let mut c = cpu(&[0x0488, 0x0000]);
+    c.sr[14] = RAM + 0x100;
+    c.bus.write(RAM + 0x100, 0x0200_1234, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.sr[3], 0x0200_1234);
+    assert_eq!(c.sr[14], RAM + 0x104);
+    assert_eq!(c.pc, XIP + 2);
+    let mut c = cpu(&[0x0481, 0x0000]);
+    c.sr[14] = RAM + 0x100;
+    c.bus.write(RAM + 0x100, 0x0200_5678, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.sr[0], 0x0200_5678);
+    assert_eq!(c.sr[14], RAM + 0x104);
 }
 
 #[test]

@@ -39,6 +39,7 @@ pub(crate) enum Op {
     MoveStackPointer,
     PushIrqFrame,
     PopIrqFrame,
+    PopSpecial,
     CallRel32,
     Rel22,
     CallRel9,
@@ -207,6 +208,8 @@ pub(crate) fn decode(h: u32) -> Op {
         PushIrqFrame
     } else if matches!(h, 0x04a8 | 0x04a9) {
         PopIrqFrame
+    } else if h & 0xfff0 == 0x0480 && h & 15 != 0 {
+        PopSpecial
     } else if h == 0xff80 {
         CallRel32
     } else if matches!(h & 0xffc0, 0xea80 | 0xeac0) {

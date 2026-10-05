@@ -101,3 +101,53 @@ Girl now run 729174 instructions (was 648199) to the same stop at
 
 Result: SLOOP `executed: 95961853`, then `unsupported instruction 0x0488 at
 PC 0x020108cc`.
+
+## 4. `0488` at 0x020108cc: `pop {rets}` (special-register pop)
+
+Bytes `88 04`, followed by `ff ea 53 c4` (a `goto`): a tail call that
+restores rets pushed by the prologue's `push rets` (0x0410) and jumps on.
+Quarkslab's `pop {popsrmap}` (`ins0412 = 0x048`) takes the low nibble as a
+bitmap over {reti, rete, retx, rets} from bit 0, popped lowest first. The
+stock image confirms the bit-0 end: FM-1 0x02000628 returns from an
+interrupt with `pop {r0}` (`e8d4 0001`), `0481` (pop {reti}), `nop`, `rti`.
+Every other `048X` hit in the images is an operand of a long instruction or
+data.
+
+Fix: decode `h & 0xfff0 == 0x0480` (non-zero bitmap) as PopSpecial; bit n
+restores sr[n] (sr[0] = reti, sr[3] = rets, as the emulator's IRQ frames
+already use them). Test: `pop_special_registers_restores_rets_before_a_tail_goto`.
+
+## Milestone: SLOOP boots and runs
+
+- 200M: `executed: 200000000`, `LCD: 284160 pixels written; visible=true`,
+  `audio: 315581 stereo frames, 1232 DMA halves; ADC: 498 conversions`,
+  `watchdog: 319 feeds`, no fault.
+- 800M: `executed: 800000000`, `audio: 1418081 stereo frames, 5539 DMA
+  halves; ADC: 3364 conversions`, `watchdog: 1752 feeds`, no fault.
+- SLOOP's own diagnostics block (`felucca_dbg`, found by its "DBG1" magic at
+  0x01c7c040 in an `FM1_RAM` dump): at 300M `ui_frames=488 halves=1945
+  late=0 boots=1 cpu_q8=188`; at 400M `ui_frames=727 halves=2663 late=0
+  boots=1`. The UI loop keeps running, no audio half is late, no reset.
+- The pixel count stays at 284160 after the home screen is drawn because
+  SLOOP redraws only what changed. With input it updates:
+  `knob_check sloop-2.2.fwsc SELECT 2` changes 108 pixels (BPM 90 -> 97),
+  `KNOB1 6` changes 56.
+- Screens (`~/GitHub/fm1-firmware/screens/`): `sloop-splash-40M.png` (logo),
+  `sloop-200M.png` and `sloop-800M.png` (tracks page: 808 BOOM / RHODES /
+  LOFI FLUTE / 808 drums), `sloop-select-before.png` /
+  `sloop-select-after.png`, `sloop-knob1-after.png`.
+
+Regression set at this point: Felucca `LCD: 4235962`, `audio: 318151`;
+Jangada `LCD: 4211962`, `audio: 318136`; stock and Baud Girl `executed:
+729174` (stop at 0x02034b3c, read of 0x00000003); `cargo test --release
+--features gui`: 129 passed, 2 ignored.
+
+## Open
+
+- Conditional kind 0xc3 (`if (rA > #imm)`) still uses the packed operand;
+  by the family rule (low bits 3 = imm12, proven for 0xcb) it is probably a
+  plain imm12 too. Only SLOOP 0x0200451a `ec30 a600` tells them apart and it
+  was not reached; left unchanged without evidence.
+- Kinds 0xe1..0xe3 (signed `>`) are not decoded; SLOOP 0x020088b0
+  `ee30 6fff` (`ifs (r0 > -1)` by the family rule) would fault if reached
+  (not reached in 800M instructions).
