@@ -120,6 +120,25 @@ mod lock_tests {
     }
 
     #[test]
+    fn both_cores_share_one_step_of_guest_time() {
+        let mut c = Cpu::new(Bus::new(vec![0; 64]).unwrap(), crate::XIP);
+        let entry = crate::RAM + 512;
+        c.bus.write(0x01c7fff8, entry, 4).unwrap();
+        c.bus.write(0x1eee004, 8, 4).unwrap();
+        for _ in 0..10 {
+            c.step().unwrap();
+        }
+        // Ten pairs of instructions (the secondary starts in the first).
+        assert_eq!(c.steps, 10);
+        assert_eq!(c.core_steps, [10, 10]);
+        // CPU0 stopped: the secondary alone carries guest time.
+        c.bus.write(0x1eee000, 4, 4).unwrap();
+        c.step().unwrap();
+        assert_eq!(c.steps, 11);
+        assert_eq!(c.core_steps, [10, 11]);
+    }
+
+    #[test]
     fn paused_secondary_retains_context_until_resume() {
         let mut c = Cpu::new(Bus::new(vec![0; 32]).unwrap(), crate::XIP);
         let entry = crate::RAM + 512;
@@ -166,6 +185,13 @@ pub struct Cpu {
     pub sr: [u32; 16],
     pub pc: u32,
     pub steps: u64,
+    /// Instructions executed by each core. `steps` is the time base: with
+    /// both cores running, a pair of instructions (one per core) takes one
+    /// step of guest time, as both cores run on the same clock.
+    pub core_steps: [u64; 2],
+    /// False while the secondary executes alongside the primary: its
+    /// instruction then shares the primary's step of guest time.
+    counts_time: bool,
     /// Instructions per 24 MHz oscillator tick: the emulated CPU clock is
     /// 24 MHz times this (1 = 24 MHz, the real-time default; the FM-1's
     /// WL82 runs at 120-396 MHz, typically 320). Timers, audio DMA, USB and
@@ -243,6 +269,8 @@ impl Cpu {
             sr: [0; 16],
             pc: entry,
             steps: 0,
+            core_steps: [0; 2],
+            counts_time: true,
             instructions_per_tick: 1,
             subtick: 0,
             interrupts_enabled: false,
@@ -332,9 +360,15 @@ impl Cpu {
             return self.step_secondary();
         }
         self.step_core()?;
+        self.core_steps[0] += 1;
         let op = self.name;
         if !self.bus_locked && secondary_running {
-            self.step_secondary()?;
+            // Both cores run on one clock: the secondary's instruction shares
+            // the primary's step of guest time instead of adding its own.
+            self.counts_time = false;
+            let result = self.step_secondary();
+            self.counts_time = true;
+            result?;
         }
         Ok(op)
     }
@@ -345,6 +379,7 @@ impl Cpu {
         let result = self.step_core();
         secondary.swap(self);
         self.secondary = Some(secondary);
+        self.core_steps[1] += 1;
         result.map(|()| self.name)
     }
 
@@ -398,6 +433,9 @@ impl Cpu {
                     self.repeat = None;
                 }
             }
+        }
+        if !self.counts_time {
+            return self.dispatch_interrupt();
         }
         self.steps += 1;
         self.subtick += 1;
