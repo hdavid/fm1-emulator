@@ -59,9 +59,13 @@ uploads. Guest time still follows the emulated clock, so execution speed depends
 on the host and is not yet calibrated to real time.
 
 Instruction dispatch uses a shared first-word decode table and a bounded cache
-of wide instruction words. Both cores still fetch current bytes through the bus;
-RAM code changes and disabled XIP cannot be hidden by cached decoding. Blocks
-and native JIT compilation remain future work.
+of wide instruction words. A bounded basic-block cache also prepares common
+register, arithmetic, shift, memory and short branch operations, including their
+operands. Each core retains its own position in the block. Current instruction
+words are still checked through the bus, so SRAM changes, flash remapping and
+disabled XIP cannot execute stale code. Interrupts, device timing and core
+interleaving retain their per-instruction boundaries. Native JIT compilation
+remains future work.
 
 `build/display/firmware.elf` is the 17,056-byte FM-1_981 hardware application.
 It uses Felucca-derived startup, watchdog, recovery, input scanning, USB CDC and

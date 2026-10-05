@@ -155,6 +155,8 @@ struct Repeat {
 
 pub struct Cpu {
     decode: DecodeCache,
+    blocks: crate::blocks::Cache,
+    block_cursor: crate::blocks::Cursor,
     pub bus: Bus,
     pub r: [u32; 16],
     pub sr: [u32; 16],
@@ -175,6 +177,7 @@ pub struct Cpu {
 
 // Per-core context. Memory and devices remain on the one shared bus.
 struct Core {
+    block_cursor: crate::blocks::Cursor,
     r: [u32; 16],
     sr: [u32; 16],
     pc: u32,
@@ -193,6 +196,7 @@ impl Core {
         let mut sr = [0; 16];
         sr[6] = 1;
         Self {
+            block_cursor: Default::default(),
             r: [0; 16],
             sr,
             pc,
@@ -210,6 +214,7 @@ impl Core {
     }
     fn swap(&mut self, cpu: &mut Cpu) {
         use std::mem::swap;
+        swap(&mut self.block_cursor, &mut cpu.block_cursor);
         swap(&mut self.r, &mut cpu.r);
         swap(&mut self.sr, &mut cpu.sr);
         swap(&mut self.pc, &mut cpu.pc);
@@ -254,7 +259,9 @@ impl Cpu {
     pub fn new(bus: Bus, entry: u32) -> Self {
         Self {
             decode: DecodeCache::new(),
+            blocks: crate::blocks::Cache::new(),
             bus,
+            block_cursor: Default::default(),
             r: [0; 16],
             sr: [0; 16],
             pc: entry,
@@ -380,6 +387,14 @@ impl Cpu {
                 }
                 self.pc = continuation;
                 op
+            } else if let Some(instruction) = self.blocks.instruction(
+                &self.bus,
+                &mut self.decode,
+                &mut self.block_cursor,
+                pc,
+                h as u16,
+            ) {
+                instruction.execute(self)?
             } else {
                 self.execute(h)?
             }
@@ -974,5 +989,113 @@ impl Cpu {
             *value = self.read(RESULT + i as u32 * 4, 4)?;
         }
         Ok(values)
+    }
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+
+    fn compare(a: &mut Cpu, b: &mut Cpu) {
+        assert_eq!(a.step(), b.step());
+        assert_eq!(a.r, b.r);
+        assert_eq!(a.sr, b.sr);
+        assert_eq!(a.pc, b.pc);
+        assert_eq!(a.steps, b.steps);
+        assert_eq!(a.irq_entries, b.irq_entries);
+        assert_eq!(a.bus.system.watchdog_feeds, b.bus.system.watchdog_feeds);
+        for offset in (0..128).step_by(4) {
+            assert_eq!(
+                a.bus.read(crate::RAM + offset, 4),
+                b.bus.read(crate::RAM + offset, 4)
+            );
+        }
+    }
+    fn pair(words: &[u16]) -> (Cpu, Cpu) {
+        let bytes: Vec<_> = words.iter().flat_map(|h| h.to_le_bytes()).collect();
+        let a = Cpu::new(Bus::new(bytes.clone()).unwrap(), crate::XIP);
+        let mut b = Cpu::new(Bus::new(bytes).unwrap(), crate::XIP);
+        b.blocks.enabled = false;
+        (a, b)
+    }
+    #[test]
+    fn prepared_instructions_match_the_reference_with_aliases_flags_and_faults() {
+        let mut seed = 0x981093u32;
+        let mut words = Vec::new();
+        let decode = DecodeCache::new();
+        // Cover all short register/operand combinations in the prepared families.
+        for h in 0..=65535u32 {
+            if matches!(
+                decode.first(h),
+                First::Arithmetic
+                    | First::Logic
+                    | First::MovReg
+                    | First::Extended(crate::decode::Extended::Multiply)
+                    | First::Extended(crate::decode::Extended::Extend)
+            ) {
+                words.push(h as u16);
+            }
+        }
+        words.extend([
+            0x2040, 0x20c0, 0x8008, 0xa000, 0xa080, 0xa088, 0x6000, 0x6080, 0x8004, 0x8001, 0x4000,
+            0x4080,
+        ]);
+        for h in words {
+            let (mut a, mut b) = pair(&[h, 0x4321, 0x8765]);
+            for n in 0..16 {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                a.r[n] = seed;
+                a.sr[n] = seed.rotate_left(13);
+            }
+            b.r = a.r;
+            b.sr = a.sr;
+            compare(&mut a, &mut b);
+            // Revisit the cached instruction with different dynamic operands.
+            a.pc = crate::XIP;
+            b.pc = crate::XIP;
+            a.r = a.r.map(|v| !v);
+            b.r = a.r;
+            compare(&mut a, &mut b);
+        }
+        for h in [
+            0xe1e4, 0xe0b4, 0xe190, 0xe1c0, 0xe1c4, 0xffc8, 0xffee, 0xe04f,
+        ] {
+            for x in [0, 0x4003, 0x5430, 0x5432, 0x5433, 0x87ff, 0xf000, 0xffff] {
+                let (mut a, mut b) = pair(&[h, x, 0x1234]);
+                a.r = std::array::from_fn(|n| 0x80000001u32.wrapping_mul(n as u32 + 1));
+                a.sr[5] = 0xabcdfff0;
+                b.r = a.r;
+                b.sr = a.sr;
+                compare(&mut a, &mut b);
+            }
+        }
+    }
+    #[test]
+    fn cached_blocks_preserve_timer_interrupts_and_repeat_boundaries() {
+        let (mut a, mut b) = pair(&[0x2540, 0x0300, 0x1631, 0x2040, 0x8004, 0x0400]);
+        for c in [&mut a, &mut b] {
+            c.sr[11] = 0x100;
+            c.sr[13] = crate::SYSTEM_STACK;
+            c.sr[14] = crate::USER_STACK;
+            c.interrupts_enabled = true;
+            c.bus.write(crate::RAM, 0x0081, 2).unwrap(); // RTI.
+            c.bus
+                .write(crate::devices::IRQ_CONFIG + 7 * 4, 1 << 28, 4)
+                .unwrap();
+            c.bus.write(0x01c7fe00 + 63 * 4, crate::RAM, 4).unwrap();
+            c.bus.write(crate::devices::TIMER5 + 8, 1, 4).unwrap();
+            c.bus.write(crate::devices::TIMER5, 0x4009, 4).unwrap();
+        }
+        for _ in 0..100 {
+            compare(&mut a, &mut b);
+        }
+        assert!(a.irq_entries > 0);
+    }
+    #[test]
+    fn decoding_ahead_does_not_raise_a_future_fetch_fault() {
+        let (mut a, mut b) = pair(&[0x2040]);
+        compare(&mut a, &mut b);
+        assert_eq!(a.pc, crate::XIP + 2);
+        compare(&mut a, &mut b);
     }
 }

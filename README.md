@@ -61,7 +61,6 @@ and Baud Girl results.
 
 ## Still to implement
 
-- [ ] Cache decoded blocks to reduce interpreter overhead further.
 - [ ] Add a JIT to improve guest execution speed.
 - [ ] Remaining CPU instructions, peripherals and firmware UI paths.
 - [ ] Host audio playback, rotary controls and USB MIDI.
