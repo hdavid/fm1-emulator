@@ -1394,6 +1394,31 @@ fn stock_name_comparison_loads_a_byte_from_a_negative_offset() {
 }
 
 #[test]
+fn stock_formatter_sign_extends_bytes_at_negative_offsets() {
+    // Vendor r3 encodings: r0=b[r5-1/-256](s), r3=b[r3-18](s).
+    for (word, base, destination, offset) in [
+        (0x0f5f, 5, 0, -1i32),
+        (0x0050, 5, 0, -256),
+        (0x3e3e, 3, 3, -18),
+    ] {
+        for (byte, expected) in [(0x7f, 127), (0x80, 0xffffff80), (0xff, u32::MAX)] {
+            let mut c = cpu(&[0xee55, word]);
+            c.r[base] = RAM + 512;
+            c.sr[5] = 15;
+            c.bus
+                .write((RAM + 512).wrapping_add(offset as u32), byte, 1)
+                .unwrap();
+            c.step().unwrap();
+            assert_eq!(c.r[destination], expected);
+            if base != destination {
+                assert_eq!(c.r[base], RAM + 512);
+            }
+            assert_eq!(c.sr[5], 15);
+        }
+    }
+}
+
+#[test]
 fn signed_minimum_clips_audio_with_signed_comparison() {
     for (left, right, expected) in [(-10, 32767, -10), (40000, 32767, 32767), (-10, -20, -20)] {
         let mut c = cpu(&[0xe435, 0x0031]); // r0 = smin(r3, r0)

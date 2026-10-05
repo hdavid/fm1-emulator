@@ -788,7 +788,10 @@ pub(crate) fn execute(
                 next = next.wrapping_add((signed(x & 511, 9) * 2) as u32);
             }
             op = "branch_compare_register";
-        } else if matches!(h, 0xee50 | 0xee51 | 0xee52 | 0xee54 | 0xee58 | 0xee5a) {
+        } else if matches!(
+            h,
+            0xee50 | 0xee51 | 0xee52 | 0xee54 | 0xee55 | 0xee58 | 0xee5a
+        ) {
             let off = signed(((h & 1) << 8) | (((x >> 8) & 15) << 4) | (x & 15), 9) as u32;
             mem = Some((
                 d,
@@ -796,7 +799,7 @@ pub(crate) fn execute(
                 cpu.r[s].wrapping_add(off),
                 1,
                 h & 2 != 0,
-                h & 15 == 4,
+                h & 4 != 0,
                 if h & 8 != 0 {
                     Some(cpu.r[s].wrapping_add(off))
                 } else {
