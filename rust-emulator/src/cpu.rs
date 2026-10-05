@@ -877,8 +877,24 @@ impl Cpu {
         Ok(name)
     }
 
+    /// Whether the PC is inside an active repeat block or the then-part of
+    /// a conditional block (stale state after a branch out does not count).
+    fn inside_block(&self) -> bool {
+        let pc = self.pc;
+        matches!(self.repeat, Some((start, end, _)) if (start..end).contains(&pc))
+            || matches!(self.predicate_skip, Some((at, _)) if pc < at && at - pc <= 32)
+    }
+
     fn dispatch_interrupt(&mut self) -> Result<(), Fault> {
-        if !self.interrupts_enabled || self.in_interrupt {
+        // No interrupt inside a repeat or conditional block. The stock RTOS
+        // context switch saves only r0-r15 and {psr, rets, reti} (04e9 /
+        // 04a9 + e8d8/e8d4), so no hidden block state can survive an
+        // interrupt that switches tasks; restoring it on rti leaked one
+        // task's repeat into another (FM-1_093: a nested rep at 0x01c05026).
+        if !self.interrupts_enabled
+            || self.in_interrupt
+            || self.inside_block()
+        {
             return Ok(());
         }
         if let Some(source) = self.bus.pending_irq_for(self.sr[11], self.sr[6] as usize) {
