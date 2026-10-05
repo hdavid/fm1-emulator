@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Polled SARADC subset used by Felucca's fm1_adc.h. Conversion timing is
-// functional; inputs represent the battery divider and master potentiometer.
+// functional; inputs represent the battery divider, master potentiometer and
+// the internal PMU channels sampled by the stock SDK.
 pub const CONTROL: u32 = 0x13100;
 pub const RESULT: u32 = 0x13104;
 const CONVERSION_TICKS: u32 = 32;
@@ -65,6 +66,10 @@ impl Adc {
                         // both sources are sampled against the same 3.3 V rail.
                         15 => match self.pmu_channel {
                             0 => (1023u32 * 800 / 3300) as u16,
+                            // FM-1_997 measured VTEMP (mux 3) at 349..351 in
+                            // 60 physical samples. Use its median as a fixed
+                            // sensor reading; temperature drift is not modeled.
+                            3 => 350,
                             5 => (1023u32 * 1050 / 3300) as u16,
                             _ => return Some(Err("unsupported PMU ADC source")),
                         },

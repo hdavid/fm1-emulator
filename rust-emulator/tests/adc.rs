@@ -80,3 +80,35 @@ fn disable_cancels_conversion_and_unknown_channels_fault() {
     assert!(bus.write(RESULT, 123, 4).is_err());
     assert!(bus.read(CONTROL, 2).is_err());
 }
+
+#[test]
+fn temperature_conversion_latches_the_pmu_mux_before_a_later_selection() {
+    use fm1_emu::devices::IRQ_CONFIG;
+    let mut bus = Bus::new(vec![0, 0]).unwrap();
+    bus.write(IRQ_CONFIG + 12, 1, 4).unwrap();
+    let select = |bus: &mut Bus, source: u32| {
+        bus.write(0x13e08, 1, 4).unwrap();
+        for byte in [0, 4, (source << 1) | 1] {
+            bus.write(0x13e0c, byte, 4).unwrap();
+            bus.write(0x13e08, 0x11, 4).unwrap();
+        }
+        bus.write(0x13e08, 0, 4).unwrap();
+    };
+    select(&mut bus, 3);
+    bus.write(CONTROL, 0xff7f, 4).unwrap();
+    select(&mut bus, 0);
+    assert_eq!(bus.pending_irq(0x100), None);
+    bus.devices.advance(31);
+    assert_eq!(bus.read(CONTROL, 4).unwrap() & 128, 0);
+    bus.devices.advance(1);
+    assert_eq!(bus.pending_irq(0x100), Some(24));
+    assert!((349..=351).contains(&bus.read(RESULT, 4).unwrap()));
+    // Acknowledge and restart: the next sample must use the new mux source.
+    bus.write(CONTROL, 0xff7f, 4).unwrap();
+    assert_eq!(bus.pending_irq(0x100), None);
+    bus.devices.advance(32);
+    assert_eq!(bus.read(RESULT, 4).unwrap(), 1023 * 800 / 3300);
+    assert_eq!(bus.devices.adc.conversions, 2);
+    select(&mut bus, 1);
+    assert!(bus.write(CONTROL, 0xff7f, 4).is_err());
+}
