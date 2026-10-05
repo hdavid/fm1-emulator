@@ -4,9 +4,10 @@
 // Boots, then per preset (one clockwise click apart, until the LCD footer
 // shows the first preset's name again or MAX_CLICKS, default 250): holds a
 // four-note chord for 1.5 s of guest time, releases, and prints the footer
-// hash and the audio level. A guest fault is written to OUT_DIR/fault-K.txt
-// with the last instructions; the sweep then reboots, clicks back to preset
-// K (checking its footer) and goes on. OUT_DIR/footers.png stacks the footer
+// hash, the output peak with no key held (idle) and the chord's audio
+// level. A guest fault is written to OUT_DIR/fault-K.txt with the last
+// instructions; the sweep then reboots, clicks back to preset K (checking
+// its footer) and goes on. OUT_DIR/footers.png stacks the footer
 // of every preset, one band per preset, for reading the names.
 use fm1_emu::{
     lcd,
@@ -30,6 +31,7 @@ const TRACE: usize = 200;
 struct Preset {
     footer: Vec<u32>,
     hash: u64,
+    idle: f64,
     level: Option<Level>,
     fault: Option<String>,
 }
@@ -49,6 +51,11 @@ fn click(player: &mut Player) -> Result<(), String> {
     player.encoders.turn(ui_knobs::knob::PRESETS, 1);
     player.settle_encoders(1.0)?;
     player.run_seconds(SETTLE_SECONDS)
+}
+
+/// The output with no key held (a reference for the chord's level).
+fn idle(player: &mut Player) -> Result<f64, String> {
+    Ok(player.level(SETTLE_SECONDS)?.peak)
 }
 
 fn play(player: &mut Player) -> Result<Level, String> {
@@ -87,7 +94,7 @@ fn main() -> Result<(), String> {
     let mut presets: Vec<Preset> = Vec::new();
     let mut player = reach(firmware, 0)?;
     let mut wrapped = false;
-    println!("preset  footer            frames  rms     peak    result");
+    println!("preset  footer            idle    frames  rms     peak    result");
     for k in 0..=max {
         if k > 0 {
             if let Err(report) = click(&mut player) {
@@ -107,10 +114,15 @@ fn main() -> Result<(), String> {
         let mut preset = Preset {
             footer: pixels,
             hash: h,
+            idle: 0.0,
             level: None,
             fault: None,
         };
-        match play(&mut player) {
+        let played = idle(&mut player).and_then(|peak| {
+            preset.idle = peak;
+            play(&mut player)
+        });
+        match played {
             Ok(level) => preset.level = Some(level),
             Err(report) => {
                 let fault = report.lines().last().unwrap_or("").to_string();
@@ -132,8 +144,9 @@ fn main() -> Result<(), String> {
         };
         let level = preset.level.unwrap_or_default();
         println!(
-            "{k:>6}  {:016x}  {:>6}  {:.4}  {:.4}  {result}",
+            "{k:>6}  {:016x}  {:.4}  {:>6}  {:.4}  {:.4}  {result}",
             preset.hash,
+            preset.idle,
             level.frames,
             level.rms(),
             level.peak
