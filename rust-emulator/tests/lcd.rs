@@ -2,7 +2,7 @@
 use fm1_emu::{
     bus::Bus,
     lcd::{IOMAP, SPI},
-    RAM,
+    RAM, XIP,
 };
 
 fn write(bus: &mut Bus, address: u32, value: u32) {
@@ -38,6 +38,30 @@ fn init() -> Bus {
     cmd(&mut bus, 0x29);
     bus
 }
+#[test]
+fn transfer_completion_interrupts_obey_enable_mask_and_acknowledgement() {
+    use fm1_emu::devices::IRQ_CONFIG;
+    let mut bus = init();
+    write(&mut bus, SPI, 0x4021);
+    write(&mut bus, IRQ_CONFIG + 2 * 4, 1 | (3 << 1));
+    assert_eq!(bus.pending_irq(0x100), None);
+    write(&mut bus, 0x50080, 0);
+    write(&mut bus, SPI + 8, 0x2c);
+    assert_eq!(bus.pending_irq(0x100), None); // Completed, peripheral IRQ disabled.
+    write(&mut bus, SPI, 0x2021);
+    assert_eq!(bus.pending_irq(0x100), Some(16));
+    write(&mut bus, IRQ_CONFIG + 2 * 4, 0);
+    assert_eq!(bus.pending_irq(0x100), None);
+    write(&mut bus, IRQ_CONFIG + 2 * 4, 1 | (3 << 1));
+    write(&mut bus, SPI, 0x6021);
+    assert_eq!(bus.pending_irq(0x100), None);
+    data(&mut bus, &[0xf8, 0]);
+    assert_eq!(bus.lcd.pixels[0], 0xff0000);
+    assert_eq!(bus.pending_irq(0x100), Some(16));
+    write(&mut bus, SPI, 0x2020);
+    assert_eq!(bus.pending_irq(0x100), None); // Disabled SPI cannot assert IRQ.
+}
+
 #[test]
 fn rgb565_dma_respects_window_wrap_and_split_pixels() {
     let mut bus = init();
@@ -90,10 +114,10 @@ fn invalid_dma_and_unsupported_commands_fault() {
     let mut bus = init();
     write(&mut bus, SPI + 12, RAM + 512 * 1024 - 1);
     assert!(bus.write(SPI + 16, 2, 4).is_err());
-    // XIP flash is a valid DMA source: the stock app sends its panel init
-    // table from flash (0x0204f8b2, SPI1 DMA at 0x02023de0).
-    write(&mut bus, SPI + 12, 0x0100_0000);
-    assert!(bus.write(SPI + 16, 2, 4).is_err());
+    write(&mut bus, SPI + 12, 0x02000120);
+    assert!(bus.write(SPI + 16, 3, 4).is_err()); // Past the loaded image.
+    write(&mut bus, SPI + 12, SPI);
+    assert!(bus.write(SPI + 16, 1, 4).is_err()); // MMIO is not a DMA source.
     assert!(bus.write(SPI, 0, 1).is_err());
     assert!(bus.read(SPI + 1, 1).is_err());
     write(&mut bus, 0x50080, 0);
@@ -103,13 +127,90 @@ fn invalid_dma_and_unsupported_commands_fault() {
     for byte in [0, 0, 0] {
         write(&mut bus, SPI + 8, byte);
     }
-    // XE = 240 is past the 240 columns: accepted, data there is ignored
-    // (the stock app sends CASET 0..240); XS > XE still faults.
-    assert!(bus.write(SPI + 8, 240, 4).is_ok());
-    cmd(&mut bus, 0x2a);
+    write(&mut bus, SPI + 8, 240); // Invalid CASET is ignored by the controller.
+    cmd(&mut bus, 0x2c);
+    data(&mut bus, &[0xf8, 0]);
+    assert_eq!(bus.lcd.pixels[0], 0xff0000);
+}
+
+#[test]
+fn lcd_dma_can_read_flash_constants_at_a_byte_aligned_address() {
+    let mut bus = init();
+    bus.flash = vec![0, 0xf8, 0, 0x07, 0xe0];
+    cmd(&mut bus, 0x2c);
     write(&mut bus, 0x50080, 0x100);
-    for byte in [0, 9, 0] {
-        write(&mut bus, SPI + 8, byte);
+    write(&mut bus, SPI + 12, XIP + 1);
+    write(&mut bus, SPI + 16, 4);
+    assert_eq!(bus.lcd.pixels_written, 2);
+    assert_eq!(&bus.lcd.pixels[..2], &[0xff0000, 0x00ff00]);
+    assert_ne!(bus.read(SPI, 4).unwrap() & 0x8000, 0);
+    assert_eq!(bus.read(XIP + 1, 1).unwrap(), 0xf8);
+    write(&mut bus, SPI + 12, XIP + 4);
+    assert!(bus.write(SPI + 16, 2, 4).is_err());
+    assert_eq!(bus.lcd.pixels_written, 2);
+}
+
+#[test]
+fn stock_panel_setup_does_not_move_the_visible_ram_origin() {
+    let mut bus = init();
+    // Stock initialization uses a 240-row window in 320-row ST7789 RAM.
+    cmd(&mut bus, 0x2b);
+    data(&mut bus, &[0, 40, 1, 23]);
+    for (command, parameters) in [
+        (0xb2, vec![12, 12, 12, 0, 51]),
+        (0xb7, vec![86]),
+        (0xbb, vec![24]),
+        (0xc0, vec![44]),
+        (0xc2, vec![1]),
+        (0xc3, vec![31]),
+        (0xc4, vec![32]),
+        (0xc6, vec![15]),
+        (0xd0, vec![166, 161]),
+        (
+            0xe0,
+            vec![208, 13, 20, 11, 11, 7, 58, 68, 80, 8, 19, 19, 45, 50],
+        ),
+        (
+            0xe1,
+            vec![208, 13, 20, 11, 11, 7, 58, 68, 80, 8, 19, 19, 45, 50],
+        ),
+        (0xe7, vec![0]),
+        (0x51, vec![255]),
+    ] {
+        cmd(&mut bus, command);
+        data(&mut bus, &parameters);
     }
-    assert!(bus.write(SPI + 8, 8, 4).is_err());
+    assert_eq!(bus.lcd.pixels_written, 0);
+    cmd(&mut bus, 0x2a);
+    data(&mut bus, &[0, 7, 0, 7]);
+    for (row, color) in [
+        (40, [0xf8, 0]),
+        (279, [7, 0xe0]),
+        (0, [0xff, 0xff]),
+        (239, [0, 0x1f]),
+    ] {
+        cmd(&mut bus, 0x2b);
+        data(
+            &mut bus,
+            &[(row >> 8) as u8, row as u8, (row >> 8) as u8, row as u8],
+        );
+        cmd(&mut bus, 0x2c);
+        data(&mut bus, &color);
+    }
+    assert_eq!(bus.lcd.pixels[7], 0xffffff);
+    assert_eq!(bus.lcd.pixels[40 * 240 + 7], 0xff0000);
+    assert_eq!(bus.lcd.pixels[239 * 240 + 7], 0x0000ff);
+    assert!(bus
+        .lcd
+        .pixels
+        .iter()
+        .all(|p| matches!(*p, 0 | 0xff0000 | 0xffffff | 0x0000ff)));
+    cmd(&mut bus, 0xe7);
+    write(&mut bus, 0x50080, 0x100);
+    assert!(bus.write(SPI + 8, 0x10, 4).is_err());
+    cmd(&mut bus, 0xc3);
+    data(&mut bus, &[31]);
+    assert!(bus.write(SPI + 8, 32, 4).is_err());
+    cmd(&mut bus, 1);
+    assert!(bus.lcd.pixels.iter().all(|p| *p == 0));
 }

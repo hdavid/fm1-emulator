@@ -4,15 +4,12 @@ pub struct System {
     pmu_control: u32,
     rtc_control: u32,
     osa_control: u32,
-    lrc_trim: [u32; 2],
     control: u32,
     data: u8,
     transaction: Vec<u8>,
     registers: [u8; 2048],
     pub watchdog_feeds: u64,
     pub watchdog_ticks: u64,
-    /// Diagnostics only (diagnose FM1_WATCHDOG_OFF=1): count but never expire.
-    pub watchdog_expiry_disabled: bool,
 }
 impl Default for System {
     fn default() -> Self {
@@ -22,28 +19,22 @@ impl Default for System {
             pmu_control: 0x100,
             rtc_control: 0xe0,
             osa_control: 0,
-            lrc_trim: [0, 0],
             control: 0,
             data: 0,
             transaction: Vec::new(),
             registers,
             watchdog_feeds: 0,
             watchdog_ticks: 0,
-            watchdog_expiry_disabled: false,
         }
     }
 }
 impl System {
-    /// Current value of a P33 analog/PMU register (e.g. 0x04 P3_ANA_CON4).
-    pub fn p33_register(&self, index: usize) -> u8 {
-        self.registers[index]
+    pub(crate) fn adc_pmu_selection(&self) -> u8 {
+        (self.registers[4] >> 1) & 7
     }
     pub fn read(&self, address: u32) -> Option<u32> {
         match address {
             0x13400 => Some(self.osa_control),
-            // JL_LRCT CON/NUM (WL82.h 0x3600). Reset state: counter idle.
-            0x13600 => Some(self.lrc_trim[0]),
-            0x13604 => Some(self.lrc_trim[1]),
             0x13e00 => Some(self.pmu_control),
             0x13e04 => Some(self.rtc_control),
             0x13e08 => Some(self.control),
@@ -57,14 +48,6 @@ impl System {
             // OSA IRQ wrapper acknowledges bit 6; no protection event is
             // pending while the emulator executes ordinary valid accesses.
             0x13400 => self.osa_control = value & !0x40,
-            // STUB (see BAUD-GIRL.md): CON stores the enable (bit 0) and
-            // window (bits 1-5); bit 6 clears the done flag (bit 7). The
-            // LRC-versus-reference count itself is not modeled, so a started
-            // measurement never completes, never sets bit 7 and never raises
-            // IRQ 44. Stock firmware handles that via its LRCT interrupt,
-            // whose handler skips a zero NUM.
-            0x13600 => self.lrc_trim[0] = value & 0x3f,
-            0x13604 => self.lrc_trim[1] = value,
             0x13e00 => self.pmu_control = value,
             0x13e04 => self.rtc_control = value,
             0x13e0c => self.data = value as u8,
@@ -110,28 +93,12 @@ impl System {
         }
         Some(Ok(()))
     }
-    /// Oscillator ticks until the enabled watchdog expires, if enabled.
-    pub fn watchdog_timeout(&self) -> Option<u64> {
-        let wdt = self.registers[0x80];
-        (wdt & 0x10 != 0).then(|| 24_000_000u64 * (1u64 << (wdt & 15).saturating_sub(10)))
-    }
-
-    /// Oscillator ticks until the enabled watchdog expires (a fault), if it
-    /// can; before that `advance` only counts.
-    pub(crate) fn ticks_to_event(&self) -> Option<u64> {
-        let timeout = self.watchdog_timeout()?;
-        if self.watchdog_expiry_disabled && self.watchdog_ticks >= timeout {
-            return None;
-        }
-        Some(timeout.saturating_sub(self.watchdog_ticks).max(1))
-    }
-
     pub fn advance(&mut self, ticks: u32) -> Result<(), &'static str> {
         let wdt = self.registers[0x80];
         if wdt & 0x10 != 0 {
             self.watchdog_ticks += ticks as u64;
             let timeout = 24_000_000u64 * (1u64 << (wdt & 15).saturating_sub(10));
-            if self.watchdog_ticks >= timeout && !self.watchdog_expiry_disabled {
+            if self.watchdog_ticks >= timeout {
                 return Err("watchdog expired");
             }
         }

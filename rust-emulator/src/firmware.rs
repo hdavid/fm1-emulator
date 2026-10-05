@@ -86,8 +86,8 @@ pub fn elf_symbols(data: &[u8]) -> Result<Vec<Symbol>, String> {
                 .iter()
                 .position(|&byte| byte == 0)
                 .ok_or("unterminated ELF symbol name")?;
-            let name = std::str::from_utf8(&name[..end])
-                .map_err(|_| "invalid UTF-8 ELF symbol name")?;
+            let name =
+                std::str::from_utf8(&name[..end]).map_err(|_| "invalid UTF-8 ELF symbol name")?;
             if !name.is_empty() {
                 symbols.push(Symbol {
                     name: name.to_owned(),

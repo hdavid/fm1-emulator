@@ -10,9 +10,9 @@
 // its footer) and goes on. OUT_DIR/footers.png stacks the footer
 // of every preset, one band per preset, for reading the names.
 use fm1_emu::{
-    lcd,
+    encoders, lcd,
     player::{Level, Player},
-    png, ui_knobs,
+    png,
 };
 use std::{env, fs, path::Path};
 
@@ -48,7 +48,7 @@ fn hash(pixels: &[u32]) -> u64 {
 
 /// One click clockwise, then let the screen follow.
 fn click(player: &mut Player) -> Result<(), String> {
-    player.encoders.turn(ui_knobs::knob::PRESETS, 1);
+    player.encoders.turn(encoders::knob::PRESETS, 1);
     player.settle_encoders(1.0)?;
     player.run_seconds(SETTLE_SECONDS)
 }

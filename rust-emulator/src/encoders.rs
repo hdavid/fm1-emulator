@@ -56,6 +56,17 @@ impl Encoders {
         self.pending.iter().any(|&p| p != 0) || self.phase.iter().any(|&p| p != 0)
     }
 
+    /// Advance against the guest's column reads and set the contacts.
+    pub fn drive(&mut self, gpio: &mut crate::gpio::Gpio) {
+        let contacts = self.update(|column| gpio.column_scans(column));
+        for (e, (a, b)) in contacts.into_iter().enumerate() {
+            let [a_column, a_row, b_column, b_row] = CONTACTS[e];
+            // Positions are within the matrix, so press cannot fail.
+            let _ = gpio.press(a_column, a_row, a);
+            let _ = gpio.press(b_column, b_row, b);
+        }
+    }
+
     /// Advance with `scans(column)`, the guest's read count per matrix
     /// column so far; returns each encoder's (A, B) contacts.
     pub fn update(&mut self, scans: impl Fn(usize) -> u32) -> [(bool, bool); 7] {
@@ -80,7 +91,11 @@ impl Encoders {
                 }
                 self.since[e] = seen;
             }
-            let table = if self.direction[e] >= 0 { &CLOCKWISE } else { &COUNTER };
+            let table = if self.direction[e] >= 0 {
+                &CLOCKWISE
+            } else {
+                &COUNTER
+            };
             contacts[e] = table[self.phase[e] as usize];
         }
         contacts
@@ -134,11 +149,17 @@ mod tests {
     fn clockwise_and_counter_clockwise_detents_decode_as_felucca_counts_them() {
         let mut encoders = Encoders::default();
         encoders.turn(KNOB1, 3);
-        assert_eq!(decode(&run(&mut encoders, KNOB1, 3 * 4 * SCANS_PER_PHASE + 4)), 3);
+        assert_eq!(
+            decode(&run(&mut encoders, KNOB1, 3 * 4 * SCANS_PER_PHASE + 4)),
+            3
+        );
         assert!(!encoders.busy());
         let mut encoders = Encoders::default();
         encoders.turn(PRESETS, -2);
-        assert_eq!(decode(&run(&mut encoders, PRESETS, 2 * 4 * SCANS_PER_PHASE + 4)), -2);
+        assert_eq!(
+            decode(&run(&mut encoders, PRESETS, 2 * 4 * SCANS_PER_PHASE + 4)),
+            -2
+        );
     }
 
     #[test]

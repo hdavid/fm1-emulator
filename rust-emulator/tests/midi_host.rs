@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // The USB host model as a MIDI host: it enumerates the firmware, opens its
 // MIDI streaming endpoints and moves USB-MIDI packets both ways. Full
-// firmware is external (~/GitHub/fm1-firmware): set MIDI_FWSC to a Felucca,
-// Jangada or SLOOP package and run in release mode with --ignored.
+// firmware is external: set MIDI_FWSC to a Felucca, Jangada or SLOOP package
+// and run in release mode with --ignored. The firmware runs at a 24 MHz
+// instruction clock, so the step counts below are seconds of guest time
+// divided by 24 million.
 use fm1_emu::{
     bus::Bus,
     cpu::Cpu,
@@ -11,14 +13,22 @@ use fm1_emu::{
 };
 use std::{env, path::Path};
 
+fn run(cpu: &mut Cpu, steps: u64) {
+    for _ in 0..steps {
+        cpu.step()
+            .unwrap_or_else(|error| panic!("after {} instructions: {error}", cpu.steps));
+    }
+}
+
 fn boot() -> Cpu {
     let path = env::var("MIDI_FWSC").expect("set MIDI_FWSC to a Felucca-family package");
     let firmware = Firmware::load(Path::new(&path)).unwrap();
     let mut bus = firmware.bus().unwrap();
     bus.usb.enable_midi_host();
+    bus.set_instruction_clock(Some(24_000_000));
     let mut cpu = Cpu::new(bus, firmware.entry);
     cpu.r[0] = 0x01c7fe08;
-    cpu.run_steps(100_000_000).unwrap();
+    run(&mut cpu, 100_000_000);
     cpu
 }
 
@@ -52,11 +62,11 @@ fn a_note_on_from_the_host_makes_the_firmware_sound() {
     );
     assert_eq!(cpu.bus.usb.product(), Some("Felucca"));
     cpu.bus.audio.samples.clear();
-    cpu.run_steps(5_000_000).unwrap();
+    run(&mut cpu, 5_000_000);
     let silent = cpu.bus.audio.samples.iter().all(|f| *f == [0, 0]);
     assert!(silent, "no note was played yet");
     cpu.bus.usb_midi_send(&encode(&[0x90, 60, 110], 0));
-    cpu.run_steps(10_000_000).unwrap();
+    run(&mut cpu, 10_000_000);
     assert_eq!(
         cpu.bus.usb.midi_pending(),
         0,
@@ -84,7 +94,7 @@ fn an_editor_sysex_request_gets_its_reply_back_over_usb() {
         .usb_midi_send(&encode(&[0xF0, 0x7D, 0x46, 0x4C, 1, 0xF7], 0));
     let mut replies = Vec::new();
     for _ in 0..40 {
-        cpu.run_steps(1_000_000).unwrap();
+        run(&mut cpu, 1_000_000);
         replies.extend(received(&mut cpu, &mut decoder));
         if replies
             .iter()
@@ -99,29 +109,4 @@ fn an_editor_sysex_request_gets_its_reply_back_over_usb() {
         .unwrap_or_else(|| panic!("no INFO reply; got {replies:02x?}"));
     assert_eq!(info.last(), Some(&0xF7));
     assert!(info.len() > 20, "INFO carries a version and engine names");
-}
-
-#[test]
-#[ignore = "requires MIDI_FWSC; run in release mode with --ignored"]
-fn sysex_bytes_sent_as_single_byte_packets_are_kept() {
-    // macOS sends some bytes inside a long SysEx as CIN 0xF single bytes
-    // (its packet lists split); the request must still be assembled.
-    let mut cpu = boot();
-    let mut decoder = Decoder::default();
-    received(&mut cpu, &mut decoder);
-    cpu.bus.usb_midi_send(&[
-        [0x04, 0xF0, 0x7D, 0x46],
-        [0x0F, 0x4C, 0, 0],
-        [0x0F, 0x01, 0, 0],
-        [0x05, 0xF7, 0, 0],
-    ]);
-    let mut replies = Vec::new();
-    for _ in 0..40 {
-        cpu.run_steps(1_000_000).unwrap();
-        replies.extend(received(&mut cpu, &mut decoder));
-        if replies.iter().any(|m| m.starts_with(&[0xF0, 0x7D, 0x46, 0x4C, 1])) {
-            return;
-        }
-    }
-    panic!("no INFO reply to a request with CIN 0xF bytes; got {replies:02x?}");
 }

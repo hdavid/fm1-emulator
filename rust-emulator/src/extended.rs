@@ -1,86 +1,123 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Compiler-emitted forms, decoded against vendor disassembly and the pinned
 // Quarkslab pi32v2 SLEIGH reference. Unknown/reserved forms still fault.
-// Classification is in decode.rs; this file executes the classified forms.
-use crate::code_cache::Operands;
-use crate::cpu::{signed, Cpu, Fault, Step};
-use crate::decode::Op;
-use crate::simd;
-
-/// A deferred load or store: (register, base, address, size, store,
-/// sign-extend, updated base).
-type Memory = (usize, usize, u32, usize, bool, bool, Option<u32>);
-
+use crate::{
+    cpu::{signed, Cpu, Fault},
+    decode::{Extended, Wide},
+    simd::{self, half, set_half},
+};
 pub(crate) fn packed(x: u32) -> u32 {
     match (x >> 10) & 3 {
-        // JieLi objdump: 0x0ab -> 0xAB, 0x1ab -> 0xAB00AB, 0x2ab ->
-        // 0xAB00AB00, 0x3ab -> 0xABABABAB.
         0 => match x & 0x300 {
             0x300 => (x & 255) * 0x01010101,
-            0x100 => (x & 255) * 0x0001_0001,
-            0x200 => (x & 255) * 0x0100_0100,
+            0x100 => (x & 255) * 0x00010001,
+            0x200 => (x & 255) * 0x01000100,
             _ => x & 255,
         },
         mode => ((0x80 | (x & 127)) << (32 - mode * 8)) >> ((x >> 7) & 7),
     }
 }
-
-/// The word offset of the read-modify-write memory forms (e866 bit set/flip/
-/// clear, e868 add/sub, e86c/e86d shift): x bits 2-7 as a signed byte,
-/// -128..124. JieLi's objdump: e868 12fc = [r1+-4] += r2, e86c 16fc =
-/// [r1+-4] <<= 6, e866 12fc = [r1+-4] |= 1 << r2 (ANALOG 2's hard sync
-/// writes b[i - 1] this way; read as +252 it overwrote the caller's frame).
-fn mem_offset(x: u32) -> u32 {
+/// Word offset of the E866/E868/E86C/E86D read-modify-write forms: x bits 2-7
+/// as a signed byte (vendor objdump: E868 12FC is [r1+-4] += r2).
+fn memory_offset(x: u32) -> u32 {
     signed(x & 0xfc, 8) as u32
 }
 
-fn unsupported(pc: u32, h: u32) -> Box<Fault> {
-    Box::new(Fault::Unsupported { pc, word: h as u16 })
+/// Signed nine-bit byte offset of the EE5X and EEDX forms; h bit 0 is its sign.
+fn word_increment(h: u32, x: u32) -> u32 {
+    // ECD8-ECDF: (h & 7) : x[11:8] : x[3:2], signed (vendor objdump: ECDF 4F00
+    // is r4 = [r0++=-16], ECDA 1238 is r1 = [r3++=552]).
+    signed(((h & 7) << 8) | (((x >> 8) & 15) << 4) | (x & 12), 11) as u32
 }
 
-/// Execute an extended.rs form; returns the next PC and records the form's
-/// name in the CPU.
-#[inline(always)]
-pub(crate) fn execute(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<u32> {
+fn byte_offset(h: u32, x: u32) -> u32 {
+    signed(((h & 1) << 8) | (((x >> 8) & 15) << 4) | (x & 15), 9) as u32
+}
+
+/// Store the upper halfword of rD (the vendor's `= rD.h` stores).
+fn store_upper_half(cpu: &mut Cpu, pc: u32, address: u32, d: usize) -> Result<(), Fault> {
+    cpu.bus
+        .write(address, cpu.r[d] >> 16, 2)
+        .map_err(|fault| Fault::Access { pc, fault })
+}
+
+/// Load or store the register pair rD+1:rD, the even register at `address`.
+fn pair_access(cpu: &mut Cpu, address: u32, d: usize, store: bool) -> Result<(), Fault> {
+    let reg = d & 14;
+    if store {
+        cpu.write(address, cpu.r[reg])?;
+        cpu.write(address.wrapping_add(4), cpu.r[reg + 1])?;
+    } else {
+        let low = cpu.read(address, 4)?;
+        let high = cpu.read(address.wrapping_add(4), 4)?;
+        cpu.r[reg] = low;
+        cpu.r[reg + 1] = high;
+    }
+    Ok(())
+}
+
+/// IEEE single test of a register conditional block with x bit 7 (vendor
+/// objdump -mattr=+fprev1 prints `iff`; the order of the compare-branches).
+/// Unordered operands are rejected by the caller.
+fn float_condition(kind: u32, lhs: f32, rhs: f32) -> bool {
+    match kind {
+        0x81 => lhs == rhs,
+        0x89 => lhs != rhs,
+        0x91 | 0xd1 => lhs >= rhs,
+        0x99 | 0xd9 => lhs < rhs,
+        0xa1 => lhs != rhs,
+        0xc1 | 0xe1 => lhs > rhs,
+        _ => lhs <= rhs,
+    }
+}
+
+pub(crate) fn execute(
+    cpu: &mut Cpu,
+    h: u32,
+    pc: u32,
+    kind: Extended,
+) -> Result<Option<(u32, &'static str)>, Fault> {
     let a = (h & 7) as usize;
     let b = ((h >> 4) & 7) as usize;
+    let mut next = pc + 2;
     let mut mem = None;
-    let name;
-    match op {
-        Op::MoveRegisterPair => {
+    let op;
+    match kind {
+        Extended::MoveRegisterPair => {
             let destination = (h & 14) as usize;
             let source = ((h >> 4) & 14) as usize;
             let values = [cpu.r[source], cpu.r[source + 1]];
             cpu.r[destination..destination + 2].copy_from_slice(&values);
-            name = "move_register_pair";
+            op = "move_register_pair";
         }
-        Op::Multiply => {
+        Extended::Multiply => {
             let n = (h & 15) as usize;
             cpu.r[n] = cpu.r[n].wrapping_mul(cpu.r[((h >> 4) & 15) as usize]);
-            name = "multiply";
+            op = "multiply";
         }
-        Op::ClearPair => {
+        Extended::ClearPair => {
             let destination = (h & 14) as usize;
             cpu.r[destination] = 0;
             cpu.r[destination + 1] = 0;
-            name = "clear_pair";
+            op = "clear_pair";
         }
-        Op::AddRegister => {
+        Extended::AddRegister => {
             let n = (h & 15) as usize;
-            cpu.r[n] = cpu.r[n].wrapping_add(cpu.r[((h >> 4) & 15) as usize]);
-            name = "add_register";
+            cpu.r[n] = cpu.arithmetic(cpu.r[n], cpu.r[((h >> 4) & 15) as usize], false, 0);
+            op = "add_register";
         }
-        Op::ClearHighRegister => {
+        Extended::ClearHighRegister => {
             cpu.r[8 + a] = 0;
-            name = "clear_high_register";
+            op = "clear_high_register";
         }
-        Op::CacheFlushInvalidate => {
-            // Memory is not cached here: writing back or dropping a line
-            // changes nothing.
-            name = "cache_flush_invalidate";
+        Extended::CacheFlushInvalidate => {
+            // flush [rN] (0220) and flushinv [rN] (0230) act on one data cache
+            // line; memory is not cached here, so neither changes anything.
+            op = "cache_flush_invalidate";
         }
-        Op::StackWord => {
+        Extended::StackWord => {
             mem = Some((
+                // Bit 3 selects r8-r15 (vendor objdump: 2709 is r9 = [sp+28]).
                 (h & 15) as usize,
                 0,
                 // Bit 5 supplies offset bit 7; Felucca spills beyond 128 bytes.
@@ -90,27 +127,31 @@ pub(crate) fn execute(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) ->
                 false,
                 None,
             ));
-            name = "stack_word";
+            op = "stack_word";
         }
-        Op::Extend => {
+        Extended::Extend => {
             let bits = if h & 0x80 == 0 { 8 } else { 16 };
             cpu.r[a] = if h & 8 != 0 {
                 signed(cpu.r[b], bits) as u32
             } else {
                 cpu.r[b] & ((1 << bits) - 1)
             };
-            name = "extend";
+            op = "extend";
         }
-        Op::BitRegister => {
+        Extended::MoveNegative => {
+            cpu.r[a] = (h >> 8) | 0xffffffe0;
+            op = "mov_negative";
+        }
+        Extended::BitRegister => {
             let bit = 1 << ((h >> 8) & 31);
             match h & 0xf8 {
                 0x30 => cpu.r[a] |= bit,
                 0x38 => cpu.r[a] ^= bit,
                 _ => cpu.r[a] &= !bit,
             }
-            name = "bit_register";
+            op = "bit_register";
         }
-        Op::ShiftRegister => {
+        Extended::ShiftRegister => {
             let shift = cpu.r[b];
             cpu.r[a] = if shift >= 32 {
                 if h & 0x88 == 0x88 && (cpu.r[a] as i32) < 0 {
@@ -125,33 +166,55 @@ pub(crate) fn execute(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) ->
                     _ => ((cpu.r[a] as i32) >> shift) as u32,
                 }
             };
-            name = "shift_register";
+            op = "shift_register";
         }
-        Op::AddStack => {
+        Extended::AddStack => {
             cpu.r[a] = cpu.sr[14].wrapping_add((((h >> 5) & 3) << 5) | ((h >> 8) & 31));
-            name = "add_stack";
+            op = "add_stack";
         }
-        Op::GotoRegister => {
-            cpu.name = "goto_register";
-            return Ok(cpu.r[(h & 15) as usize]);
+        Extended::GotoRegister => {
+            next = cpu.r[(h & 15) as usize];
+            op = "goto_register";
         }
-        Op::Ssync => {
-            name = "ssync";
+        Extended::Ssync => {
+            op = "ssync";
         }
-        Op::TableBranch => {
+        Extended::TableBranch => {
             let size = if h & 0x10 == 0 { 1 } else { 2 };
-            let next = (pc + 2)
+            next = (pc + 2)
                 .wrapping_add(cpu.read((pc + 2).wrapping_add(cpu.r[(h & 15) as usize]), size)? * 2);
-            cpu.name = "table_branch";
-            return Ok(next);
+            op = "table_branch";
         }
-        Op::MemorySmall => {
+        Extended::MemorySmall => {
             let size = if h & 0x2000 == 0 { 1 } else { 2 };
             let address = cpu.r[b].wrapping_add((signed((h >> 8) & 31, 5) * size as i32) as u32);
             mem = Some((a, b, address, size, h & 0x80 != 0, false, None));
-            name = "memory_small";
+            op = "memory_small";
         }
-        Op::MemoryPostincrement => {
+        Extended::MemoryPostincrementRegister => {
+            let store = h & 8 != 0;
+            if !store && a == b {
+                // Aliased load/writeback ordering needs hardware measurement.
+                return Ok(None);
+            }
+            let size = match h & 0xfc00 {
+                0x0800 => 4,
+                0x0c00 => 2,
+                _ => 1,
+            };
+            let address = cpu.r[b];
+            mem = Some((
+                a,
+                b,
+                address,
+                size,
+                store,
+                false,
+                Some(address.wrapping_add(cpu.r[8 + ((h >> 7) & 7) as usize])),
+            ));
+            op = "memory_postincrement_register";
+        }
+        Extended::MemoryPostincrement => {
             let kind = (h >> 7) & 7;
             let size = match kind {
                 2 | 3 => 4,
@@ -173,18 +236,986 @@ pub(crate) fn execute(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) ->
                 false,
                 Some(address.wrapping_add(delta as u32)),
             ));
-            name = "memory_postincrement";
+            op = "memory_postincrement";
         }
-        _ => return execute_wide(cpu, op, h, pc, code),
+        Extended::Wide => {
+            let x = cpu.read(pc + 2, 2)?;
+            let n = (h & 15) as usize;
+            let d = (x >> 12) as usize;
+            let s = ((x >> 4) & 15) as usize;
+            let c = ((x >> 8) & 15) as usize;
+            next = pc + 4;
+            match cpu.decoded_wide(h, x) {
+                Wide::FloatRegister => {
+                    let value =
+                        crate::float::result(x, &cpu.r).map_err(|reason| Fault::Access {
+                            pc,
+                            fault: crate::bus::AccessFault {
+                                address: pc,
+                                size: 4,
+                                operation: "floating-point",
+                                reason,
+                            },
+                        })?;
+                    let Some(value) = value else {
+                        return Ok(None);
+                    };
+                    cpu.r[d] = value.value;
+                    if let Some(flags) = value.flags {
+                        cpu.sr[5] = (cpu.sr[5] & !15) | flags;
+                    }
+                    op = "float_register";
+                }
+                Wide::BranchRegisterMask => {
+                    let test =
+                        (cpu.r[n] & cpu.r[((h >> 4) & 15) as usize] != 0) == (h & 0x100 != 0);
+                    if test {
+                        next = next.wrapping_add((signed(x, 16) * 2) as u32);
+                    }
+                    op = "branch_register_mask";
+                }
+                Wide::MemoryShift => {
+                    let address = cpu.r[d].wrapping_add(memory_offset(x));
+                    let value = cpu.read(address, 4)?;
+                    let shift = c + ((h & 1) as usize) * 16;
+                    cpu.write(
+                        address,
+                        match x & 3 {
+                            0 => value << shift,
+                            2 => value >> shift,
+                            _ => ((value as i32) >> shift) as u32,
+                        },
+                    )?;
+                    op = "memory_shift";
+                }
+                Wide::MemoryArithmeticRegister => {
+                    let addr = cpu.r[d].wrapping_add(memory_offset(x));
+                    let value = cpu.read(addr, 4)?;
+                    let operand = cpu.r[c];
+                    cpu.write(
+                        addr,
+                        if x & 2 != 0 {
+                            value.wrapping_sub(operand)
+                        } else {
+                            value.wrapping_add(operand)
+                        },
+                    )?;
+                    op = if x & 2 != 0 {
+                        "memory_subtract_register"
+                    } else {
+                        "memory_add_register"
+                    };
+                }
+                Wide::HalfwordExtended => {
+                    let store = x & 1 != 0;
+                    // Loads and stores have a signed ten-bit displacement. Bit 2
+                    // selects value sign extension of loads and the upper half
+                    // for stores (vendor objdump: ED53 0F2B is h[r2+-6] = r0 and
+                    // ED55 0F2B is h[r2+506] = r0.h). Stock LVGL uses ED5B to load
+                    // at r8-4 and write back r8.
+                    let offset =
+                        (signed(h & 3, 2) << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 14) as i32;
+                    let addr = cpu.r[s].wrapping_add(offset as u32);
+                    let updated = if h & 8 != 0 { Some(addr) } else { None };
+                    if store && h & 4 != 0 {
+                        store_upper_half(cpu, pc, addr, d)?;
+                        if let Some(value) = updated {
+                            cpu.r[s] = value;
+                        }
+                    } else {
+                        mem = Some((d, s, addr, 2, store, !store && h & 4 != 0, updated));
+                    }
+                    op = "halfword_extended";
+                }
+                Wide::HalfwordPostincrement => {
+                    // EDD0-EDD7: a signed ten-bit increment with h bits 0-1 on
+                    // top; bit 2 is a signed load or a store of the upper half
+                    // (vendor objdump: EDD4 1231 is h[r3++=32] = r1.h).
+                    let store = x & 1 != 0;
+                    let increment =
+                        signed(((h & 3) << 8) | (((x >> 8) & 15) << 4) | (x & 14), 10) as u32;
+                    let address = cpu.r[s];
+                    if store && h & 4 != 0 {
+                        store_upper_half(cpu, pc, address, d)?;
+                        cpu.r[s] = address.wrapping_add(increment);
+                    } else {
+                        mem = Some((
+                            d,
+                            s,
+                            address,
+                            2,
+                            store,
+                            !store && h & 4 != 0,
+                            Some(address.wrapping_add(increment)),
+                        ));
+                    }
+                    op = "halfword_postincrement";
+                }
+                Wide::BytePostincrementStore => {
+                    // EED2/EED3: a signed nine-bit increment, h bit 0 its sign.
+                    let increment = byte_offset(h, x);
+                    let address = cpu.r[s];
+                    mem = Some((
+                        d,
+                        s,
+                        address,
+                        1,
+                        true,
+                        false,
+                        Some(address.wrapping_add(increment)),
+                    ));
+                    op = "byte_postincrement_store";
+                }
+                Wide::BytePostincrementLoad => {
+                    let off = byte_offset(h, x);
+                    let addr = cpu.r[s];
+                    mem = Some((
+                        d,
+                        s,
+                        addr,
+                        1,
+                        false,
+                        h & 4 != 0,
+                        Some(addr.wrapping_add(off)),
+                    ));
+                    op = "byte_postincrement_load";
+                }
+                Wide::MultiplyImmediate => {
+                    cpu.r[n] = cpu.r[d].wrapping_mul(packed(x));
+                    op = "multiply_immediate";
+                }
+                Wide::BitMask => {
+                    let mask = 1u32 << (cpu.r[c] & 31);
+                    cpu.r[d] = match x & 3 {
+                        0 => cpu.r[s] | mask,
+                        1 => cpu.r[s] ^ mask,
+                        2 => cpu.r[s] & mask,
+                        _ => cpu.r[s] & !mask,
+                    };
+                    op = "bit_mask";
+                }
+                Wide::StackPair => {
+                    let addr = cpu.sr[14] + (x & 4092);
+                    let r = d & 14;
+                    if x & 1 != 0 {
+                        cpu.write(addr, cpu.r[r])?;
+                        cpu.write(addr + 4, cpu.r[r + 1])?;
+                    } else {
+                        cpu.r[r] = cpu.read(addr, 4)?;
+                        cpu.r[r + 1] = cpu.read(addr + 4, 4)?;
+                    }
+                    op = "stack_pair";
+                }
+                Wide::SaturateSigned16 => {
+                    cpu.r[d] = (cpu.r[c] as i32).clamp(-32768, 32767) as u32;
+                    op = "saturate_signed16";
+                }
+                Wide::PushSpecialMask => {
+                    // [--sp] = {sp, ssp, usp, icfg, psr, rets, retx, rete, reti}
+                    // for x = 782F (the fatal-exception frame of Felucca-derived
+                    // fm1_vec.S, read back by fm1_fault_c from reti upwards):
+                    // bit n is sr[n], pushed highest first. The saved sp is its
+                    // value before the push; nothing reads it back as a pointer.
+                    let sp = cpu.sr[14];
+                    for index in (0..15).rev() {
+                        if x & (1 << index) != 0 {
+                            let value = if index == 14 { sp } else { cpu.sr[index] };
+                            cpu.push(value)?;
+                        }
+                    }
+                    op = "push_special_mask";
+                }
+                Wide::PopSpecialMask => {
+                    // The same set popped lowest first; bit 15 pops pc (stock
+                    // FM-1 0x02043854: E950 8000 is {pc} = [sp++]).
+                    for index in 0..14 {
+                        if x & (1 << index) != 0 {
+                            cpu.sr[index] = cpu.pop()?;
+                        }
+                    }
+                    if x & 0x8000 != 0 {
+                        next = cpu.pop()?;
+                    }
+                    op = "pop_special_mask";
+                }
+                Wide::Trigger => {
+                    // Debug trigger event (SDK ___trig, followed by a printf in
+                    // jl_fft.c): nothing happens without an attached debugger.
+                    op = "trigger";
+                }
+                Wide::ReverseBytes => {
+                    cpu.r[d] = cpu.r[c].swap_bytes();
+                    op = "reverse_bytes";
+                }
+                Wide::SubtractPackedImmediate => {
+                    cpu.r[n] = cpu.arithmetic(cpu.r[d], packed(x), true, 0);
+                    op = "subtract_packed_immediate";
+                }
+                Wide::ReverseSubtract => {
+                    cpu.r[n] = cpu.arithmetic(packed(x), cpu.r[d], true, 0);
+                    op = "reverse_subtract";
+                }
+                Wide::MultiplyExtended => {
+                    cpu.r[d] = cpu.r[s].wrapping_mul(cpu.r[c]);
+                    op = "multiply_extended";
+                }
+                Wide::MultiplyWide => {
+                    let product = if d & 1 == 0 {
+                        cpu.r[s] as u64 * cpu.r[c] as u64
+                    } else {
+                        (cpu.r[s] as i32 as i64 * cpu.r[c] as i32 as i64) as u64
+                    };
+                    let pair = d & 14;
+                    let result = if h == 0xe1fc {
+                        let accumulator = cpu.r[pair] as u64 | ((cpu.r[pair + 1] as u64) << 32);
+                        accumulator.wrapping_add(product)
+                    } else {
+                        product
+                    };
+                    cpu.r[d & 14] = result as u32;
+                    cpu.r[(d & 14) + 1] = (result >> 32) as u32;
+                    op = if h == 0xe1fc {
+                        "multiply_accumulate_wide"
+                    } else {
+                        "multiply_wide"
+                    };
+                }
+                Wide::DivideWide => {
+                    let dividend = cpu.r[s] as u64 | ((cpu.r[s + 1] as u64) << 32);
+                    let d = d & 14;
+                    let quotient = if x & 0x1000 == 0 {
+                        dividend.checked_div(cpu.r[c] as u64)
+                    } else {
+                        (dividend as i64)
+                            .checked_div(cpu.r[c] as i32 as i64)
+                            .map(|n| n as u64)
+                    }
+                    .ok_or(Fault::Unsupported { pc, word: h as u16 })?;
+                    cpu.r[d] = quotient as u32;
+                    cpu.r[d + 1] = (quotient >> 32) as u32;
+                    op = "divide_wide";
+                }
+                Wide::ShiftWideRegister => {
+                    let value = cpu.r[d] as u64 | ((cpu.r[d + 1] as u64) << 32);
+                    let shift = cpu.r[c];
+                    let result = if x & 2 == 0 {
+                        value.checked_shl(shift)
+                    } else {
+                        value.checked_shr(shift)
+                    }
+                    .unwrap_or(0);
+                    cpu.r[d] = result as u32;
+                    cpu.r[d + 1] = (result >> 32) as u32;
+                    op = "shift_wide_register";
+                }
+                Wide::ShiftWideImmediate => {
+                    let value = cpu.r[d] as u64 | ((cpu.r[d + 1] as u64) << 32);
+                    let shift = ((x >> 8) & 3) * 16 + (x & 15);
+                    let result = match (x >> 10) & 3 {
+                        0 => value << shift,
+                        2 => value >> shift,
+                        _ => ((value as i64) >> shift) as u64,
+                    };
+                    cpu.r[d] = result as u32;
+                    cpu.r[d + 1] = (result >> 32) as u32;
+                    op = "shift_wide_immediate";
+                }
+                Wide::Divide => {
+                    cpu.r[d] = if x & 1 == 0 {
+                        cpu.r[s].checked_div(cpu.r[c])
+                    } else {
+                        (cpu.r[s] as i32)
+                            .checked_div(cpu.r[c] as i32)
+                            .map(|v| v as u32)
+                    }
+                    .ok_or(Fault::Unsupported { pc, word: h as u16 })?;
+                    op = if x & 1 == 0 {
+                        "divide_unsigned"
+                    } else {
+                        "divide_signed"
+                    };
+                }
+                Wide::CountLeadingZeros => {
+                    cpu.r[d] = cpu.r[c].leading_zeros();
+                    op = "count_leading_zeros";
+                }
+                Wide::Absolute => {
+                    cpu.r[d] = (cpu.r[c] as i32).wrapping_abs() as u32;
+                    op = "absolute";
+                }
+                Wide::Maximum => {
+                    cpu.r[d] = if x & 1 == 0 {
+                        cpu.r[s].max(cpu.r[c])
+                    } else {
+                        (cpu.r[s] as i32).max(cpu.r[c] as i32) as u32
+                    };
+                    op = if x & 1 == 0 {
+                        "maximum_unsigned"
+                    } else {
+                        "maximum_signed"
+                    };
+                }
+                Wide::Minimum => {
+                    cpu.r[d] = if x & 1 == 0 {
+                        cpu.r[s].min(cpu.r[c])
+                    } else {
+                        (cpu.r[s] as i32).min(cpu.r[c] as i32) as u32
+                    };
+                    op = if x & 1 == 0 {
+                        "minimum_unsigned"
+                    } else {
+                        "minimum_signed"
+                    };
+                }
+                Wide::MemoryAdd => {
+                    let addr = cpu.r[d] + (h & 31) * 4;
+                    cpu.write(
+                        addr,
+                        cpu.read(addr, 4)?.wrapping_add(signed(x & 4095, 12) as u32),
+                    )?;
+                    op = "memory_add";
+                }
+                Wide::DecrementBranch => {
+                    cpu.r[n] = cpu.r[n].wrapping_sub(1);
+                    if cpu.r[n] != 0 {
+                        next = next.wrapping_add((signed(x, 16) * 2) as u32);
+                    }
+                    op = "decrement_branch";
+                }
+                Wide::MemoryBit => {
+                    let addr = cpu.r[d].wrapping_add(memory_offset(x));
+                    let old = cpu.read(addr, 4)?;
+                    let mask = 1u32 << (cpu.r[c] & 31);
+                    cpu.write(
+                        addr,
+                        match x & 3 {
+                            0 => old | mask,
+                            1 => old ^ mask,
+                            3 => old & !mask,
+                            _ => return Ok(None),
+                        },
+                    )?;
+                    op = "memory_bit";
+                }
+                Wide::ArithmeticRegister => {
+                    let subtract = x & 2 != 0;
+                    let extra = if h == 0xe0b8 {
+                        ((cpu.sr[5] >> 1) & 1) ^ subtract as u32
+                    } else {
+                        0
+                    };
+                    cpu.r[d] = cpu.arithmetic(cpu.r[s], cpu.r[c], subtract, extra);
+                    op = if x & 2 == 0 {
+                        if h == 0xe0b8 {
+                            "add_carry"
+                        } else {
+                            "add_extended"
+                        }
+                    } else {
+                        if h == 0xe0b8 {
+                            "subtract_carry"
+                        } else {
+                            "subtract_extended"
+                        }
+                    };
+                }
+                Wide::ShiftRegisterExtended => {
+                    let shift = cpu.r[c];
+                    // Quarkslab pi32v2 imm1619: 0 and 1 shift left, 2 logical
+                    // and 3 arithmetic right.
+                    cpu.r[d] = match x & 3 {
+                        0 | 1 => cpu.r[s].checked_shl(shift).unwrap_or(0),
+                        2 => cpu.r[s].checked_shr(shift).unwrap_or(0),
+                        _ => ((cpu.r[s] as i32) >> shift.min(31)) as u32,
+                    };
+                    op = "shift_register_extended";
+                }
+                Wide::BytePreincrement => {
+                    let addr = cpu.r[s].wrapping_add(cpu.r[c]);
+                    mem = Some((d, s, addr, 1, x & 1 != 0, x & 2 != 0, Some(addr)));
+                    op = "byte_preincrement";
+                }
+                Wide::RotateRightImmediate => {
+                    // Vendor r3 compiles (v >> 1) | (v << 31) to "v <> 1".
+                    // A zero count field represents 32, also an identity rotation.
+                    cpu.r[d] = cpu.r[s].rotate_right(((x >> 8) & 1) * 16 + (x & 15));
+                    op = "rotate_right_immediate";
+                }
+                Wide::ShiftExtended => {
+                    let shift = ((x >> 8) & 3) * 16 + (x & 15);
+                    let mode = (x >> 10) & 3;
+                    cpu.r[d] = match mode {
+                        0 => cpu.r[s].checked_shl(shift).unwrap_or(0),
+                        2 => cpu.r[s].checked_shr(shift).unwrap_or(0),
+                        _ => ((cpu.r[s] as i32) >> shift.min(31)) as u32,
+                    };
+                    op = "shift_extended";
+                }
+                Wide::BranchLong => {
+                    let value = match h & 0x60 {
+                        // Equality/signed forms extend the literal; unsigned ordering
+                        // keeps all 12 bits (stock's cache bound is 2111).
+                        0 if matches!(h & 15, 0 | 1 | 10..=13) => signed(x & 4095, 12) as u32,
+                        0 => x & 4095,
+                        0x20 => packed(x),
+                        0x40 => cpu.r[c],
+                        _ => packed(x),
+                    };
+                    let lhs = cpu.r[d];
+                    let test = if h & 0x60 == 0x60 {
+                        if h & 1 == 0 {
+                            lhs & value == 0
+                        } else {
+                            lhs & value != 0
+                        }
+                    } else {
+                        match h & 15 {
+                            0 => lhs == value,
+                            1 => lhs != value,
+                            2 => lhs >= value,
+                            3 => lhs < value,
+                            8 => lhs > value,
+                            9 => lhs <= value,
+                            10 => (lhs as i32) >= (value as i32),
+                            11 => (lhs as i32) < (value as i32),
+                            12 => (lhs as i32) > (value as i32),
+                            _ => (lhs as i32) <= (value as i32),
+                        }
+                    };
+                    next = pc + 6;
+                    if test {
+                        next = next.wrapping_add((signed(cpu.read(pc + 4, 2)?, 16) * 2) as u32);
+                    }
+                    op = "branch_long";
+                }
+                Wide::LogicThree => {
+                    cpu.r[d] = match x & 3 {
+                        0 => cpu.r[s] | cpu.r[c],
+                        1 => cpu.r[s] ^ cpu.r[c],
+                        2 => cpu.r[s] & cpu.r[c],
+                        _ => cpu.r[s] & !cpu.r[c],
+                    };
+                    op = "logic_three";
+                }
+                Wide::StoreRegisterList => {
+                    let mut address = cpu.r[n];
+                    for register in 0..16 {
+                        if x & (1 << register) != 0 {
+                            cpu.write(address, cpu.r[register])?;
+                            address = address.wrapping_add(4);
+                        }
+                    }
+                    // [rN++] = {...} (EB3X): the base advances past the list.
+                    if h & 0x10 != 0 {
+                        cpu.r[n] = address;
+                    }
+                    op = "store_register_list";
+                }
+                Wide::LoadRegisterList => {
+                    let mut address = cpu.r[n];
+                    for register in 0..16 {
+                        if x & (1 << register) != 0 {
+                            cpu.r[register] = cpu.read(address, 4)?;
+                            address = address.wrapping_add(4);
+                        }
+                    }
+                    // {...} = [rN++] (EB1X), as the store.
+                    if h & 0x10 != 0 {
+                        cpu.r[n] = address;
+                    }
+                    op = "load_register_list";
+                }
+                Wide::StackSubword => {
+                    let halfword = h & 4 == 0;
+                    let offset = if halfword { x & 4094 } else { x & 4095 };
+                    mem = Some((
+                        d,
+                        0,
+                        cpu.sr[14].wrapping_add(offset),
+                        if halfword { 2 } else { 1 },
+                        if halfword {
+                            h == 0xe9d8 && x & 1 != 0
+                        } else {
+                            h == 0xe9de
+                        },
+                        h & 1 != 0,
+                        None,
+                    ));
+                    op = "stack_subword";
+                }
+                Wide::StackExtended => {
+                    mem = Some((d, 0, cpu.sr[14] + (x & 4092), 4, x & 1 != 0, false, None));
+                    op = "stack_extended";
+                }
+                Wide::MemoryPair => {
+                    let offset =
+                        (signed(h & 7, 3) << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 12) as i32;
+                    let addr = cpu.r[s].wrapping_add(offset as u32);
+                    pair_access(cpu, addr, d, x & 1 != 0)?;
+                    if x & 2 != 0 {
+                        // Pre-increment: the address is written back to the base
+                        // (vendor objdump: EC50 8012 is r9_r8 = d[++r1=0]).
+                        cpu.r[s] = addr;
+                    }
+                    op = "memory_pair";
+                }
+                Wide::PairPostincrement => {
+                    // EC58-EC5F with x bit 1 clear: d[rS++=imm], the access at
+                    // rS, then rS += a signed eleven-bit immediate (vendor
+                    // objdump: EC58 2009 is d[r0++=8] = r3_r2).
+                    let offset =
+                        (signed(h & 7, 3) << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 12) as i32;
+                    let addr = cpu.r[s];
+                    pair_access(cpu, addr, d, x & 1 != 0)?;
+                    cpu.r[s] = addr.wrapping_add(offset as u32);
+                    op = "pair_postincrement";
+                }
+                Wide::PairRegisterPreincrement => {
+                    // EC5C with x bit 1: r9_r8 = d[++r1=r0] (stock 0x0200940e).
+                    let addr = cpu.r[s].wrapping_add(cpu.r[c]);
+                    pair_access(cpu, addr, d, x & 1 != 0)?;
+                    cpu.r[s] = addr;
+                    op = "pair_register_preincrement";
+                }
+                Wide::BitField => {
+                    let pos = (x >> 7) & 31;
+                    let len = (x >> 2) & 31;
+                    let mask = (1u32 << len) - 1;
+                    cpu.r[n] = if h & 0x10 == 0 {
+                        (cpu.r[n] & !(mask << pos)) | ((cpu.r[d] & mask) << pos)
+                    } else if x & 1 == 0 {
+                        (cpu.r[d] >> pos) & mask
+                    } else {
+                        // sextra (vendor objdump: E1B0 B041 is
+                        // r0 = sextra(r11, p:0, l:16), Baud Girl 0x02012c5e).
+                        signed((cpu.r[d] >> pos) & mask, len.max(1)) as u32
+                    };
+                    op = "bit_field";
+                }
+                Wide::BranchEqualFlag => {
+                    if cpu.sr[5] & 4 != 0 {
+                        next = next.wrapping_add((signed(x, 16) * 2) as u32);
+                    }
+                    op = "branch_equal_flag";
+                }
+                Wide::BranchBit => {
+                    let test = (cpu.r[n] & (1 << ((x >> 11) & 31)) != 0) == (x & 512 != 0);
+                    if test {
+                        next = next.wrapping_add((signed(x & 511, 9) * 2) as u32);
+                    }
+                    op = "branch_bit";
+                }
+                Wide::MemoryMask => {
+                    // EF00-EFFF: bits 7-6 select or, xor, and, and-not; bits 5-0
+                    // are a signed word offset (vendor objdump: EF3F 0400 is
+                    // [r0+-4] |= 0x80000000, EF40 0400 is [r0+0] ^= 0x80000000).
+                    let addr = cpu.r[d].wrapping_add((signed(h & 63, 6) * 4) as u32);
+                    let old = cpu.read(addr, 4)?;
+                    let value = packed(x);
+                    cpu.write(
+                        addr,
+                        match h & 0xc0 {
+                            0 => old | value,
+                            0x40 => old ^ value,
+                            0x80 => old & value,
+                            _ => old & !value,
+                        },
+                    )?;
+                    op = "memory_mask";
+                }
+                Wide::ConditionalBlock => {
+                    let kind = (h >> 4) & 255;
+                    let lhs = cpu.r[n];
+                    let rhs = if kind & 7 == 1 {
+                        cpu.r[c]
+                    } else if matches!(kind, 0x93 | 0x9b | 0xc3 | 0xcb) {
+                        // These unsigned comparisons carry a literal 12-bit value,
+                        // unlike the neighboring packed-immediate encodings. Stock's
+                        // battery clamp uses ECB0 0208 to compare against 520.
+                        x & 4095
+                    } else if matches!(kind, 0x83 | 0x8b | 0xd3 | 0xdb | 0xe3 | 0xeb) {
+                        signed(x & 4095, 12) as u32
+                    } else {
+                        packed(x)
+                    };
+                    // Vendor r3: x bit 7 changes the register comparisons from
+                    // integers to floating point (iff). Stock voice pitch
+                    // calculation compares negative floats with this block form.
+                    // EA1X with x = 0080 stays the integer bit test != 0.
+                    let float = kind & 7 == 1 && x & 128 != 0 && !(kind == 0xa1 && x & 0x7f == 0);
+                    let test = if float {
+                        let lhs = f32::from_bits(lhs);
+                        let rhs = f32::from_bits(rhs);
+                        if !lhs.is_finite() || !rhs.is_finite() {
+                            return Err(Fault::Access {
+                                pc,
+                                fault: crate::bus::AccessFault {
+                                    address: pc,
+                                    size: 4,
+                                    operation: "floating-point condition",
+                                    reason:
+                                        "exceptional floating-point comparison is not implemented",
+                                },
+                            });
+                        }
+                        float_condition(kind, lhs, rhs)
+                    } else {
+                        match kind {
+                            0x81..=0x83 => lhs == rhs,
+                            0x89..=0x8b => lhs != rhs,
+                            0x91..=0x93 => lhs >= rhs,
+                            0x99..=0x9b => lhs < rhs,
+                            0xa1 => {
+                                if x & 128 == 0 {
+                                    lhs & rhs == 0
+                                } else {
+                                    lhs & rhs != 0
+                                }
+                            }
+                            0xa2 => lhs & rhs == 0,
+                            0xa3 => lhs & rhs != 0,
+                            0xc1..=0xc3 => lhs > rhs,
+                            0xc9..=0xcb => lhs <= rhs,
+                            0xd1..=0xd3 => (lhs as i32) >= (rhs as i32),
+                            0xd9..=0xdb => (lhs as i32) < (rhs as i32),
+                            0xe1..=0xe3 => (lhs as i32) > (rhs as i32),
+                            _ => (lhs as i32) <= (rhs as i32),
+                        }
+                    };
+                    next = cpu.conditional(test, x)?;
+                    op = "conditional_block";
+                }
+                Wide::MemoryLogic => {
+                    let addr = cpu.r[d].wrapping_add(x & 0xfc);
+                    let old = cpu.read(addr, 4)?;
+                    let value = cpu.r[c];
+                    cpu.write(
+                        addr,
+                        match x & 3 {
+                            0 => old | value,
+                            1 => old ^ value,
+                            2 => old & value,
+                            _ => old & !value,
+                        },
+                    )?;
+                    op = "memory_logic";
+                }
+                Wide::LogicImmediate => {
+                    let mode = (h >> 4) & 15;
+                    let value = if mode == 6 && x & 0xc00 == 0 {
+                        x & 1023
+                    } else {
+                        packed(x)
+                    };
+                    cpu.r[n] = match mode {
+                        4 => cpu.r[d] | value,
+                        5 => cpu.r[d] ^ value,
+                        6 => cpu.r[d] & value,
+                        _ => cpu.r[d] & !value,
+                    };
+                    op = "logic_immediate";
+                }
+                Wide::StoreImmediate => {
+                    cpu.write(cpu.r[d].wrapping_add((h & 31) * 4), packed(x))?;
+                    op = "store_immediate";
+                }
+                Wide::AddImmediate => {
+                    let value = match (h >> 4) & 15 {
+                        0 => x & 4095,
+                        1 => (x & 4095) + 4096,
+                        2 => (x & 4095) | 0xffffe000,
+                        3 => (x & 4095) | 0xfffff000,
+                        _ => packed(x),
+                    };
+                    cpu.r[n] = cpu.arithmetic(cpu.r[d], value, false, 0);
+                    op = "add_immediate";
+                }
+                Wide::AddSpExtended => {
+                    // Vendor r3 assembler: aligned signed 13-bit stack adjustment.
+                    // Stock allocates/reclaims its 616-byte filesystem frame here.
+                    cpu.sr[14] = cpu.sr[14].wrapping_add(signed(x, 13) as u32);
+                    op = "add_sp_extended";
+                }
+                Wide::AddStackExtended => {
+                    cpu.r[d] = cpu.sr[14].wrapping_add(x & 4095);
+                    op = "add_stack_extended";
+                }
+                Wide::BranchCompareImmediate => {
+                    let kind = (h >> 7) & 63;
+                    // The ordered unsigned forms take an unsigned imm10 (SLOOP's
+                    // fm1_delay_us: F9F1 81FC is jb r1, #960); equality and the
+                    // signed forms sign-extend it (Baud Girl: F874 FC04 is je
+                    // against -2).
+                    let raw = (((h >> 4) & 7) << 7) | (x >> 9);
+                    let immediate = signed(raw, 10) as u32;
+                    let v = cpu.r[n];
+                    let test = match kind {
+                        0x30 => v == immediate,
+                        0x31 => v != immediate,
+                        0x32 => v >= raw,
+                        0x33 => v < raw,
+                        0x38 => v > raw,
+                        0x39 => v <= raw,
+                        0x3a => (v as i32) >= signed(immediate, 10),
+                        0x3b => (v as i32) < signed(immediate, 10),
+                        0x3c => (v as i32) > signed(immediate, 10),
+                        _ => (v as i32) <= signed(immediate, 10),
+                    };
+                    if test {
+                        next = next.wrapping_add((signed(x & 511, 9) * 2) as u32);
+                    }
+                    op = "branch_compare_immediate";
+                }
+                Wide::BranchCompareFloat => {
+                    let lhs = f32::from_bits(cpu.r[d]);
+                    let rhs = f32::from_bits(cpu.r[n]);
+                    if !lhs.is_finite() || !rhs.is_finite() {
+                        return Err(Fault::Access {
+                            pc,
+                            fault: crate::bus::AccessFault {
+                                address: pc,
+                                size: 4,
+                                operation: "floating-point branch",
+                                reason: "exceptional floating-point comparison is not implemented",
+                            },
+                        });
+                    }
+                    // Vendor objdump: E800 ==, E880 !=, E900 >=, E980 <, EC00 >,
+                    // EC80 <=, then the measured ED00-EE80 forms.
+                    let test = match h & 0xfff0 {
+                        0xe800 => lhs == rhs,
+                        0xe880 => lhs != rhs,
+                        0xe900 | 0xed00 => lhs >= rhs,
+                        0xe980 | 0xed80 => lhs < rhs,
+                        0xec00 | 0xee00 => lhs > rhs,
+                        _ => lhs <= rhs,
+                    };
+                    if test {
+                        next = next.wrapping_add((signed(x & 511, 9) * 2) as u32);
+                    }
+                    op = "branch_compare_float";
+                }
+                Wide::BranchCompareRegister => {
+                    let lhs = cpu.r[d];
+                    let rhs = cpu.r[n];
+                    let test = match h & 0xfff0 {
+                        0xe800 => lhs == rhs,
+                        0xe880 => lhs != rhs,
+                        0xe900 => lhs >= rhs,
+                        0xe980 => lhs < rhs,
+                        0xec00 => lhs > rhs,
+                        0xec80 => lhs <= rhs,
+                        0xed00 => (lhs as i32) >= (rhs as i32),
+                        0xed80 => (lhs as i32) < (rhs as i32),
+                        0xee00 => (lhs as i32) > (rhs as i32),
+                        _ => (lhs as i32) <= (rhs as i32),
+                    };
+                    if test {
+                        next = next.wrapping_add((signed(x & 511, 9) * 2) as u32);
+                    }
+                    op = "branch_compare_register";
+                }
+                Wide::ByteExtended => {
+                    let off = signed(((h & 1) << 8) | (((x >> 8) & 15) << 4) | (x & 15), 9) as u32;
+                    mem = Some((
+                        d,
+                        s,
+                        cpu.r[s].wrapping_add(off),
+                        1,
+                        h & 2 != 0,
+                        h & 4 != 0,
+                        if h & 8 != 0 {
+                            Some(cpu.r[s].wrapping_add(off))
+                        } else {
+                            None
+                        },
+                    ));
+                    op = "byte_extended";
+                }
+                Wide::WordExtended => {
+                    let offset =
+                        (signed(h & 7, 3) << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 12) as i32;
+                    let addr = cpu.r[s].wrapping_add(offset as u32);
+                    let mode = x & 3;
+                    mem = Some((
+                        d,
+                        s,
+                        addr,
+                        4,
+                        mode & 1 != 0,
+                        false,
+                        if mode & 2 != 0 { Some(addr) } else { None },
+                    ));
+                    op = "word_extended";
+                }
+                Wide::WordRegisterPreincrementStore => {
+                    let address = cpu.r[s].wrapping_add(cpu.r[c]);
+                    cpu.write(address, cpu.r[d])?;
+                    cpu.r[s] = address;
+                    op = "word_register_preincrement_store";
+                }
+                Wide::WordRegisterPreincrement => {
+                    // Vendor form: rD = [++rS=rC]. Commit the base before the
+                    // destination so a load into its own base retains the loaded word.
+                    let address = cpu.r[s].wrapping_add(cpu.r[c]);
+                    let value = cpu.read(address, 4)?;
+                    cpu.r[s] = address;
+                    cpu.r[d] = value;
+                    op = "word_register_preincrement";
+                }
+                Wide::HalfwordRegisterPreincrement => {
+                    let address = cpu.r[s].wrapping_add(cpu.r[c]);
+                    let value = cpu.read(address, 2)?;
+                    cpu.r[s] = address;
+                    cpu.r[d] = if x & 2 != 0 {
+                        signed(value, 16) as u32
+                    } else {
+                        value
+                    };
+                    op = "halfword_register_preincrement";
+                }
+                Wide::HalfwordRegisterPreincrementStore => {
+                    // Vendor objdump: EDDC 4651 is h[++r5=r6] = r4 and EDDC 4653
+                    // is h[++r5=r6] = r4.h (SLOOP's sequencer event ring).
+                    let address = cpu.r[s].wrapping_add(cpu.r[c]);
+                    let value = if x & 2 != 0 { cpu.r[d] >> 16 } else { cpu.r[d] };
+                    cpu.bus
+                        .write(address, value, 2)
+                        .map_err(|fault| Fault::Access { pc, fault })?;
+                    cpu.r[s] = address;
+                    op = "halfword_register_preincrement_store";
+                }
+                Wide::RegisterPostincrement => {
+                    // ECDE/EDDE/EEDE [rS++=rC]: the access at rS, then rS += rC.
+                    // x bits 0-1 (vendor objdump): word 2 load, 3 store; halfword
+                    // 0 load, 1 store, 2 signed load, 3 store of the upper half;
+                    // byte 0 load, 1 store, 2 signed load.
+                    let size = match h {
+                        0xecde => 4,
+                        0xedde => 2,
+                        _ => 1,
+                    };
+                    let address = cpu.r[s];
+                    let updated = address.wrapping_add(cpu.r[c]);
+                    if x & 1 != 0 {
+                        let value = if size == 2 && x & 2 != 0 {
+                            cpu.r[d] >> 16
+                        } else {
+                            cpu.r[d]
+                        };
+                        cpu.bus
+                            .write(address, value, size)
+                            .map_err(|fault| Fault::Access { pc, fault })?;
+                        cpu.r[s] = updated;
+                    } else {
+                        let value = cpu.read(address, size)?;
+                        cpu.r[s] = updated;
+                        cpu.r[d] = if size != 4 && x & 2 != 0 {
+                            signed(value, (size * 8) as u32) as u32
+                        } else {
+                            value
+                        };
+                    }
+                    op = "register_postincrement";
+                }
+                Wide::WordPostincrementStore => {
+                    let increment = word_increment(h, x);
+                    let address = cpu.r[s];
+                    mem = Some((
+                        d,
+                        s,
+                        address,
+                        4,
+                        true,
+                        false,
+                        Some(address.wrapping_add(increment)),
+                    ));
+                    op = "word_postincrement_store";
+                }
+                Wide::WordPostincrementLoad => {
+                    let increment = word_increment(h, x);
+                    let address = cpu.r[s];
+                    mem = Some((
+                        d,
+                        s,
+                        address,
+                        4,
+                        false,
+                        false,
+                        Some(address.wrapping_add(increment)),
+                    ));
+                    op = "word_postincrement_load";
+                }
+                Wide::MemoryIndexed => {
+                    let size = match h {
+                        0xecd8 => 4,
+                        0xedd8 => 2,
+                        _ => 1,
+                    };
+                    let scaled = x & 8 != 0;
+                    let mode = x & 7;
+                    let addr = cpu.r[s].wrapping_add(cpu.r[c].wrapping_mul(if scaled {
+                        size as u32
+                    } else {
+                        1
+                    }));
+                    mem = Some((
+                        d,
+                        s,
+                        addr,
+                        size,
+                        if size == 4 { mode == 3 } else { mode == 1 },
+                        mode == 2 && size != 4,
+                        None,
+                    ));
+                    op = "memory_indexed";
+                }
+                Wide::HalfAddSubtract => {
+                    let (a, b) = (half(cpu.r[s], x & 4 != 0), half(cpu.r[c], x & 2 != 0));
+                    let value = if x & 1 == 0 { a + b } else { a - b };
+                    cpu.r[d] = set_half(cpu.r[d], x & 8 != 0, value);
+                    op = if x & 1 == 0 {
+                        "half_add"
+                    } else {
+                        "half_subtract"
+                    };
+                }
+                Wide::HalfMultiply => {
+                    let (a, b) = (half(cpu.r[s], x & 4 != 0), half(cpu.r[c], x & 2 != 0));
+                    let value = simd::mul16(a, b, h & 2 != 0);
+                    cpu.r[d] = set_half(cpu.r[d], x & 8 != 0, value);
+                    op = "half_multiply";
+                }
+                Wide::HalfMultiplyWord => {
+                    let (a, b) = (half(cpu.r[s], x & 4 != 0), half(cpu.r[c], x & 2 != 0));
+                    cpu.r[d] = simd::mul32(a, b, h & 2 != 0);
+                    op = "half_multiply_word";
+                }
+                Wide::Pack => {
+                    let (a, b) = (half(cpu.r[s], x & 4 != 0), half(cpu.r[c], x & 2 != 0));
+                    cpu.r[d] = simd::join(a, b);
+                    op = "pack";
+                }
+                Wide::DualAddSubtract => {
+                    let (a0, a1) = simd::lanes(cpu.r[s], x & 2 != 0, x & 1 != 0);
+                    let (b0, b1) = simd::lanes(cpu.r[c], h & 8 != 0, h & 4 != 0);
+                    let first = if x & 8 == 0 { a0 + b0 } else { a0 - b0 };
+                    let second = if x & 4 == 0 { a1 + b1 } else { a1 - b1 };
+                    cpu.r[d] = simd::join(simd::sat16(first as i64), simd::sat16(second as i64));
+                    op = "dual_add_subtract";
+                }
+                Wide::DualMultiply => {
+                    let (a0, a1) = simd::lanes(cpu.r[s], x & 2 != 0, x & 1 != 0);
+                    let (b0, b1) = simd::lanes(cpu.r[c], h & 8 != 0, h & 4 != 0);
+                    let x2 = h & 2 != 0;
+                    cpu.r[d] = simd::join(simd::mul16(a0, b0, x2), simd::mul16(a1, b1, x2));
+                    op = "dual_multiply";
+                }
+                Wide::Unknown => return Ok(None),
+            }
+        }
+        Extended::Unknown => return Ok(None),
     }
-    access(cpu, pc, mem)?;
-    cpu.name = name;
-    Ok(pc + 2)
-}
-
-/// Perform a deferred load or store and its base-register update.
-#[inline(always)]
-fn access(cpu: &mut Cpu, pc: u32, mem: Option<Memory>) -> Step<()> {
     if let Some((reg, base, address, size, store, sign, updated)) = mem {
         if store {
             cpu.bus
@@ -202,1179 +1233,5 @@ fn access(cpu: &mut Cpu, pc: u32, mem: Option<Memory>) -> Step<()> {
             cpu.r[base] = value;
         }
     }
-    Ok(())
-}
-
-/// Execute a 32- or 48-bit form; the extension halfword is already known.
-#[inline(always)]
-fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<u32> {
-    let x = cpu.operand(code.x, pc + 2)?;
-    let n = (h & 15) as usize;
-    let d = (x >> 12) as usize;
-    let s = ((x >> 4) & 15) as usize;
-    let c = ((x >> 8) & 15) as usize;
-    let mut next = pc + 4;
-    let mut mem = None;
-    let name;
-    match op {
-        Op::BranchRegisterMask => {
-            let test = (cpu.r[n] & cpu.r[((h >> 4) & 15) as usize] != 0) == (h & 0x100 != 0);
-            if test {
-                next = next.wrapping_add((signed(x, 16) * 2) as u32);
-            }
-            name = "branch_register_mask";
-        }
-        Op::MemoryShift => {
-            // [rD + off] shifted by an immediate: c plus h bit 0 as bit 4
-            // (btctrler 0x0205d304: e86d 1607 = [r1+4] >>= 22, arithmetic,
-            // sign-extending a 10-bit field built at bits 22-31). Mode in x
-            // bits 0-1: 0 left, 2 logical right, 3 arithmetic right.
-            let address = cpu.r[d].wrapping_add(mem_offset(x));
-            let shift = ((h & 1) << 4) | c as u32;
-            let value = cpu.read(address, 4)?;
-            cpu.write(
-                address,
-                match x & 3 {
-                    0 => value << shift,
-                    2 => value >> shift,
-                    _ => ((value as i32) >> shift) as u32,
-                },
-            )?;
-            name = match x & 3 {
-                0 => "memory_shift_left",
-                2 => "memory_shift_right",
-                _ => "memory_shift_arithmetic",
-            };
-        }
-        Op::RotateRightImmediate => {
-            // rD = rS rotated right by ((x >> 8) & 1) * 16 + (x & 15); 0 is 32
-            // (a full turn), as JieLi's objdump prints it.
-            let amount = ((x >> 8) & 1) * 16 + (x & 15);
-            cpu.r[d] = cpu.r[s].rotate_right(amount);
-            name = "rotate_right_immediate";
-        }
-        Op::MemoryAddRegister => {
-            let addr = cpu.r[d].wrapping_add(mem_offset(x));
-            // x bits 0-1: 0 add, 2 sub (Quarkslab pi32v2; stock cbuf_read
-            // does data_len -= n with e868 6c1a).
-            let old = cpu.read(addr, 4)?;
-            cpu.write(
-                addr,
-                if x & 2 == 0 {
-                    old.wrapping_add(cpu.r[c])
-                } else {
-                    old.wrapping_sub(cpu.r[c])
-                },
-            )?;
-            name = if x & 2 == 0 {
-                "memory_add_register"
-            } else {
-                "memory_sub_register"
-            };
-        }
-        Op::HalfwordExtended => {
-            // JieLi objdump (ed50-ed5f): offset = signed 10-bit
-            // ((h & 3) << 8 | x[11:8] << 4 | x[3:1] << 1), e.g. ed5b cf2a =
-            // r12 = h[++r2=-6] (u). Bit 2: loads sign-extend, stores write
-            // the upper halfword (ed55 0f2b = h[r2+506] = r0.h). Bit 3:
-            // pre-increment (the base takes the address).
-            let store = x & 1 != 0;
-            let raw = ((h & 3) << 8) | (((x >> 8) & 15) << 4) | (x & 14);
-            let addr = cpu.r[s].wrapping_add(signed(raw, 10) as u32);
-            let updated = if h & 8 != 0 { Some(addr) } else { None };
-            if store && h & 4 != 0 {
-                cpu.bus
-                    .write(addr, cpu.r[d] >> 16, 2)
-                    .map_err(|fault| Fault::Access { pc, fault })?;
-                if let Some(value) = updated {
-                    cpu.r[s] = value;
-                }
-            } else {
-                mem = Some((d, s, addr, 2, store, !store && h & 4 != 0, updated));
-            }
-            name = "halfword_extended";
-        }
-        Op::HalfwordPostincrement => {
-            // x bit 0 selects the store (as in the edd8 register forms); the
-            // increment is even.
-            // edd0-edd7: a signed 10-bit increment (h & 3 its top bits);
-            // h bit 2 is a signed load, or a store of the high half
-            // (objdump: edd4 1231 is h[r3++=32] = r1.h).
-            let store = x & 1 != 0;
-            let increment = signed((h & 3) << 8 | ((x >> 8) & 15) << 4 | (x & 14), 10) as u32;
-            let address = cpu.r[s];
-            if store && h & 4 != 0 {
-                cpu.bus
-                    .write(address, cpu.r[d] >> 16, 2)
-                    .map_err(|fault| Fault::Access { pc, fault })?;
-                cpu.r[s] = address.wrapping_add(increment);
-            } else {
-                mem = Some((
-                    d,
-                    s,
-                    address,
-                    2,
-                    store,
-                    !store && h & 4 != 0,
-                    Some(address.wrapping_add(increment)),
-                ));
-            }
-            name = "halfword_postincrement";
-        }
-        Op::BytePostincrementStore => {
-            // eed2/eed3: a signed 9-bit increment, h bit 0 its sign.
-            let increment = signed((h & 1) << 8 | ((x >> 8) & 15) << 4 | (x & 15), 9) as u32;
-            let address = cpu.r[s];
-            mem = Some((
-                d,
-                s,
-                address,
-                1,
-                true,
-                false,
-                Some(address.wrapping_add(increment)),
-            ));
-            name = "byte_postincrement_store";
-        }
-        Op::BytePostincrementLoad => {
-            let off = signed((h & 1) << 8 | ((x >> 8) & 15) << 4 | (x & 15), 9) as u32;
-            let addr = cpu.r[s];
-            mem = Some((
-                d,
-                s,
-                addr,
-                1,
-                false,
-                h & 4 != 0,
-                Some(addr.wrapping_add(off)),
-            ));
-            name = "byte_postincrement_load";
-        }
-        Op::MultiplyImmediate => {
-            cpu.r[n] = cpu.r[d].wrapping_mul(packed(x));
-            name = "multiply_immediate";
-        }
-        Op::BitMask => {
-            let mask = 1u32 << (cpu.r[c] & 31);
-            cpu.r[d] = match x & 3 {
-                0 => cpu.r[s] | mask,
-                1 => cpu.r[s] ^ mask,
-                2 => cpu.r[s] & mask,
-                _ => cpu.r[s] & !mask,
-            };
-            name = "bit_mask";
-        }
-        Op::StackPair => {
-            let addr = cpu.sr[14] + (x & 4092);
-            let r = d & 14;
-            if x & 1 != 0 {
-                cpu.write(addr, cpu.r[r])?;
-                cpu.write(addr + 4, cpu.r[r + 1])?;
-            } else {
-                cpu.r[r] = cpu.read(addr, 4)?;
-                cpu.r[r + 1] = cpu.read(addr + 4, 4)?;
-            }
-            name = "stack_pair";
-        }
-        Op::PushSpecialMask => {
-            // e958: [--sp] = {sp, ssp, usp, icfg, psr, rets, retx, rete,
-            // reti} for x 782f (fm1_vec.S fatal frame, read back by
-            // fm1_fault_c as reti..sp upwards): x bit n is sr[n], pushed
-            // highest first. UNCERTAIN: sp is saved as it was before the
-            // push (the frame only reports it).
-            let sp = cpu.sr[14];
-            for index in (0..15).rev() {
-                if x & (1 << index) != 0 {
-                    let value = if index == 14 { sp } else { cpu.sr[index] };
-                    cpu.push(value)?;
-                }
-            }
-            name = "push_special_mask";
-        }
-        Op::PopSpecialMask => {
-            // e950: the same set popped lowest first; bit 15 pops pc
-            // (stock FM-1 0x02043854: {pc} = [sp++]).
-            for index in 0..14 {
-                if x & (1 << index) != 0 {
-                    cpu.sr[index] = cpu.pop()?;
-                    if index == 11 {
-                        cpu.interrupts_enabled = cpu.sr[11] & 0x200 != 0;
-                    }
-                }
-            }
-            if x & 0x8000 != 0 {
-                next = cpu.pop()?;
-            }
-            name = "pop_special_mask";
-        }
-        Op::PairRegisterPreincrement => {
-            // ec5c: r9_r8 = d[++r1=r0] / d[++r1=r0] = r9_r8 (x bit 0), the
-            // even register at the lower address as the other pair forms.
-            let addr = cpu.r[s].wrapping_add(cpu.r[c]);
-            let reg = d & 14;
-            if x & 1 != 0 {
-                cpu.write(addr, cpu.r[reg])?;
-                cpu.write(addr + 4, cpu.r[reg + 1])?;
-            } else {
-                let (low, high) = (cpu.read(addr, 4)?, cpu.read(addr + 4, 4)?);
-                cpu.r[reg] = low;
-                cpu.r[reg + 1] = high;
-            }
-            cpu.r[s] = addr;
-            name = "pair_register_preincrement";
-        }
-        Op::PairPostincrement => {
-            // ec58-ec5f, x bit 1 clear: d[rS++=imm] = rD_pair / rD_pair =
-            // d[rS++=imm] (x bit 0 the store); access at rS, then rS += imm
-            // with imm = signed(h & 7) << 8 | x[11:8] << 4 | x & 12 (objdump:
-            // ec58 2009 d[r0++=8], ec5c 2001 d[r0++=-1024]).
-            let offset = (signed(h & 7, 3) << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 12) as i32;
-            let addr = cpu.r[s];
-            let reg = d & 14;
-            if x & 1 != 0 {
-                cpu.write(addr, cpu.r[reg])?;
-                cpu.write(addr + 4, cpu.r[reg + 1])?;
-            } else {
-                let (low, high) = (cpu.read(addr, 4)?, cpu.read(addr + 4, 4)?);
-                cpu.r[reg] = low;
-                cpu.r[reg + 1] = high;
-            }
-            cpu.r[s] = addr.wrapping_add(offset as u32);
-            name = "pair_postincrement";
-        }
-        Op::RegisterPostincrement => {
-            // ecde/edde/eede [rS++=rC]: access at rS, then rS += rC. x bits
-            // 0-1 (objdump): word 2 load, 3 store; halfword 0 load, 1 store,
-            // 2 signed load, 3 store of the high half; byte 0 load, 1 store,
-            // 2 signed load.
-            let size = match h {
-                0xecde => 4,
-                0xedde => 2,
-                _ => 1,
-            };
-            let address = cpu.r[s];
-            let updated = address.wrapping_add(cpu.r[c]);
-            let store = x & 1 != 0;
-            if store {
-                // As `access` stores: the low bytes of the value.
-                let value = if size == 2 && x & 2 != 0 {
-                    cpu.r[d] >> 16
-                } else {
-                    cpu.r[d]
-                };
-                cpu.bus
-                    .write(address, value, size)
-                    .map_err(|fault| Fault::Access { pc, fault })?;
-                cpu.r[s] = updated;
-            } else {
-                let value = cpu.read(address, size)?;
-                cpu.r[s] = updated;
-                cpu.r[d] = if size != 4 && x & 2 != 0 {
-                    signed(value, (size * 8) as u32) as u32
-                } else {
-                    value
-                };
-            }
-            name = "register_postincrement";
-        }
-        Op::SaturateSigned16 => {
-            // e078: rD = sat16(rS) (s), rD = x[15:12], rS = x[11:8].
-            let value = cpu.r[((x >> 8) & 15) as usize] as i32;
-            cpu.r[d] = value.clamp(-32768, 32767) as u32;
-            name = "saturate_signed16";
-        }
-        Op::Trigger => {
-            // Debug trigger event (SDK ___trig, followed by a printf in
-            // jl_fft.c): nothing to do without a debugger attached.
-            name = "trigger";
-        }
-        Op::ReverseBytes => {
-            cpu.r[d] = cpu.r[c].swap_bytes();
-            name = "reverse_bytes";
-        }
-        Op::SubtractPackedImmediate => {
-            // The compiler's signed 64-bit compare with a constant subtracts the low word with
-            // this (`r1 = r12 - 0x0`), then the high word with subc: it sets the carry out
-            // (no borrow) like the register subtract forms.
-            let (lhs, rhs) = (cpu.r[d], packed(x));
-            cpu.r[n] = lhs.wrapping_sub(rhs);
-            cpu.set_carry(lhs >= rhs);
-            name = "subtract_packed_immediate";
-        }
-        Op::ReverseSubtract => {
-            cpu.r[n] = packed(x).wrapping_sub(cpu.r[d]);
-            name = "reverse_subtract";
-        }
-        Op::MultiplyLong => {
-            // rD+1:rD = rS * rC (64-bit product). x bit 12 selects signed;
-            // the stock 64-bit multiply uses bit 12 clear for its unsigned
-            // low*low partial product (Quarkslab lists the opposite sense
-            // for mul/mul.z but muladd uses this one).
-            let pair = d & 14;
-            let product = if x & 0x1000 != 0 {
-                (cpu.r[s] as i32 as i64).wrapping_mul(cpu.r[c] as i32 as i64) as u64
-            } else {
-                cpu.r[s] as u64 * cpu.r[c] as u64
-            };
-            cpu.r[pair] = product as u32;
-            cpu.r[pair + 1] = (product >> 32) as u32;
-            name = "multiply_long";
-        }
-        Op::MultiplyAccumulateLong => {
-            // rD+1:rD += rS * rC, fields as MultiplyLong. Felucca's signed
-            // Q30 filters chain e1fc bde0; stock soft-double uses e1fc ae60.
-            let pair = d & 14;
-            let product = if x & 0x1000 != 0 {
-                (cpu.r[s] as i32 as i64).wrapping_mul(cpu.r[c] as i32 as i64) as u64
-            } else {
-                cpu.r[s] as u64 * cpu.r[c] as u64
-            };
-            let sum =
-                ((cpu.r[pair] as u64) | ((cpu.r[pair + 1] as u64) << 32)).wrapping_add(product);
-            cpu.r[pair] = sum as u32;
-            cpu.r[pair + 1] = (sum >> 32) as u32;
-            name = "multiply_accumulate_long";
-        }
-        Op::DivideLong => {
-            // rD+1:rD = (rS+1:rS) / rC, unsigned 64-by-32 division. The stock
-            // microsecond conversion divides by 1000000 then rebuilds the
-            // remainder from both quotient words.
-            // x bit 12 selects the signed form (Felucca's formant filter:
-            // an int64 divided by an int32).
-            let pair = d & 14;
-            let dividend = cpu.r[s] as u64 | ((cpu.r[s + 1] as u64) << 32);
-            let quotient = if x & 0x1000 != 0 {
-                (dividend as i64)
-                    .checked_div(cpu.r[c] as i32 as i64)
-                    .map(|q| q as u64)
-            } else {
-                dividend.checked_div(cpu.r[c] as u64)
-            }
-            .ok_or(Fault::Unsupported { pc, word: h as u16 })?;
-            cpu.r[pair] = quotient as u32;
-            cpu.r[pair + 1] = (quotient >> 32) as u32;
-            name = "divide_long";
-        }
-        Op::CarryArithmetic => {
-            // addc/subc: carry in from PSR.C, carry out to PSR.C; N, Z and V
-            // of the 32-bit result too: the compiler's signed 64-bit compare
-            // subtracts the low words, subc's the high words and tests
-            // N != V (sextra of PSR bits 3 and 0 right after the subc).
-            let (lhs, rhs) = (cpu.r[s] as u64, cpu.r[c] as u64);
-            let (a, b) = (cpu.r[s], cpu.r[c]);
-            let (result, overflow) = if x & 2 == 0 {
-                let sum = lhs + rhs + u64::from(cpu.carry());
-                cpu.r[d] = sum as u32;
-                cpu.set_carry(sum >> 32 != 0);
-                name = "add_with_carry";
-                (sum as u32, !(a ^ b) & (a ^ sum as u32))
-            } else {
-                let borrow = u64::from(!cpu.carry());
-                let diff = lhs.wrapping_sub(rhs + borrow) as u32;
-                cpu.r[d] = diff;
-                cpu.set_carry(lhs >= rhs + borrow);
-                name = "subtract_with_carry";
-                (diff, (a ^ b) & (a ^ diff))
-            };
-            cpu.set_nzv(result >> 31 != 0, result == 0, overflow >> 31 != 0);
-        }
-        Op::MultiplyExtended => {
-            cpu.r[d] = cpu.r[s].wrapping_mul(cpu.r[c]);
-            name = "multiply_extended";
-        }
-        Op::Divide => {
-            cpu.r[d] = if x & 1 == 0 {
-                cpu.r[s].checked_div(cpu.r[c])
-            } else {
-                (cpu.r[s] as i32)
-                    .checked_div(cpu.r[c] as i32)
-                    .map(|v| v as u32)
-            }
-            .ok_or(Fault::Unsupported { pc, word: h as u16 })?;
-            name = if x & 1 == 0 {
-                "divide_unsigned"
-            } else {
-                "divide_signed"
-            };
-        }
-        Op::CountLeadingZeros => {
-            cpu.r[d] = cpu.r[c].leading_zeros();
-            name = "count_leading_zeros";
-        }
-        Op::Absolute => {
-            cpu.r[d] = (cpu.r[c] as i32).wrapping_abs() as u32;
-            name = "absolute";
-        }
-        Op::Maximum => {
-            cpu.r[d] = if x & 1 == 0 {
-                cpu.r[s].max(cpu.r[c])
-            } else {
-                (cpu.r[s] as i32).max(cpu.r[c] as i32) as u32
-            };
-            name = if x & 1 == 0 {
-                "maximum_unsigned"
-            } else {
-                "maximum_signed"
-            };
-        }
-        Op::Minimum => {
-            cpu.r[d] = if x & 1 == 0 {
-                cpu.r[s].min(cpu.r[c])
-            } else {
-                (cpu.r[s] as i32).min(cpu.r[c] as i32) as u32
-            };
-            name = if x & 1 == 0 {
-                "minimum_unsigned"
-            } else {
-                "minimum_signed"
-            };
-        }
-        Op::MemoryAdd => {
-            let addr = cpu.r[d] + (h & 31) * 4;
-            cpu.write(
-                addr,
-                cpu.read(addr, 4)?.wrapping_add(signed(x & 4095, 12) as u32),
-            )?;
-            name = "memory_add";
-        }
-        Op::DecrementBranch => {
-            cpu.r[n] = cpu.r[n].wrapping_sub(1);
-            if cpu.r[n] != 0 {
-                next = next.wrapping_add((signed(x, 16) * 2) as u32);
-            }
-            name = "decrement_branch";
-        }
-        Op::MemoryBit => {
-            let addr = cpu.r[d].wrapping_add(mem_offset(x));
-            let old = cpu.read(addr, 4)?;
-            let mask = 1u32 << (cpu.r[c] & 31);
-            cpu.write(
-                addr,
-                match x & 3 {
-                    0 => old | mask,
-                    1 => old ^ mask,
-                    3 => old & !mask,
-                    _ => return Err(unsupported(pc, h)),
-                },
-            )?;
-            name = "memory_bit";
-        }
-        Op::AddSubtractExtended => {
-            // Carry out feeds a following addc/subc (64-bit arithmetic).
-            let (lhs, rhs) = (cpu.r[s], cpu.r[c]);
-            if x & 2 == 0 {
-                let (sum, carry) = lhs.overflowing_add(rhs);
-                cpu.r[d] = sum;
-                cpu.set_carry(carry);
-            } else {
-                cpu.r[d] = lhs.wrapping_sub(rhs);
-                cpu.set_carry(lhs >= rhs);
-            }
-            name = if x & 2 == 0 {
-                "add_extended"
-            } else {
-                "subtract_extended"
-            };
-        }
-        Op::ShiftRegisterExtended => {
-            // Quarkslab pi32v2 imm1619: 0 and 1 lsl, 2 lsr, 3 asr (qasr).
-            let shift = cpu.r[c];
-            cpu.r[d] = match x & 15 {
-                0 | 1 => cpu.r[s].checked_shl(shift).unwrap_or(0),
-                2 => cpu.r[s].checked_shr(shift).unwrap_or(0),
-                3 => ((cpu.r[s] as i32) >> shift.min(31)) as u32,
-                _ => return Err(unsupported(pc, h)),
-            };
-            name = "shift_register_extended";
-        }
-        Op::BytePreincrement => {
-            let addr = cpu.r[s].wrapping_add(cpu.r[c]);
-            mem = Some((d, s, addr, 1, x & 1 != 0, x & 2 != 0, Some(addr)));
-            name = "byte_preincrement";
-        }
-        Op::ShiftExtended => {
-            let shift = ((x >> 8) & 3) * 16 + (x & 15);
-            let mode = (x >> 10) & 3;
-            cpu.r[d] = match mode {
-                0 => cpu.r[s].checked_shl(shift).unwrap_or(0),
-                2 => cpu.r[s].checked_shr(shift).unwrap_or(0),
-                _ => ((cpu.r[s] as i32) >> shift.min(31)) as u32,
-            };
-            name = "shift_extended";
-        }
-        Op::ShiftPair => {
-            // rD+1:rD shifted as one 64-bit value, in place (same shift
-            // fields as ShiftExtended). Felucca sign-extends r4 into r5:r4
-            // with e1d0 4200; e1d0 4e00 and scales Q30 products with 490e.
-            let shift = ((x >> 8) & 3) * 16 + (x & 15);
-            let pair = (cpu.r[d] as u64) | ((cpu.r[d + 1] as u64) << 32);
-            let value = match (x >> 10) & 3 {
-                0 => pair.checked_shl(shift).unwrap_or(0),
-                2 => pair.checked_shr(shift).unwrap_or(0),
-                _ => ((pair as i64) >> shift.min(63)) as u64,
-            };
-            cpu.r[d] = value as u32;
-            cpu.r[d + 1] = (value >> 32) as u32;
-            name = "shift_pair";
-        }
-        Op::ShiftPairRegister => {
-            // rD+1:rD shifted in place by rC (stock unsigned-to-double:
-            // e1d8 4700 normalises the mantissa by 47 for the value 48).
-            let shift = cpu.r[c];
-            let pair = (cpu.r[d] as u64) | ((cpu.r[d + 1] as u64) << 32);
-            let value = match x & 3 {
-                0 | 1 => pair.checked_shl(shift).unwrap_or(0),
-                2 => pair.checked_shr(shift).unwrap_or(0),
-                _ => ((pair as i64) >> shift.min(63)) as u64,
-            };
-            cpu.r[d] = value as u32;
-            cpu.r[d + 1] = (value >> 32) as u32;
-            name = "shift_pair_register";
-        }
-        Op::FloatOp => {
-            // e53f, x = d c s op on IEEE single bits (JieLi objdump
-            // --mattr=+fprev1): rD = rS op rC with 0 add, 1 sub, 2 mul,
-            // 3 div, 5 fmin, 6 fmax, 7 rD += rS*rC, 8 rD -= rS*rC. Op 15 is
-            // unary on rC with the sub-operation in s: 0-3 ftoi and 4-7 ftou
-            // (round to even/trunc/ceil/floor), 8 itof, 9 utof, 10 rD.l =
-            // ftof(rC) (to binary16), 11 rD = ftof(rC.l) (from binary16),
-            // 12-15 round to an integral float (even/trunc/ceil/floor).
-            // Unverified: fused or separate rounding for 7/8, NaN handling
-            // and out-of-range conversion results (Rust saturates).
-            // Op 4 (fcmp) is not decoded: its flag results are unknown.
-            let fl = |v: u32| f32::from_bits(v);
-            let (a, b) = (fl(cpu.r[s]), fl(cpu.r[c]));
-            let round = |v: f32, mode: u32| match mode & 3 {
-                0 => v.round_ties_even(),
-                1 => v.trunc(),
-                2 => v.ceil(),
-                _ => v.floor(),
-            };
-            cpu.r[d] = match x & 15 {
-                0 => (a + b).to_bits(),
-                1 => (a - b).to_bits(),
-                2 => (a * b).to_bits(),
-                3 => (a / b).to_bits(),
-                5 => a.min(b).to_bits(),
-                6 => a.max(b).to_bits(),
-                7 => (fl(cpu.r[d]) + a * b).to_bits(),
-                8 => (fl(cpu.r[d]) - a * b).to_bits(),
-                _ => match s {
-                    0..=3 => round(b, s as u32) as i32 as u32,
-                    4..=7 => round(b, s as u32) as u32,
-                    8 => (cpu.r[c] as i32 as f32).to_bits(),
-                    9 => (cpu.r[c] as f32).to_bits(),
-                    10 => (cpu.r[d] & 0xffff_0000) | u32::from(f32_to_f16(b)),
-                    11 => f16_to_f32(cpu.r[c] as u16).to_bits(),
-                    _ => round(b, s as u32).to_bits(),
-                },
-            };
-            name = "float_op";
-        }
-        Op::BranchLong => {
-            let value = match h & 0x60 {
-                0 => x & 4095,
-                0x20 => packed(x),
-                0x40 => cpu.r[c],
-                _ => packed(x),
-            };
-            let lhs = cpu.r[d];
-            let test = if h & 0x60 == 0x60 {
-                if h & 1 == 0 {
-                    lhs & value == 0
-                } else {
-                    lhs & value != 0
-                }
-            } else {
-                match h & 15 {
-                    0 => lhs == value,
-                    1 => lhs != value,
-                    2 => lhs >= value,
-                    3 => lhs < value,
-                    8 => lhs > value,
-                    9 => lhs <= value,
-                    10 => (lhs as i32) >= (value as i32),
-                    11 => (lhs as i32) < (value as i32),
-                    12 => (lhs as i32) > (value as i32),
-                    _ => (lhs as i32) <= (value as i32),
-                }
-            };
-            next = pc + 6;
-            if test {
-                next = next.wrapping_add((signed(cpu.operand(code.y, pc + 4)?, 16) * 2) as u32);
-            }
-            name = "branch_long";
-        }
-        Op::LogicThree => {
-            cpu.r[d] = match x & 3 {
-                0 => cpu.r[s] | cpu.r[c],
-                1 => cpu.r[s] ^ cpu.r[c],
-                2 => cpu.r[s] & cpu.r[c],
-                // and-not, as in memory_logic and logic_immediate mode 7:
-                // stock `r1 = 1; r0 = r1 & ~r0` negates a 0/1 flag.
-                _ => cpu.r[s] & !cpu.r[c],
-            };
-            name = "logic_three";
-        }
-        // Register lists transfer the lowest register at the base address and
-        // ascend (struct fields: Felucca's gr_grain_t {z, pos}, the stock
-        // linked-list nodes {next, prev}); the base register is unchanged.
-        Op::StoreRegisterList => {
-            // Lowest register at the lowest address (Felucca fm1_fault_c's
-            // {r5, r1} = [r4+] reads magic into r1; stock list_add_tail).
-            let mut address = cpu.r[n];
-            for register in 0..16 {
-                if x & (1 << register) != 0 {
-                    cpu.write(address, cpu.r[register])?;
-                    address = address.wrapping_add(4);
-                }
-            }
-            // [rN++] = {...}: the base advances past the list (inferred
-            // from objdump's `++`).
-            if h & 0x10 != 0 {
-                cpu.r[n] = address;
-            }
-            name = "store_register_list";
-        }
-        Op::LoadRegisterList => {
-            let mut address = cpu.r[n];
-            for register in 0..16 {
-                if x & (1 << register) != 0 {
-                    cpu.r[register] = cpu.read(address, 4)?;
-                    address = address.wrapping_add(4);
-                }
-            }
-            // {...} = [rN++]: as the store.
-            if h & 0x10 != 0 {
-                cpu.r[n] = address;
-            }
-            name = "load_register_list";
-        }
-        Op::StackSubword => {
-            let halfword = h & 4 == 0;
-            let offset = if halfword { x & 4094 } else { x & 4095 };
-            mem = Some((
-                d,
-                0,
-                cpu.sr[14].wrapping_add(offset),
-                if halfword { 2 } else { 1 },
-                if halfword {
-                    h == 0xe9d8 && x & 1 != 0
-                } else {
-                    h == 0xe9de
-                },
-                h & 1 != 0,
-                None,
-            ));
-            name = "stack_subword";
-        }
-        Op::StackExtended => {
-            mem = Some((d, 0, cpu.sr[14] + (x & 4092), 4, x & 1 != 0, false, None));
-            name = "stack_extended";
-        }
-        Op::MemoryPair => {
-            let offset = (signed(h & 7, 3) << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 12) as i32;
-            let addr = cpu.r[s].wrapping_add(offset as u32);
-            let reg = d & 14;
-            if x & 1 != 0 {
-                cpu.write(addr, cpu.r[reg])?;
-                cpu.write(addr + 4, cpu.r[reg + 1])?;
-            } else {
-                cpu.r[reg] = cpu.read(addr, 4)?;
-                cpu.r[reg + 1] = cpu.read(addr + 4, 4)?;
-            }
-            if x & 2 != 0 {
-                // x bit 1: pre-increment, the address written back to the
-                // base (objdump: ec50 8012 is r9_r8 = d[++r1=0]).
-                cpu.r[s] = addr;
-            }
-            name = "memory_pair";
-        }
-        Op::BitField => {
-            let pos = (x >> 7) & 31;
-            let len = (x >> 2) & 31;
-            let mask = (1u32 << len) - 1;
-            cpu.r[n] = if h & 0x10 == 0 {
-                (cpu.r[n] & !(mask << pos)) | ((cpu.r[d] & mask) << pos)
-            } else if x & 1 == 0 {
-                (cpu.r[d] >> pos) & mask
-            } else {
-                // sextra: the extracted field sign-extended (objdump
-                // e1b0 b041 = r0 = sextra(r11, p:0, l:16), Baud Girl
-                // 0x02012c5e).
-                signed((cpu.r[d] >> pos) & mask, len.max(1)) as u32
-            };
-            name = "bit_field";
-        }
-        Op::BranchEqualFlag => {
-            if cpu.sr[5] & 4 != 0 {
-                next = next.wrapping_add((signed(x, 16) * 2) as u32);
-            }
-            name = "branch_equal_flag";
-        }
-        Op::BranchBit => {
-            let test = (cpu.r[n] & (1 << ((x >> 11) & 31)) != 0) == (x & 512 != 0);
-            if test {
-                next = next.wrapping_add((signed(x & 511, 9) * 2) as u32);
-            }
-            name = "branch_bit";
-        }
-        Op::MemoryMask => {
-            // ef00-efff: bits 7-6 select or / xor / and / and-not, bits 5-0
-            // a signed word offset (objdump: ef3f 0400 is [r0+-4] |= ...).
-            let addr = cpu.r[d].wrapping_add((signed(h & 63, 6) * 4) as u32);
-            let old = cpu.read(addr, 4)?;
-            let value = packed(x);
-            cpu.write(
-                addr,
-                match h & 0xc0 {
-                    0 => old | value,
-                    0x40 => old ^ value,
-                    0x80 => old & value,
-                    _ => old & !value,
-                },
-            )?;
-            name = "memory_mask";
-        }
-        Op::ConditionalBlock => {
-            let kind = (h >> 4) & 255;
-            let lhs = cpu.r[n];
-            // Low bits of the kind: 1 register, 2 packed immediate, 3 imm12.
-            // JieLi objdump (x = 0x0ba5): the imm12 is signed for ==, != and
-            // the signed comparisons (-1115), unsigned for the unsigned ones
-            // (2981); not packed as Quarkslab lists it. SLOOP's reverb wraps
-            // `++line_i[3] >= 2791` with ecb1 0ae6 (<= 2790); clang emits
-            // e930 0bb8 for `x < 3000u`.
-            let rhs = if kind & 7 == 1 {
-                cpu.r[c]
-            } else if kind & 7 == 2 || matches!(kind, 0xa2 | 0xa3) {
-                // ea2X/ea3X test bits against a packed mask (== 0 / != 0).
-                packed(x)
-            } else if matches!(kind, 0x83 | 0x8b | 0xd3 | 0xdb | 0xe3 | 0xeb) {
-                signed(x & 4095, 12) as u32
-            } else {
-                x & 4095
-            };
-            // Register forms with x bit 7: IEEE single compares (objdump
-            // -mattr=+fprev1 prints them iff; `u` also enters when
-            // unordered), except ea1X x = 0080, the bit test != 0.
-            let float = kind & 7 == 1 && x & 0x80 != 0 && !(kind == 0xa1 && x & 0x7f == 0);
-            let test = if float {
-                float_condition(kind, f32::from_bits(lhs), f32::from_bits(rhs))
-            } else {
-                integer_condition(kind, x, lhs, rhs)
-            };
-            next = cpu.conditional(test, x)?;
-            name = "conditional_block";
-        }
-        Op::MemoryLogic => {
-            let addr = cpu.r[d].wrapping_add(x & 0xfc);
-            let old = cpu.read(addr, 4)?;
-            let value = cpu.r[c];
-            cpu.write(
-                addr,
-                match x & 3 {
-                    0 => old | value,
-                    1 => old ^ value,
-                    2 => old & value,
-                    _ => old & !value,
-                },
-            )?;
-            name = "memory_logic";
-        }
-        Op::LogicImmediate => {
-            let mode = (h >> 4) & 15;
-            let value = if mode == 6 && x & 0xc00 == 0 {
-                x & 1023
-            } else {
-                packed(x)
-            };
-            cpu.r[n] = match mode {
-                4 => cpu.r[d] | value,
-                5 => cpu.r[d] ^ value,
-                6 => cpu.r[d] & value,
-                _ => cpu.r[d] & !value,
-            };
-            name = "logic_immediate";
-        }
-        Op::StoreImmediate => {
-            cpu.write(cpu.r[d].wrapping_add((h & 31) * 4), packed(x))?;
-            name = "store_immediate";
-        }
-        Op::AddImmediate => {
-            let value = match (h >> 4) & 15 {
-                0 => x & 4095,
-                1 => (x & 4095) + 4096,
-                2 => (x & 4095) | 0xffffe000,
-                3 => (x & 4095) | 0xfffff000,
-                _ => packed(x),
-            };
-            // The compiler pairs this with addc for 64-bit sums (e.g.
-            // `r12 = r10 + 32; r13 = r11 + r0 + c`): it sets the carry out.
-            let (sum, carry) = cpu.r[d].overflowing_add(value);
-            cpu.r[n] = sum;
-            cpu.set_carry(carry);
-            name = "add_immediate";
-        }
-        Op::AddStackExtended => {
-            cpu.r[d] = cpu.sr[14].wrapping_add(x & 4095);
-            name = "add_stack_extended";
-        }
-        Op::AdjustStackExtended => {
-            // sp += signed 13-bit immediate: stock prologues pair e8f0 1d98
-            // (-616) with epilogues e8f0 0268 (+616) around push/pop.
-            cpu.sr[14] = cpu.sr[14].wrapping_add(signed(x, 13) as u32);
-            name = "adjust_stack_extended";
-        }
-        Op::BranchCompareImmediate => {
-            let kind = (h >> 7) & 63;
-            // The ordered unsigned forms (jae jb ja jbe) take an unsigned imm10
-            // (SLOOP's fm1_delay_us: jb r1, #960); equality (je jne) and the
-            // signed forms sign-extend it (Baud Girl 0x02001820: je against
-            // -2, f874 fc04). Quarkslab's spec lists je as unsigned too; the
-            // stock-toolchain code says otherwise.
-            let raw = (((h >> 4) & 7) << 7) | (x >> 9);
-            let immediate = signed(raw, 10) as u32;
-            let v = cpu.r[n];
-            let test = match kind {
-                0x30 => v == immediate,
-                0x31 => v != immediate,
-                0x32 => v >= raw,
-                0x33 => v < raw,
-                0x38 => v > raw,
-                0x39 => v <= raw,
-                0x3a => (v as i32) >= signed(immediate, 10),
-                0x3b => (v as i32) < signed(immediate, 10),
-                0x3c => (v as i32) > signed(immediate, 10),
-                _ => (v as i32) <= signed(immediate, 10),
-            };
-            if test {
-                next = next.wrapping_add((signed(x & 511, 9) * 2) as u32);
-            }
-            name = "branch_compare_immediate";
-        }
-        Op::BranchCompareRegister => {
-            let lhs = cpu.r[d];
-            let rhs = cpu.r[n];
-            // x bit 11 (bit 10 clear) compares IEEE singles: JieLi objdump
-            // prints these as iff (...), e.g. ee81 e8a5 = iff (r14 u<= r1).
-            let float = if x & 0x800 != 0 {
-                let (a, b) = (f32::from_bits(lhs), f32::from_bits(rhs));
-                // JieLi objdump: e800 ==, e880 u!=, e900 u>=, e980 <,
-                // ec00 u>, ec80 <=, ed00 >=, ed80 u<, ee00 >, ee80 u<=
-                // (u: also taken when unordered, i.e. a NaN operand).
-                Some(match h & 0xfff0 {
-                    0xe800 => a == b,
-                    0xe880 => a != b,
-                    0xe900 => !(a < b),
-                    0xe980 => a < b,
-                    0xec00 => !(a <= b),
-                    0xec80 => a <= b,
-                    0xed00 => a >= b,
-                    0xed80 => !(a >= b),
-                    0xee00 => a > b,
-                    _ => !(a > b),
-                })
-            } else {
-                None
-            };
-            let test = float.unwrap_or_else(|| match h & 0xfff0 {
-                0xe800 => lhs == rhs,
-                0xe880 => lhs != rhs,
-                0xe900 => lhs >= rhs,
-                0xe980 => lhs < rhs,
-                0xec00 => lhs > rhs,
-                0xec80 => lhs <= rhs,
-                0xed00 => (lhs as i32) >= (rhs as i32),
-                0xed80 => (lhs as i32) < (rhs as i32),
-                0xee00 => (lhs as i32) > (rhs as i32),
-                _ => (lhs as i32) <= (rhs as i32),
-            });
-            if test {
-                next = next.wrapping_add((signed(x & 511, 9) * 2) as u32);
-            }
-            name = "branch_compare_register";
-        }
-        Op::ByteExtended => {
-            // Bit 0 is the sign of a 9-bit byte offset (Quarkslab 0xe59:
-            // "[++rB=-imm8]"); stock string scans use b[r3+-18].
-            let off = signed((h & 1) << 8 | ((x >> 8) & 15) << 4 | (x & 15), 9) as u32;
-            mem = Some((
-                d,
-                s,
-                cpu.r[s].wrapping_add(off),
-                1,
-                h & 2 != 0,
-                h & 6 == 4,
-                if h & 8 != 0 {
-                    Some(cpu.r[s].wrapping_add(off))
-                } else {
-                    None
-                },
-            ));
-            name = "byte_extended";
-        }
-        Op::WordExtended => {
-            let offset = (signed(h & 7, 3) << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 12) as i32;
-            let addr = cpu.r[s].wrapping_add(offset as u32);
-            let mode = x & 3;
-            mem = Some((
-                d,
-                s,
-                addr,
-                4,
-                mode & 1 != 0,
-                false,
-                if mode & 2 != 0 { Some(addr) } else { None },
-            ));
-            name = "word_extended";
-        }
-        Op::WordRegisterPreincrementStore => {
-            let address = cpu.r[s].wrapping_add(cpu.r[c]);
-            cpu.write(address, cpu.r[d])?;
-            cpu.r[s] = address;
-            name = "word_register_preincrement_store";
-        }
-        Op::WordRegisterPreincrement => {
-            // Vendor form: rD = [++rS=rC]. Commit the base before the
-            // destination so a load into its own base retains the loaded word.
-            let address = cpu.r[s].wrapping_add(cpu.r[c]);
-            let value = cpu.read(address, 4)?;
-            cpu.r[s] = address;
-            cpu.r[d] = value;
-            name = "word_register_preincrement";
-        }
-        Op::HalfwordRegisterPreincrementStore => {
-            // Vendor form: h[++rS=rC] = rD (x & 15 == 1) or = rD.h (3): the high half.
-            let address = cpu.r[s].wrapping_add(cpu.r[c]);
-            let value = if x & 2 != 0 { cpu.r[d] >> 16 } else { cpu.r[d] & 0xffff };
-            cpu.bus
-                .write(address, value, 2)
-                .map_err(|fault| Fault::Access { pc, fault })?;
-            cpu.r[s] = address;
-            name = "halfword_register_preincrement_store";
-        }
-        Op::HalfwordRegisterPreincrement => {
-            let address = cpu.r[s].wrapping_add(cpu.r[c]);
-            let value = cpu.read(address, 2)?;
-            cpu.r[s] = address;
-            cpu.r[d] = if x & 2 != 0 {
-                signed(value, 16) as u32
-            } else {
-                value
-            };
-            name = "halfword_register_preincrement";
-        }
-        Op::WordPostincrementStore => {
-            let increment = signed((h & 7) << 8 | ((x >> 8) & 15) << 4 | (x & 12), 11) as u32;
-            let address = cpu.r[s];
-            mem = Some((
-                d,
-                s,
-                address,
-                4,
-                true,
-                false,
-                Some(address.wrapping_add(increment)),
-            ));
-            name = "word_postincrement_store";
-        }
-        Op::WordPostincrementLoad => {
-            // rD = [rS++=imm]: the load twin of the store above (Quarkslab
-            // "lw eregA, [eregB++=imm8]"). Word accesses have no signed
-            // indexed form, so x&3==0 is not [rS+rC]; the stock device table
-            // walk at 0x020347fc advances by 28 bytes this way.
-            let increment = signed((h & 7) << 8 | ((x >> 8) & 15) << 4 | (x & 12), 11) as u32;
-            let address = cpu.r[s];
-            mem = Some((
-                d,
-                s,
-                address,
-                4,
-                false,
-                false,
-                Some(address.wrapping_add(increment)),
-            ));
-            name = "word_postincrement_load";
-        }
-        Op::MemoryIndexed => {
-            let size = match h {
-                0xecd8 => 4,
-                0xedd8 => 2,
-                _ => 1,
-            };
-            let scaled = x & 8 != 0;
-            let mode = x & 7;
-            let addr =
-                cpu.r[s].wrapping_add(cpu.r[c].wrapping_mul(if scaled { size as u32 } else { 1 }));
-            mem = Some((
-                d,
-                s,
-                addr,
-                size,
-                if size == 4 { mode == 3 } else { mode == 1 },
-                mode == 2 && size != 4,
-                None,
-            ));
-            name = "memory_indexed";
-        }
-        Op::HalfAddSubtract => {
-            let (a, b) = (
-                simd::half(cpu.r[s], x & 4 != 0),
-                simd::half(cpu.r[c], x & 2 != 0),
-            );
-            let v = if x & 1 == 0 { a + b } else { a - b };
-            cpu.r[d] = simd::set_half(cpu.r[d], x & 8 != 0, v);
-            name = if x & 1 == 0 {
-                "half_add"
-            } else {
-                "half_subtract"
-            };
-        }
-        Op::HalfMultiply => {
-            let (a, b) = (
-                simd::half(cpu.r[s], x & 4 != 0),
-                simd::half(cpu.r[c], x & 2 != 0),
-            );
-            let v = simd::mul16(a, b, h & 2 != 0);
-            cpu.r[d] = simd::set_half(cpu.r[d], x & 8 != 0, v);
-            name = "half_multiply";
-        }
-        Op::HalfMultiplyWord => {
-            let (a, b) = (
-                simd::half(cpu.r[s], x & 4 != 0),
-                simd::half(cpu.r[c], x & 2 != 0),
-            );
-            cpu.r[d] = simd::mul32(a, b, h & 2 != 0);
-            name = "half_multiply_word";
-        }
-        Op::Pack => {
-            let (a, b) = (
-                simd::half(cpu.r[s], x & 4 != 0),
-                simd::half(cpu.r[c], x & 2 != 0),
-            );
-            cpu.r[d] = simd::join(a, b);
-            name = "pack";
-        }
-        Op::DualAddSubtract => {
-            let (a0, a1) = simd::lanes(cpu.r[s], x & 2 != 0, x & 1 != 0);
-            let (b0, b1) = simd::lanes(cpu.r[c], h & 8 != 0, h & 4 != 0);
-            let first = if x & 8 == 0 { a0 + b0 } else { a0 - b0 };
-            let second = if x & 4 == 0 { a1 + b1 } else { a1 - b1 };
-            cpu.r[d] = simd::join(simd::sat16(first as i64), simd::sat16(second as i64));
-            name = "dual_add_subtract";
-        }
-        Op::DualMultiply => {
-            let (a0, a1) = simd::lanes(cpu.r[s], x & 2 != 0, x & 1 != 0);
-            let (b0, b1) = simd::lanes(cpu.r[c], h & 8 != 0, h & 4 != 0);
-            let x2 = h & 2 != 0;
-            cpu.r[d] = simd::join(simd::mul16(a0, b0, x2), simd::mul16(a1, b1, x2));
-            name = "dual_multiply";
-        }
-        _ => return Err(unsupported(pc, h)),
-    }
-    access(cpu, pc, mem)?;
-    cpu.name = name;
-    Ok(next)
-}
-
-/// IEEE binary32 -> binary16, round to nearest even (vendor ftof to .l).
-/// The integer test of a conditional block (`if`/`ifs`) of kind
-/// `(h >> 4) & 255`; `rhs` is rC or the decoded immediate.
-fn integer_condition(kind: u32, x: u32, lhs: u32, rhs: u32) -> bool {
-    match kind {
-        0x81..=0x83 => lhs == rhs,
-        0x89..=0x8b => lhs != rhs,
-        0x91..=0x93 => lhs >= rhs,
-        0x99..=0x9b => lhs < rhs,
-        // x 0000 == 0, 0080 != 0 (objdump); x 0001-007f print as
-        // `if (rA ?? rC)` and are taken as == 0 here (inferred).
-        0xa1 => {
-            if x & 128 == 0 {
-                lhs & rhs == 0
-            } else {
-                lhs & rhs != 0
-            }
-        }
-        0xa2 => lhs & rhs == 0,
-        0xa3 => lhs & rhs != 0,
-        0xc1..=0xc3 => lhs > rhs,
-        0xc9..=0xcb => lhs <= rhs,
-        0xd1..=0xd3 => (lhs as i32) >= (rhs as i32),
-        0xd9..=0xdb => (lhs as i32) < (rhs as i32),
-        // Same condition order as the compare-branches: 0xee00 is
-        // signed >, 0xee80 signed <= (FM-1_093 0x02002bea: ee15).
-        0xe1..=0xe3 => (lhs as i32) > (rhs as i32),
-        _ => (lhs as i32) <= (rhs as i32),
-    }
-}
-
-/// The IEEE single test of a register conditional block with x bit 7
-/// (JieLi objdump -mattr=+fprev1, `iff`; the order of the compare-branches:
-/// e8 ==, e89 u!=, e91 u>=, e99 <, ec1 u>, ec9 <=, ed1 >=, ed9 u<, ee1 >,
-/// ee9 u<=, and ea1 the ordered !=). `u` also holds when unordered.
-fn float_condition(kind: u32, a: f32, b: f32) -> bool {
-    use std::cmp::Ordering::{Equal, Greater, Less};
-    // None: unordered (a NaN operand).
-    let order = a.partial_cmp(&b);
-    match kind {
-        0x81 => order == Some(Equal),
-        0x89 => order != Some(Equal),
-        0x91 => order != Some(Less),
-        0x99 => order == Some(Less),
-        0xa1 => matches!(order, Some(Less | Greater)),
-        0xc1 => matches!(order, None | Some(Greater)),
-        0xc9 => matches!(order, Some(Less | Equal)),
-        0xd1 => matches!(order, Some(Greater | Equal)),
-        0xd9 => matches!(order, None | Some(Less)),
-        0xe1 => order == Some(Greater),
-        _ => order != Some(Greater),
-    }
-}
-
-fn f32_to_f16(v: f32) -> u16 {
-    let bits = v.to_bits();
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exp = ((bits >> 23) & 0xff) as i32;
-    let mant = bits & 0x7f_ffff;
-    if exp == 0xff {
-        return sign | 0x7c00 | if mant != 0 { 0x200 } else { 0 };
-    }
-    let e = exp - 127 + 15;
-    if e >= 31 {
-        return sign | 0x7c00;
-    }
-    if e <= 0 {
-        if e < -10 {
-            return sign;
-        }
-        let m = mant | 0x80_0000;
-        let shift = (14 - e) as u32;
-        let half = m >> shift;
-        let rest = m & ((1 << shift) - 1);
-        let mid = 1 << (shift - 1);
-        let round = rest > mid || (rest == mid && half & 1 != 0);
-        return sign | (half + u32::from(round)) as u16;
-    }
-    let half = ((e as u32) << 10) | (mant >> 13);
-    let rest = mant & 0x1fff;
-    let round = rest > 0x1000 || (rest == 0x1000 && half & 1 != 0);
-    sign | (half + u32::from(round)) as u16
-}
-
-/// IEEE binary16 -> binary32 (exact).
-fn f16_to_f32(h: u16) -> f32 {
-    let sign = ((h as u32) & 0x8000) << 16;
-    let exp = ((h >> 10) & 31) as u32;
-    let mant = (h & 0x3ff) as u32;
-    let bits = match (exp, mant) {
-        (0, 0) => sign,
-        (0, m) => {
-            let v = m as f32 / 1024.0 / 16384.0;
-            return if sign != 0 { -v } else { v };
-        }
-        (31, m) => sign | 0x7f80_0000 | (m << 13),
-        (e, m) => sign | ((e + 112) << 23) | (m << 13),
-    };
-    f32::from_bits(bits)
+    Ok(Some((next, op)))
 }

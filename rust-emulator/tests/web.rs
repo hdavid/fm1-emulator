@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+#![cfg(feature = "web")]
 // The web editor bridge: static files from a UI sidecar (zip or directory),
 // the Web MIDI shim injected into pages, and MIDI over the /midi WebSocket.
 use fm1_emu::web::{sidecar_for, Hub, Server, Source};

@@ -7,10 +7,6 @@ pub const DIR: u32 = 8;
 pub const DIE: u32 = 12;
 pub const PU: u32 = 16;
 pub const PD: u32 = 20;
-/// JL_IOMAP CON2-CON4 and CON6-CON8 (SDK WL82.h psfr 0x1007: CON0 at
-/// 0x5101c). CON0, CON1 and CON5 are modelled with their users (nor.rs,
-/// lcd.rs, audio.rs). Pin-mux routing only; reset value unmeasured (0).
-const IOMAP_OTHER: [u32; 6] = [0x51024, 0x51028, 0x5102c, 0x51034, 0x51038, 0x5103c];
 
 pub struct Gpio {
     ports: [[u32; 8]; 8],
@@ -21,7 +17,6 @@ pub struct Gpio {
     /// Port A input reads while each matrix column was selected: how many
     /// times the guest has sampled that column's contacts (encoder pacing).
     scans: [std::cell::Cell<u32>; 11],
-    iomap: [u32; 6],
 }
 
 impl Default for Gpio {
@@ -37,12 +32,16 @@ impl Default for Gpio {
             latched: u16::MAX,
             previous_driven_a: 0,
             scans: Default::default(),
-            iomap: [0; 6],
         }
     }
 }
 
 impl Gpio {
+    pub(crate) fn shift_spi(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.shift = (self.shift << 8) | byte as u16;
+        }
+    }
     pub fn press(&mut self, column: usize, row: usize, pressed: bool) -> Result<(), &'static str> {
         if column >= self.matrix.len() || row >= 6 {
             return Err("matrix key must be COLUMN:ROW (columns 0..10, rows 0..5)");
@@ -98,9 +97,6 @@ impl Gpio {
     }
 
     pub fn read(&self, address: u32) -> Option<u32> {
-        if let Some(i) = IOMAP_OTHER.iter().position(|&a| a == address) {
-            return Some(self.iomap[i]);
-        }
         let offset = address.checked_sub(GPIO)?;
         let port = (offset / 0x40) as usize;
         let register = offset % 0x40;
@@ -116,10 +112,6 @@ impl Gpio {
 
     pub fn write(&mut self, address: u32, value: u32) -> Option<Result<(), &'static str>> {
         self.read(address)?;
-        if let Some(i) = IOMAP_OTHER.iter().position(|&a| a == address) {
-            self.iomap[i] = value;
-            return Some(Ok(()));
-        }
         let offset = address - GPIO;
         let port = (offset / 0x40) as usize;
         let register = offset % 0x40;
@@ -129,7 +121,9 @@ impl Gpio {
         self.ports[port][register as usize / 4] = value;
         if port == 0 {
             let a = self.ports[0];
-            let driven = a[OUT as usize / 4] & !a[DIR as usize / 4] & a[DIE as usize / 4];
+            // DIE enables the input buffer; DIR controls the output driver.
+            // Stock leaves PA1's input buffer disabled while pulsing its latch.
+            let driven = a[OUT as usize / 4] & !a[DIR as usize / 4];
             if driven & 8 != 0 && self.previous_driven_a & 8 == 0 {
                 self.shift = (self.shift << 1) | ((driven >> 4) & 1) as u16;
             }

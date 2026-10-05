@@ -8,16 +8,6 @@ The [full Felucca boot investigation](FELUCCA.md) records the verified firmware
 inputs, resolved startup failures, decoder fixes, full boot and note checks. It also
 documents the bounded `diagnose` runner for symbol and peripheral reports.
 
-Timing: `examples/latency.rs` measures, in exact guest time, the input-to-audio
-latency of a Felucca-family package (a key, a USB-MIDI or TRS note-on to the
-first DMA frame out of silence) and, for SLOOP builds with MIDI clock, the
-phase of the step hits against an injected 24 PPQN clock (USB or TRS, jitter,
-tempo ramps) and of the clock the firmware sends. The TRS MIDI IN line (UART1
-RX DMA at 31250 baud: `Bus::uart_midi_send`), an onset probe on the audio DMA
-(`audio.probe`) and send times of USB-MIDI IN packets
-(`usb.midi_received_ticks`) support it. Interrupts do not nest in the model: a
-timer interrupt waits for the audio interrupt to return.
-
 On a fresh checkout, fetch the locked dependency metadata before offline tests:
 
 ```sh
@@ -50,7 +40,12 @@ The panel is an original vector illustration drawn in Rust, using the device's
 as a layout reference. No vendor product photo is bundled. Button identities
 follow the [pinned Felucca panel defaults](https://github.com/hugelton/Felucca/blob/1e838e17e170b20ff09b9660c9a7171aadfc5dca/firmware/src/panel.c)
 and the local `fm1_input.h` wiring. All fourteen buttons and twenty-seven note
-keys feed matrix contacts; rotary controls are currently decorative. Short
+keys feed matrix contacts. The seven encoders turn by dragging around them,
+scrolling, or keys (`[ ]`, `9 0`, `- =`, `1`-`8`); each click plays one
+quadrature cycle into the encoder's A/B matrix contacts (Felucca's
+`FM1_ENC` wiring), and each phase is held until the guest has read both
+contact columns three times, so the pace follows the firmware's own scan rate.
+MASTER is the ADC potentiometer (drag, scroll, or `N M`). Short
 clicks/keystrokes are held for at least 100 ms of both host and guest time so a
 slow guest scan can observe and debounce them.
 Losing window focus releases contacts. Pause stops guest execution; Restart
@@ -58,56 +53,34 @@ reloads the selected image and resets CPU, RAM, peripherals, and input state.
 
 ### Web editor (USB-MIDI over a local WebSocket)
 
-When the firmware has a web editor, `fm1-ui` serves it on
+When the firmware has a web editor, the window serves it on
 `http://127.0.0.1:8765/` (loopback only) and connects it to the emulated
 device: `FIRMWARE-ui.zip` next to `FIRMWARE.fwsc`, or `--ui DIR` (a folder with
-`index.html` or `editor.html`, e.g. a Felucca-family `web/`). "Open editor"
+`index.html` or `editor.html`, such as a Felucca-family `web/`). "Open editor"
 opens the default browser; the status line shows the URL, connected pages, MIDI
 message counts and the port name. Without an editor the button is disabled.
 
 ```sh
-fm1-ui ~/GitHub/fm1-firmware/jangada-0.1-alpha.fwsc --cpu-mhz=48
-fm1-ui firmware.fwsc --ui ~/GitHub/jangada/web
-scripts/make-ui-sidecar.sh ~/GitHub/sloop v2.2 ~/GitHub/fm1-firmware/sloop-2.2.fwsc
+./emulator --ui ~/src/Felucca/web felucca-0.9-beta.fwsc
+rust-emulator/scripts/make-ui-sidecar.sh ~/src/Felucca v0.9-beta felucca-0.9-beta.fwsc
 ```
 
-- The USB host model then also acts as a USB-MIDI host (`usb.enable_midi_host()`):
-  it reads the product string and moves class-compliant 4-byte event packets on
-  the MIDI streaming endpoints (`usb_midi.rs`: SysEx split / reassembly).
-- Every served HTML page gets a Web MIDI shim (`web/shim.js`):
+- The USB host model then also acts as a USB-MIDI host, and the GUI worker
+  moves MIDI between the server and the device between instruction batches.
+- Every served HTML page gets a Web MIDI shim (`src/web/shim.js`):
   `navigator.requestMIDIAccess` returns one input and one output named
   `"<USB product> (FM-1 Emulator)"` ("Felucca (FM-1 Emulator)" for Felucca,
-  Jangada and SLOOP, whose editors look for /felucca/i), so editors run unchanged
-  in any browser.
-- `/midi` is a WebSocket of binary frames of raw MIDI bytes: from the browser any
-  split (running status allowed), to the browser one complete message per frame.
-- Requests with a Host other than 127.0.0.1 / localhost / [::1] on that port,
+  Jangada and SLOOP, whose editors look for /felucca/i), so editors run
+  unchanged in any browser.
+- `/midi` is a WebSocket of binary frames of raw MIDI bytes: from the browser
+  any split (running status allowed), to the browser one complete message per
+  frame.
+- Requests with a Host other than 127.0.0.1, localhost or [::1] on that port,
   and WebSocket Origins other than those, are refused (DNS rebinding).
 
-### USB audio host (UAC1) and interrupt nesting
-
-For firmware with USB audio (SLOOP `feat/usb-audio`, `FELUCCA_USB_AUDIO=1`; Melodee's layout),
-`usb.enable_audio_host(alt)` (alt 1 = 16 bit, 2 = 24 bit) makes the host model a USB audio host as
-well (and a MIDI host): it reads the whole configuration, checks it as a UAC1 class driver would
-(`usb_audio.rs`: structure, IADs, AC headers and terminals, type I formats, isochronous endpoints,
-explicit feedback), selects the alternate on every streaming interface, sets and reads the sampling
-rate (SET_CUR with its OUT data stage, GET_CUR), then every 1 ms frame (`usb_audio_host.rs`) takes
-the capture IN packet and the 10.14 feedback the device armed (an isochronous IN waits for its
-frame; nothing armed counts as a missed frame), and sends a playback OUT packet sized by the
-feedback from `audio_mut().play_queue` (silence when empty; a packet into a buffer the device still
-owns is lost and counted). Captured samples are in `audio().capture`; `usb_audio::wav_bytes` writes
-WAVs. Without the audio host nothing changes (the iso deferral is off), and a configuration without
-a CDC interface no longer stops the plain host.
-
-These builds let TIMER5 (USB service) preempt the audio render: `cpu.nested_irqs = true`
-(`FM1_NESTED_IRQ=1` for `diagnose`, `play_check`, `fm1-ui`) lets an interrupt of a higher priority
-than the running handler's enter once that handler re-enabled interrupts (`sti`); the preempted
-handler's source, priority level and block state are kept, the stack stays the system stack. Off by
-default; the Felucca / Jangada / SLOOP 2.2 baselines are the same with it on (they never re-enable
-interrupts inside a handler). Tests: `tests/usb_audio.rs`, `tests/usb_audio_host.rs` (a scripted
-device), `tests/timers.rs` (nesting), and with a build's ELF `tests/usb_audio_firmware.rs`
-(`USB_AUDIO_ELF=.../felucca.elf`, `--ignored`): stems equal the firmware's mix taps, DAC = mix +
-playback, no ring under/overruns, USB-MIDI SysEx alongside.
+The bridge is the `web` feature (tungstenite for the WebSocket handshake and
+framing, zip for the sidecar); `gui` includes it, and the core library keeps
+no dependencies.
 
 The UI reads only the panel's 240×240 framebuffer, gated by display enable,
 sleep, and active-low PA2 backlight. There are no symbol-specific drawing hooks
@@ -116,7 +89,38 @@ software reset, sleep/display enable, RGB565 format, unrotated RGB/BGR, column/
 row windows, and pixel writes. Unsupported commands, rotations, and invalid DMA
 addresses fault visibly. Completion is synchronous, not cycle-accurate; INVON
 is treated as the FM-1 panel's normal electrical drive mode, not an RGB invert.
-The CPU runs bounded slices on the UI thread, not at a calibrated real-time rate.
+The CPU runs continuously on a worker thread. The window sends matrix contacts
+and receives the latest LCD snapshot; unchanged pixels do not require texture
+uploads. Guest time follows the emulated clock, so execution speed depends on
+the host. When the guest streams audio and a host output device opens (cpal,
+part of the `gui` feature), the guest's ALNK0 frames play through it and the
+worker paces execution by the playback queue, about 70 ms ahead: real time
+when the host keeps up. The instruction clock defaults to the firmware's
+system clock; `--cpu-mhz N` or the toolbar selector issues one instruction per
+N MHz of guest time instead (timers, DMA, USB and the watchdog keep their own
+clocks), so light firmware can play in real time. On an Apple-silicon Mac,
+Felucca, Jangada and SLOOP run at about 80% of real time at 24 MHz, so the
+sound still breaks up until the interpreter is faster.
+
+Instruction dispatch uses a shared first-word decode table and a bounded cache
+of wide instruction words. A bounded basic-block cache also prepares common
+register, arithmetic, shift, memory and short branch operations, including their
+operands. Each core retains its own position in the block. Current instruction
+words are still checked through the bus, so SRAM changes, flash remapping and
+disabled XIP cannot execute stale code. Interrupts, device timing and core
+interleaving retain their per-instruction boundaries.
+
+Hot blocks compile common register operations to ARM64 or x86-64 machine code.
+Each native entry currently executes one guest instruction before returning to
+the device scheduler; memory accesses and complex instructions use the existing
+handlers. Cheap uncached operations bypass block lookup. Native code uses owned
+pages that become read/execute after emission, and automatically falls back to
+prepared interpretation if allocation is denied. Broader translation and native
+block batching remain performance work; this initial backend does not yet provide
+a substantial whole-firmware speedup.
+
+The [performance TODOs](PERFORMANCE.md) record the current measurements and the
+remaining batching, validation and profiling work.
 
 `build/display/firmware.elf` is the 17,056-byte FM-1_981 hardware application.
 It uses Felucca-derived startup, watchdog, recovery, input scanning, USB CDC and
@@ -132,7 +136,19 @@ ring, USB endpoint DMA and the emulator host before stdout receives
 `KEY <id> down` or `KEY <id> up`. The host performs GET_DESCRIPTOR,
 SET_ADDRESS, SET_CONFIGURATION and CDC SET_CONTROL_LINE_STATE requests.
 It discovers the CDC interface and IN endpoint from the configuration descriptor.
-Host-to-device console input and USB MIDI host transport are not implemented.
+Terminal stdin reaches the descriptor-selected CDC OUT endpoint through bounded
+host queues, SRAM DMA, RX packet/count registers and the receive interrupt latch.
+An unread packet stays intact until the guest acknowledges it. Type commands and
+press Enter; EOF stops the input reader while guest execution continues.
+The unchanged local and published Felucca builds answer `help` through this path.
+`Usb::enable_midi_host` (off by default, so the CDC enumeration is unchanged)
+also makes the host a USB-MIDI host: it finds the MIDI streaming interface and
+its bulk endpoints, skips the CDC line state when a device has no console,
+reads the product string, delivers queued `Bus::usb_midi_send` packets (up to
+16 events per bulk packet) into the OUT endpoint's RX buffer with the same
+NAK rules as the console, and collects the device's MIDI IN packets in
+`usb.midi_received`. Felucca 0.9-beta, Jangada 0.1-alpha and SLOOP 2.2 play
+a note from a host note-on and answer their editors' INFO SysEx this way.
 The hardware firmware retains both its serial console and MIDI updater.
 
 P33 accesses model watchdog arming/feeding and stop with an expiry fault if
@@ -145,8 +161,8 @@ FX rendering and continued execution now pass with both the published package
 and local source ELF. Support remains partial: the local presets path can stop
 on an unsupported instruction. See the [Felucca investigation](FELUCCA.md) for
 the verified scope and remaining failure.
-Additional engines, CPU forms and peripheral behavior remain incomplete;
-host audio playback is absent. See [the measured full-firmware checks](FELUCCA.md).
+Additional engines, CPU forms and peripheral behavior remain incomplete. See
+[the measured full-firmware checks](FELUCCA.md).
 
 The loader accepts an FM-1 `.fwsc` package, an application `.bin` mapped at
 `0x02000120`, or an executable ELF32-pi32v2. Package loading checks the outer
@@ -196,7 +212,8 @@ mise exec -- cargo run --manifest-path rust-emulator/Cargo.toml --offline -- \
 keys. Columns are 0..10 and packed rows 0..5. `0:4` is OCT-minus; `3:4` is the F3
 note key. Debouncing and encoder decoding belong to firmware, not the GPIO
 model. The hardware display application runs the inherited full input routine.
-Scheduled input events and UI encoder contacts remain future work.
+Scheduled input events remain future work; `fm1_emu::encoders` plays
+encoder clicks against the guest's own scans.
 
 `--until` accepts a breakpoint symbol or numeric address, and `--inspect` accepts
 `SYMBOL_OR_ADDRESS:WORDS`. Raw `.bin` boot works with numeric addresses. Successful
@@ -228,39 +245,29 @@ register mappings were checked against the Apache-2.0
 [Quarkslab pi32v2 reference](https://github.com/quarkslab/ghidra-jieli/tree/e1bd0707874b77b759401555d24839ad43af1267/data/languages).
 New CPU/peripheral behavior needs separate hardware validation.
 
-### Instruction coverage scan
+## Instruction coverage scan
 
-`scripts/op-scan.sh [--out DIR] FIRMWARE...` (Docker and the JieLi toolchain,
-as `scripts/pi32-objdump.sh`) disassembles each firmware with the vendor objdump
-and runs `examples/op_scan` on the listing: every instruction objdump decodes is
-classified by the interpreter's decoder (`fm1_emu::describe`) and executed once
-on a scratch CPU. The report groups, by encoding, the instructions the
-interpreter decodes as unsupported, rejects when executing, advances over with
-another length than objdump, or would skip in a conditional block with another
-length. An ELF is split into code by its STT_FUNC symbols; a `.fwsc` or raw
-image by recursive descent from the entry (branch and call targets, tbb/tbh
-tables, pointers to function prologues), with unreached clean runs and data
-reported separately. `--check-against ELF` (op_scan) measures that heuristic
-against the ELF the image was built from, and `--classes FILE` writes every
-instruction's class.
+`scripts/op-scan.sh` checks a firmware's code against the decoder without
+running it to each instruction. It disassembles the image with the vendor
+objdump (the JieLi toolchain in an amd64 Docker container, `-mattr=+fprev1`
+for the FPU), then `examples/op_scan` describes every listed instruction with
+`fm1_emu::describe` and executes it once on a scratch CPU:
 
-objdump runs with `-mattr=+fprev1` (`PI32_OBJDUMP_FLAGS`): without it the FPU
-instructions (`e53f`, the `iff` compares) are `<unknown>`. For an image, the
-scan boots it in the emulator (`--boot-steps`, default 5M; 0 disables) and
-matches RAM against the image to find the code startup copies to RAM, so
-branches into RAM code and code pointers to it are followed. The report also
-flags, inside code, halfwords objdump cannot decode (`vendor-unknown`) and
-`??` predicates (`vendor-ambiguous`), with what the interpreter does there.
+```sh
+rust-emulator/scripts/op-scan.sh --out /tmp/scan "$HOME/Downloads/FM-1.fwsc"
+rust-emulator/scripts/pi32-objdump.sh e868 12fc   # [r1+-4] += r2
+```
 
-Reliability, measured against the ELFs of four SLOOP builds (sloop,
-sloop-merged, sloop-dx7, sloop-ui) and their `.fwsc`: every reachable
-instruction is an instruction of the ELF (100%), and reachable covers
-99.5% of the ELF's instructions (flash and RAM code; the rest is a few
-functions called only through computed pointers, such as `srec_finish`).
-The unreached clean runs are 0.7% code and the rest is data (none of their
-findings fall on an ELF instruction); likely data is 0% code. Stock
-firmware has no ELF to check against; there, only the reachable class
-should be read as code.
+The report groups by encoding the instructions the interpreter does not
+decode, rejects when executing, or gives another length or conditional skip
+length than objdump, and the reverse: words objdump cannot decode but the
+interpreter executes. For an ELF, code is what lies inside `STT_FUNC` symbols.
+Packages and raw images have no symbols, so the scan follows recursive descent
+from the entry, branch and call targets, jump tables and code pointers, and
+boots the image briefly to find the code startup copies to RAM. Against the
+ELFs of four SLOOP builds, every reachable instruction was an ELF instruction
+and reachability covered 99.5% of them. `examples/extract` writes the decoded
+application image of a package for offline disassembly.
 
 ## Agreed foundation checklist
 
@@ -273,13 +280,13 @@ not a percentage of complete instruction-set or musical-feature coverage.
 | CPU | Guest executes real vendor machine code; twelve probe words match hardware | Further ISA forms, flags and independent instruction probes |
 | Memory/startup | ELF equals raw flash image; guest copies data and RAM code, clears dirty BSS, executes RAM code | ROM/SPL, reset retention, boot parameters |
 | Timers | Guest sees TIMER4 progress; TIMER5 produces a periodic event | Other sources/dividers and measured cycle timing |
-| Interrupts | IRQ63/ALNK11 vectors, masking, SSP handler frame, acknowledgment, `rti`, priority selection; optional nesting by priority after `sti` (`nested_irqs`) | Physical validation of nesting and of the entry state (is IE cleared on entry?), other IRQs |
-| Controls | Guest scans eleven columns; released/pressed and multiple-key cases agree | Scheduled events and UI encoder input |
+| Interrupts | IRQ63/ALNK11 vectors, masking, SSP handler frame, acknowledgment, `rti`, priority selection | Nested priorities, other IRQs, physical entry-state validation |
+| Controls | Guest scans eleven columns; released/pressed and multiple-key cases agree; UI encoders and MASTER reach the guest | Scheduled events |
 | Flash | Startup JEDEC/status/NOR reads; plain XIP shares physical NOR storage | Erase/program, persistence, XIP busy behavior |
 | LCD | Display guest initializes SPI/DMA, draws RGB565 pixels and live timer/key data | Other controller modes, SPI timing, pixel-exact physical comparison |
 | USB serial | Hardware guest enumerates and sends CDC debug bytes through DMA | Host OUT packets, broader controller/USB behavior |
-| USB MIDI | Not implemented | USB transport and MIDI packet handling |
-| Audio/DMA | Unchanged Felucca renders stereo SRAM, alternates ALNK halves, services audio IRQs; note samples are nonzero | Host playback, other clocks/formats, codec analog behavior, cycle timing |
+| USB MIDI | Host note-on renders audio; an editor SysEx request gets its reply (Felucca family) | Timing of host USB frames |
+| Audio/DMA | Unchanged Felucca renders stereo SRAM, alternates ALNK halves, services audio IRQs; note samples are nonzero; the window plays them | Other clocks/formats, codec analog behavior, cycle timing |
 
 Original foundation evidence: seventeen Rust integration tests passed; a native boot executes
 2,371 instructions, services one guest interrupt, and reaches `foundation_done`.
@@ -287,3 +294,32 @@ The guest's last result is `0x0050F00D`. See `build/foundation/verification.txt`
 
 Current suite: 65 ordinary Rust tests and an opt-in full Felucca test pass.
 See `build/display/verification.txt` for the display milestone and limitations.
+
+## Scripted playback and profiling
+
+`examples/play_check` replays what a user does at the panel, headless and
+deterministic, through `fm1_emu::player` (the same key matrix and encoder
+model as the window):
+
+```sh
+cargo run --release --example play_check -- FIRMWARE.fwsc \
+  run:4 hold:18,20,22 level:1 release turn:PRESETS:2 run:1 png:after.png
+```
+
+Steps: `run:SECONDS` of guest time, `hold:ID,ID` and `release` for matrix
+keys (notes are 14..40), `turn:KNOB:DETENTS`, `level:SECONDS` (RMS and peak
+of the guest output), `wav:SECONDS:PATH` (the exact 24-bit samples),
+`png:PATH`, `words:ADDRESS:N` and `halves:ADDRESS:N`. A guest fault prints
+the last instructions with their registers (`PLAY_TRACE=N`). `FM1_CPU_MHZ=N`
+sets the instruction clock.
+
+`FM1_HOT=N` counts every primary-core instruction by PC and reports the top
+N functions, using the sized `STT_FUNC` symbols of `FM1_ELF` (or an `.elf`
+next to the firmware), then the hot address ranges (loop bodies) inside
+them; `hot:on`, `hot:off` and `hot:print` limit it to part of a session,
+`peek:SYMBOL:WORDS` reads guest variables, and `FM1_HOT_DUMP=FILE` writes
+every executed PC with its count. Counts are instructions, not cycles.
+
+`examples/preset_sweep FIRMWARE OUT_DIR` clicks PRESETS through every preset,
+plays a chord on each and reports silent presets and guest faults; a fault
+reboots and continues from the next preset.

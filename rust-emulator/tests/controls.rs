@@ -59,6 +59,21 @@ fn shift_registers_select_active_low_columns_and_both_row_ports() {
 }
 
 #[test]
+fn output_edges_drive_the_matrix_with_input_buffers_disabled() {
+    let mut bus = configured();
+    bus.write(GPIO + DIE, 0x1e1, 4).unwrap(); // Input rows only, as in stock.
+    bus.devices.gpio.press(6, 1, true).unwrap();
+    select(&mut bus, 0xffbf);
+    assert_eq!(bus.devices.gpio.latched, 0xffbf);
+    assert_eq!(bus.read(GPIO + IN, 4).unwrap(), 0x1c1);
+    // Output pads still drive the chain with every input buffer disabled.
+    bus.write(GPIO + DIE, 0, 4).unwrap();
+    select(&mut bus, 0xfffe);
+    assert_eq!(bus.devices.gpio.latched, 0xfffe);
+    assert_eq!(bus.read(GPIO + IN, 4).unwrap(), 0);
+}
+
+#[test]
 fn disabled_output_drivers_do_not_clock_the_matrix() {
     let mut bus = configured();
     bus.write(GPIO + DIR, u32::MAX, 4).unwrap();
@@ -84,7 +99,7 @@ fn booted_guest_scans_all_eleven_columns_without_ghost_keys() {
         for &(column, row) in &keys {
             cpu.bus.devices.gpio.press(column, row, true).unwrap();
         }
-        cpu.run(Some(firmware.symbols["foundation_done"]), 10000, None)
+        cpu.run(Some(firmware.symbols["foundation_done"]), 150000, None)
             .unwrap();
         for column in 0..11 {
             let mut expected = 0x1e1;
@@ -149,4 +164,54 @@ fn raw_and_elf_firmware_boots_produce_the_same_observations() {
             format!("0x{:x}:10", firmware.symbols["foundation_results"])
         )
     );
+}
+
+#[test]
+fn spi_dma_clocks_matrix_before_gpio_latch_and_acknowledges_its_irq() {
+    use fm1_emu::{devices::IRQ_CONFIG, lcd::IOMAP, RAM, XIP};
+    let mut bus = configured();
+    bus.write(GPIO + DIE, 0x1e1, 4).unwrap();
+    // Source 37, priority 5. Startup installs the descriptor before enabling.
+    bus.write(IRQ_CONFIG + 4 * 4, 11 << 20, 4).unwrap();
+    bus.write(0x10014, 6, 4).unwrap(); // 360 MHz system, 60 MHz LSB
+    bus.write(IOMAP, 0x20000, 4).unwrap();
+    bus.write(RAM, 0xfeff, 2).unwrap(); // MSB-first serial bytes ff fe
+    bus.write(0x11e00, 0x6020, 4).unwrap();
+    bus.write(0x11e04, 29, 4).unwrap();
+    bus.write(0x11e0c, RAM, 4).unwrap();
+    bus.write(0x11e10, 2, 4).unwrap();
+    bus.write(0x11e00, 0x6021, 4).unwrap();
+    bus.devices.gpio.press(0, 4, true).unwrap();
+    bus.devices.gpio.press(3, 2, true).unwrap();
+    let mut c = Cpu::new(bus, XIP);
+    // Replace the two-byte fixture with NOPs in SRAM to advance real CPU time.
+    c.pc = RAM + 1024;
+    for _ in 0..192 * 15 - 1 {
+        c.step().unwrap();
+    }
+    assert_eq!(c.bus.pending_irq(0x100), None);
+    c.step().unwrap();
+    assert_eq!(c.bus.pending_irq(0x100), Some(37));
+    assert_eq!(c.bus.devices.gpio.latched, 0xffff);
+    c.bus.write(GPIO + OUT, 2, 4).unwrap();
+    c.bus.write(GPIO + OUT, 0, 4).unwrap();
+    assert_eq!(c.bus.devices.gpio.latched, 0xfffe);
+    assert_eq!(c.bus.read(GPIO + IN, 4).unwrap(), 0xe1);
+    c.bus.write(0x11e00, 0x6021, 4).unwrap();
+    assert_eq!(c.bus.pending_irq(0x100), None);
+    assert_eq!(c.bus.read(0x11e10, 4).unwrap(), 0);
+}
+
+#[test]
+fn matrix_spi_rejects_invalid_dma_and_other_pin_routes() {
+    use fm1_emu::{lcd::IOMAP, RAM};
+    let mut bus = configured();
+    bus.write(0x11e00, 0x6021, 4).unwrap();
+    bus.write(0x11e0c, RAM, 4).unwrap();
+    assert!(bus.write(0x11e10, 2, 4).is_err());
+    bus.write(IOMAP, 0x20000, 4).unwrap();
+    bus.write(0x11e0c, RAM + 512 * 1024 - 1, 4).unwrap();
+    assert!(bus.write(0x11e10, 2, 4).is_err());
+    assert!(bus.write(0x11e00, 0, 1).is_err());
+    assert!(bus.read(0x11e00, 2).is_err());
 }

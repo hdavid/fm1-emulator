@@ -1,20 +1,21 @@
-# Stock and Baud Girl firmware boot trials (2026-10-04)
+# Stock and Baud Girl firmware trials (2026-10-05)
 
-Neither supplied application boots in the emulator at commit
-`61e779cc05094f4d35e893d2924ce6436f6b0de9`. Both execute three instructions,
-then fault on an unsupported six-byte relative call at `0x02000130`.
-Neither reaches LCD, USB, watchdog, interrupts, ADC or audio initialization.
-This identifies an emulator instruction gap; it does not establish that either
-firmware is defective or verify its behavior on physical hardware.
+The unchanged official `FM-1_015` package boots in the emulator, loads its
+factory **PIANO 1** preset and responds to FX, HOME and note presses. A note
+produces nonzero stereo samples through the firmware's own audio DMA path.
+Compatibility remains **Partial**: this verifies basic operation, not every
+preset, menu, effect or update path. Host audio playback is not implemented.
+
+Baud Girl `FM-1_093` also reaches its LCD interface and responds to FX/HOME.
+Its separate factory preset payload fails plaintext integrity validation and is
+left unloaded. Note presses produced silent DMA samples in this trial.
 
 ## Inputs
 
-The user supplied one official and one Baud Girl package. The decoded identities
-and application comparison identify `FM-1.fwsc` as the `FM-1_015` baseline and
-`FM-1_093.fwsc` as the modified image. Authorship and download authenticity were
-not independently verified.
+These are the two packages supplied by the user, read without modifying their
+contents. Firmware binaries are not committed.
 
-| File in `~/Downloads` | Package identity | Package bytes | Extracted application bytes |
+| File | Package identity | Package bytes | Application bytes |
 | --- | --- | ---: | ---: |
 | `FM-1.fwsc` | `FM-1_015` | 699,956 | 581,564 |
 | `FM-1_093.fwsc` | `FM-1_093` | 810,548 | 692,480 |
@@ -30,90 +31,82 @@ FM-1_093.fwsc
   app.bin: 4dd80425cbd4713d9183c1b161001e0e60fdf1879372d37c6302433d5cb20112
 ```
 
-The modified application adds 110,916 bytes and changes 2,001 bytes in 177
-contiguous regions of the shared application range. Its first changed byte is
-at application offset `0x17c6`; the startup sequence through the fault is
-identical. Both contain their respective product strings at `0x0204eb84`.
-These are binary observations, not a reconstruction of the modification source.
+## Package loading and presets
 
-## Extraction and integrity
+Load the complete `.fwsc` package. An extracted application `.bin` lacks the
+stock flash directory, boot parameters and auxiliary factory presets.
 
-The original packages were read without modification or device access. The
-existing `tools/fm1_install.py` decoder removes the twenty package identity
-marker bytes. `tools/fm1pkg_make.py` supplies the existing ENC, SFC and CRC16
-implementations used for read-only extraction.
+The loader checks the package header/table, stored flash CRC, flash directory,
+embedded configuration and chip key, and decrypted application CRCs. Both chip
+keys decode to `0x980f`; the application lives at physical flash offset `0x4000`
+and enters at `0x02000120`. The emulated startup supplies the boot parameters
+and preserves the package's flash directory. Guest instructions execute without
+firmware patches, replacement routines or instruction skips.
 
-For both inputs these checks pass:
+The official package's encrypted `USR` auxiliary payload decodes using its
+logical package position and passes plaintext CRC `0xe3bc`. It is installed at
+its declared flash reservation (`0xea000`, capacity `0x12000`), preserving the
+application and key/configuration regions. The guest then loads its factory
+voices, including **PIANO 1**.
 
-- Outer package header and file-table CRCs.
-- Complete stored `flash.bin` CRC.
-- Flash header and four top-level directory entry CRCs.
-- Embedded flash `isd_config.ini` CRC and its chip-key blob CRC.
-- Decrypted application-area header, area contents, `app.bin` entry and
-  complete `app.bin` payload CRCs.
-
-Both embedded chip keys decode to `0x980f`. The application area starts at
-physical flash offset `0x4000`; its `app.bin` starts at area offset `0x120`
-and executes at `0x02000120`. Extraction uses each package's declared lengths,
-including the larger application area in `FM-1_093`, rather than the Felucca
-packager's fixed application slot size.
-
-The separate outer `USR`, `isd_config.ini`, `script.ver` and `blimit.bin`
-payloads do not match their directory CRCs when checked as stored bytes. Their
-plaintext encoding was not decoded or validated in this trial. Those stored
-payloads and CRC fields are identical between the two packages. Consequently,
-the checks above establish integrity of the extracted boot applications, not
-complete validation of every update-package component or the update process.
-
-## Boot result and first blocker
-
-Each unchanged application was run with the release-mode `diagnose` example,
-which uses the same firmware loader, CPU and bus as the GUI. The requested
-instruction budget was 100,000,000; both faulted after three completed
-instructions, well before that limit. Startup `r0` was the runner's normal
-`0x01c7fe08`. All reported peripheral counters were zero, the LCD was invisible
-and neither application emitted USB CDC output.
-
-The installed vendor pi32v2 assembler/linker/disassembler was used through the
-existing Docker tool wrapper. Temporary ELF wrappers place the exact application
-bytes in a text section at their execution address; they do not change the
-application bytes used for the boot tests. Both disassemblies begin:
+Baud Girl's package contains identical `USR` ciphertext at a different package
+position (`0xae400` instead of `0x93400`). Decoding at its declared position
+produces CRC `0xbc95`, rather than the declared `0xe3bc`. The emulator prints:
 
 ```text
-02000120: 04 81                goto 0x02000124
-02000124: ee ff d0 6f c1 01    sp = 0x01c16fd0
-0200012a: ed ff d0 7f c1 01    ssp = 0x01c17fd0
-02000130: 80 ff b0 00 00 00    call 0x020001e6
+FWSC: USR checksum mismatch; USR preset data was not loaded
 ```
 
-The fault is `unsupported instruction 0xff80 at PC 0x02000130`. The target
-begins by saving `rets` and making another six-byte relative call. The CPU
-currently implements short and 22-bit relative calls plus register calls, but
-not this long relative form. No application patches or instruction skips were
-used. The next implementation step is to support this call form, verify its
-signed displacement and return address against vendor-generated instructions,
-then rerun both images to identify subsequent blockers. These trials provide
-no evidence about later stock peripheral or ROM compatibility.
+The application still loads. The emulator neither substitutes presets from
+another package nor guesses a different encryption position. A physical update
+may retain previously installed user data; persistent flash and migration of
+existing device data have not been verified here. Other auxiliary updater
+payloads are not installed by this application loader.
 
-## Local reproduction
+## Verification
 
-Ignored local trial artifacts are in `.deps/firmware-trial/`: `extract.py`,
-`disassemble.py`, and per-file directories containing `app.bin`, `metadata.json`,
-`app.dis`, `boot.log` and `stdout.log`. Firmware binaries are not committed.
+The local stock regression boots both guest CPUs beyond the delayed temperature
+ADC subscription, verifies LCD, watchdog, interrupt, ADC and audio DMA activity,
+switches FX/HOME pages, then presses and releases a note. Idle audio is silent;
+the held note produces nonzero stereo DMA samples. The test uses the same CPU,
+bus and firmware loader as the graphical emulator.
+
+The official trial completed **3,022,634,760 CPU steps** without a fault:
+1,500,260 LCD pixels, 2,753 audio DMA halves, 2,140 ADC conversions and 493,010
+watchdog feeds. The Baud Girl trial reached its intentional budget after
+**3,292,769,970 CPU steps**, with 605,917 LCD pixels and 3,013 audio DMA halves.
+Both runs continued past the formerly unsupported temperature channel.
+
+The release build with GUI support passes all 183 regular tests. The two
+external Felucca regressions also pass, covering note audio and the previously
+failing FX page. The graphical executable was rebuilt; the stock results above
+were verified with the shared core rather than automated native-window input.
+
+The temperature input is a fixed hardware measurement, not a thermal model.
+A watchdog/updater-compatible `FM-1_997` probe measured PMU mux source 3 at
+349–351 over 60 samples (median 350). The firmware's ADC conversion completion,
+restart and IRQ behavior remain active. `tools/build_temperature_probe.py`
+reproduces that measurement firmware. After capturing the samples, the physical
+FM-1 was restored to **FM-1_981**; neither supplied stock package was flashed.
+
+Run the graphical emulator or the opt-in stock regression:
 
 ```sh
-mise exec -- .venv/bin/python .deps/firmware-trial/extract.py \
-  "$HOME/Downloads/FM-1.fwsc" "$HOME/Downloads/FM-1_093.fwsc"
-mise exec -- cargo run --manifest-path rust-emulator/Cargo.toml \
-  --release --offline --example diagnose -- \
-  .deps/firmware-trial/FM-1/app.bin 100000000
-mise exec -- cargo run --manifest-path rust-emulator/Cargo.toml \
-  --release --offline --example diagnose -- \
-  .deps/firmware-trial/FM-1_093/app.bin 100000000
+./emulator /path/to/FM-1.fwsc
+
+mise exec -- env FM1_STOCK_FWSC=/path/to/FM-1.fwsc \
+  cargo test --manifest-path rust-emulator/Cargo.toml \
+  --release --locked --test stock -- --ignored --nocapture
 ```
 
-`diagnose` exits with status 1 for a fault or an intentional instruction limit;
-read its final message to distinguish them. The GUI launcher accepts extracted
-application `.bin` or executable `.elf` files; packed `.fwsc` containers are
-not directly supported. GUI presentation and physical flashing were not part
-of these boot trials.
+For a bounded startup trace of either package:
+
+```sh
+mise exec -- cargo run --manifest-path rust-emulator/Cargo.toml \
+  --release --locked --example diagnose -- /path/to/firmware.fwsc 1300000000
+```
+
+`diagnose` exits with status 1 for either a fault or an intentional instruction
+limit; its last message distinguishes the two. CPU budgets are functional
+emulation steps, not a claim of cycle-accurate timing. Full UI coverage, rotary
+controls, host audio, USB MIDI/serial input and persistent flash remain open.

@@ -142,7 +142,11 @@ fn subtract_with_carry_sets_n_z_v_for_signed_64_bit_compares() {
         let d = lhs.wrapping_sub(rhs);
         assert_eq!((c.r[4], c.r[5]), (d as u32, (d >> 32) as u32));
         let psr = c.sr[5];
-        assert_eq!((psr & 8 != 0, psr & 4 != 0, psr & 1 != 0), (n, z, v), "{lhs} - {rhs}");
+        assert_eq!(
+            (psr & 8 != 0, psr & 4 != 0, psr & 1 != 0),
+            (n, z, v),
+            "{lhs} - {rhs}"
+        );
         assert_eq!((psr & 8 != 0) != (psr & 1 != 0), lhs < rhs);
     }
 }
@@ -358,7 +362,10 @@ fn long_multiply_accumulate_adds_the_product_to_the_pair() {
     c.r[14] = 0xffff_fffe; // -2
     c.step().unwrap();
     let expected = 0xffff_fff0u64.wrapping_add((-6i64) as u64);
-    assert_eq!((c.r[11], c.r[10]), ((expected >> 32) as u32, expected as u32));
+    assert_eq!(
+        (c.r[11], c.r[10]),
+        ((expected >> 32) as u32, expected as u32)
+    );
     let mut c = cpu(&[0xe1fc, 0xae60]);
     c.r[10] = 0xffff_ffff;
     c.r[11] = 1;
@@ -366,7 +373,10 @@ fn long_multiply_accumulate_adds_the_product_to_the_pair() {
     c.r[14] = 2;
     c.step().unwrap();
     let expected = 0x1_ffff_ffffu64 + 0xffff_ffffu64 * 2;
-    assert_eq!((c.r[11], c.r[10]), ((expected >> 32) as u32, expected as u32));
+    assert_eq!(
+        (c.r[11], c.r[10]),
+        ((expected >> 32) as u32, expected as u32)
+    );
 }
 
 #[test]
@@ -442,7 +452,9 @@ fn single_float_arithmetic_follows_the_sdk_library_patterns() {
         assert_eq!(c.r[0], f(clamped), "x = {x}");
     }
     let (a, b, cc, d) = (1.5f32, -2.0f32, 0.5f32, 3.0f32);
-    let mut c = cpu(&[0xe53f, 0x8642, 0xe53f, 0x9562, 0xe53f, 0x8758, 0xe53f, 0x9747]);
+    let mut c = cpu(&[
+        0xe53f, 0x8642, 0xe53f, 0x9562, 0xe53f, 0x8758, 0xe53f, 0x9747,
+    ]);
     c.r[4] = f(a);
     c.r[5] = f(b);
     c.r[6] = f(cc);
@@ -550,24 +562,27 @@ fn float_compare_branch_orders_singles() {
     // FM-1_093 0x02021d3c: ee81 e8a5 = if (r14 <= r1) goto +0x14a, float
     // (x bit 11), with r14 = 0.192f and r1 = 1.0f from the e53f add before.
     // Negative operands show the float ordering (integer order would invert).
-    // JieLi objdump: ee81 e8a5 = iff (r14 u<= r1) goto 330: a NaN operand
-    // (unordered) also takes it; e801 2804 = iff (r2 == r1) does not.
+    // JieLi objdump: ee81 e8a5 = iff (r14 u<= r1) goto 330. Unordered
+    // (NaN) operands are unmeasured on hardware, so they fault explicitly
+    // (upstream policy) instead of following the objdump's u prefix.
     let mut c = cpu(&[0xe801, 0x2804]);
     c.r[2] = f32::NAN.to_bits();
     c.r[1] = f32::NAN.to_bits();
-    c.step().unwrap();
-    assert_eq!(c.pc, XIP + 4);
+    assert!(c.step().is_err());
     for (r14, r1, taken) in [
         (0.192f32, 1.0f32, true),
         (2.0, 1.0, false),
         (-2.0, -1.0, true),
-        (f32::NAN, 1.0, true),
     ] {
         let mut c = cpu(&[0xee81, 0xe8a5]);
         c.r[14] = r14.to_bits();
         c.r[1] = r1.to_bits();
         c.step().unwrap();
-        assert_eq!(c.pc, if taken { XIP + 4 + 0x14a } else { XIP + 4 }, "{r14} <= {r1}");
+        assert_eq!(
+            c.pc,
+            if taken { XIP + 4 + 0x14a } else { XIP + 4 },
+            "{r14} <= {r1}"
+        );
     }
 }
 
@@ -642,7 +657,9 @@ fn halfword_offset_forms_take_a_signed_ten_bit_offset() {
     // blender 0x02012788); ed59 0f2a = r0 = h[++r2=506] (u);
     // ed52 0f2a = r0 = h[r2+-262] (u); ed53 0f2b = h[r2+-6] = r0;
     // ed55 0f2b = h[r2+506] = r0.h (bit 2 stores the upper halfword).
-    let mut c = cpu(&[0xed5b, 0xcf2a, 0xed59, 0x0f2a, 0xed52, 0x0f2a, 0xed53, 0x0f2b, 0xed55, 0x0f2b]);
+    let mut c = cpu(&[
+        0xed5b, 0xcf2a, 0xed59, 0x0f2a, 0xed52, 0x0f2a, 0xed53, 0x0f2b, 0xed55, 0x0f2b,
+    ]);
     c.r[2] = RAM + 0x400;
     c.bus.write(RAM + 0x400 - 6, 0xbeef, 2).unwrap();
     c.step().unwrap();
@@ -670,7 +687,13 @@ fn packed_immediates_repeat_bytes_as_the_vendor_objdump_shows() {
     // 0x02012c82 builds a two-pixel word: colour * 0x10001);
     // e1e0 01ab = * 0xAB00AB, e1e0 02ab = * 0xAB00AB00, e1e0 03ab =
     // * 0xABABABAB, e1e0 00ab = * 0xAB.
-    for (x, factor) in [(0x0101u16, 0x0001_0001u32), (0x01ab, 0x00ab_00ab), (0x02ab, 0xab00_ab00), (0x03ab, 0xabab_abab), (0x00ab, 0xab)] {
+    for (x, factor) in [
+        (0x0101u16, 0x0001_0001u32),
+        (0x01ab, 0x00ab_00ab),
+        (0x02ab, 0xab00_ab00),
+        (0x03ab, 0xabab_abab),
+        (0x00ab, 0xab),
+    ] {
         let mut c = cpu(&[0xe1e0, x]);
         c.r[0] = 1;
         c.step().unwrap();
@@ -708,20 +731,6 @@ fn register_shift_covers_both_left_forms_and_arithmetic_right() {
     c.r[2] = 40;
     c.step().unwrap();
     assert_eq!(c.r[2], 0xffff_ffff);
-}
-
-#[test]
-fn cpu_clock_sets_instructions_per_oscillator_tick() {
-    let mut c = cpu(&[0x0000; 16]); // nops
-    assert!(c.set_cpu_mhz(25).is_err());
-    assert!(c.set_cpu_mhz(0).is_err());
-    c.set_cpu_mhz(96).unwrap();
-    assert_eq!(c.instructions_per_tick, 4);
-    for _ in 0..8 {
-        c.step().unwrap();
-    }
-    assert_eq!(c.steps, 8);
-    assert_eq!(c.ticks(), 2); // devices saw two 24 MHz ticks
 }
 
 #[test]
@@ -941,4 +950,68 @@ fn memory_read_modify_write_offsets_are_signed() {
     c.step().unwrap();
     assert_eq!(c.bus.read(RAM + 0xfc, 4).unwrap(), (8 << 6) | (1 << 3));
     assert_eq!(c.bus.read(RAM + 0x1fc, 4).unwrap(), 0x77);
+}
+
+/// Where a one-instruction conditional block `[h, x, r1 = 1]` continues.
+fn conditional_target(h: u16, x: u16, register: usize, value: u32) -> u32 {
+    let mut c = cpu(&[h, x, 0x2141, 0x2140]);
+    c.r[register] = value;
+    c.step().unwrap();
+    c.pc - XIP
+}
+
+#[test]
+fn mask_move_uses_the_packed_immediate_forms() {
+    // Stock 0x020259ac: e060 3264, r3 = 0x64006400 (was rejected); e060
+    // 3164 is r3 = 0x640064 in objdump (was 0x64006400).
+    for (x, expected) in [
+        (0x3264, 0x6400_6400),
+        (0x3164, 0x0064_0064),
+        (0x3364, 0x6464_6464),
+        (0x3064, 0x64),
+    ] {
+        let mut c = cpu(&[0xe060, x]);
+        c.step().unwrap();
+        assert_eq!(c.r[3], expected, "x {x:04x}");
+        assert_eq!(c.pc, XIP + 4);
+    }
+}
+
+#[test]
+fn unsigned_conditional_immediates_are_not_sign_extended() {
+    // clang -target pi32v2 -O2 for `if (x < 3000u) y = y * 3 + 1;`:
+    // r2 = r1 * 0x3; r2 += 1; if (r0 >= 3000) { r2 = r1 }; r0 = r2; rts.
+    // 3000 is 0xbb8: bit 11 set, still an unsigned 3000 (objdump agrees for
+    // e93X and e9bX alike).
+    for (x, expected) in [(100, 16), (2999, 16), (3000, 5), (4000, 5)] {
+        let mut c = cpu(&[
+            0xe1e2, 0x1003, 0x21c2, 0xe930, 0x0bb8, 0x1612, 0x1620, 0x0080,
+        ]);
+        c.r[0] = x;
+        c.r[1] = 5;
+        c.sr[3] = XIP + 0x40;
+        while c.pc != XIP + 0x40 {
+            c.step().unwrap();
+        }
+        assert_eq!(c.r[0], expected, "x = {x}");
+    }
+    for (value, enters) in [(2999, true), (3000, false), (0xffff_ffff, false)] {
+        let expected = if enters { 4 } else { 6 };
+        assert_eq!(conditional_target(0xe9b0, 0x0bb8, 0, value), expected); // if (r0 < 3000) {
+    }
+    // ec33 0ba5 `if (r3 > 2981) {`: imm12 too, not packed.
+    for (value, enters) in [(2982, true), (2981, false)] {
+        let expected = if enters { 4 } else { 6 };
+        assert_eq!(conditional_target(0xec33, 0x0ba5, 3, value), expected);
+    }
+    // e8b3 0ba5 `if (r3 != -1115) {` and ea33 0ba5
+    // `if ((r3 & 0x14A00) != 0) {` (a packed mask).
+    for (value, enters) in [(-1115i32 as u32, false), (0, true)] {
+        let expected = if enters { 4 } else { 6 };
+        assert_eq!(conditional_target(0xe8b3, 0x0ba5, 3, value), expected);
+    }
+    for (value, enters) in [(0x200, true), (0x1_0000, true), (0x1ff, false)] {
+        let expected = if enters { 4 } else { 6 };
+        assert_eq!(conditional_target(0xea33, 0x0ba5, 3, value), expected);
+    }
 }

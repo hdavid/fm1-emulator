@@ -3,7 +3,8 @@
 # FM-1 emulator
 
 A Rust emulator for the M-VAVE FM-1. Load firmware and interact with its own
-screen and buttons. USB serial output from the firmware appears in your terminal.
+screen and buttons. The firmware's USB serial console uses your terminal; type
+commands such as Felucca's `help` and press Enter.
 
 ## Download and run
 
@@ -48,20 +49,23 @@ other firmware paths can stop emulation.
 
 | Firmware | Status | Verified behavior / blocker |
 | --- | --- | --- |
-| Felucca 0.9-beta (`FM-1_909`, `.fwsc`) | Partial | LCD, USB console, watchdog, note audio/DMA and FX pass; full UI coverage remains incomplete |
-| Felucca source build (`1e838e1`, `.elf`) | Partial | Boot, note press/release, FX, HOME and ENV pass; presets can still stop emulation |
-| Official `FM-1_015` (`FM-1.fwsc`) | Fails | Missing CPU instruction during startup; no screen yet |
-| Baud Girl `FM-1_093` (`FM-1_093.fwsc`) | Fails | Same startup blocker; no screen yet |
+| Felucca 0.9-beta (`FM-1_909`, `.fwsc`) | Partial | LCD, USB console (`help`), watchdog, note audio/DMA and FX pass; full UI coverage remains incomplete |
+| Felucca source build (`1e838e1`, `.elf`) | Partial | Boot, note press/release, FX, HOME and ENV pass; other UI paths need broader coverage |
+| Official `FM-1_015` (`FM-1.fwsc`) | Partial | LCD boot, PIANO 1, FX/HOME and note audio/DMA pass |
+| Baud Girl `FM-1_093` (`FM-1_093.fwsc`) | Partial | LCD boot and FX/HOME pass; its factory preset payload fails integrity validation |
 
-FX now opens and renders in both Felucca builds. A separate unsupported
-instruction remains on the local build's presets path; see the
+FX now opens and renders in both Felucca builds; see the
 [Felucca investigation](rust-emulator/FELUCCA.md).
+See the [stock firmware trials](rust-emulator/STOCK-FIRMWARE.md) for the official
+and Baud Girl results.
 
 ## Still to implement
 
-- Remaining CPU instructions and peripherals, including other Felucca paths and official/Baud Girl startup.
-- Host audio playback, rotary controls, USB MIDI and serial input.
-- Flash erase/program and persistence, plus fuller encryption, interrupt and timing behavior.
+- [ ] Execute native blocks in batches, then broaden JIT coverage; see the [performance plan](rust-emulator/PERFORMANCE.md).
+- [ ] Remaining CPU instructions, peripherals and firmware UI paths.
+- [ ] USB MIDI, and real-time host audio for heavier firmware (playback and
+  rotary controls work; speed is the limit).
+- [ ] Flash persistence, plus fuller encryption, interrupt and timing behavior.
 
 GPL-3.0-only; see [LICENSE](LICENSE). Based on research and components from
 [Felucca](https://github.com/hugelton/Felucca), the

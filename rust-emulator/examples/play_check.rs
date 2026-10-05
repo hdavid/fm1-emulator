@@ -4,9 +4,9 @@
 // Steps: run:SECONDS (guest time), turn:KNOB:DETENTS (SELECT ALGORITHM
 // PRESETS KNOB1..KNOB4), hold:ID,ID.. / release (matrix key ids, notes 14..40,
 // as fm1-ui's KEYMAP), level:SECONDS (run and print the audio level),
-// png:PATH, cores (instructions per core), words:ADDRESS:N (N words, decimal),
-// click:KNOB:N (N settled detents), align (to the next audio DMA half: pins a
-// following hold or release to the same audio block at any render cost).
+// wav:SECONDS:PATH (record the guest output), png:PATH, words:ADDRESS:N
+// (N words, decimal), halves:ADDRESS:N (non-zero words per DMA half).
+// FM1_CPU_MHZ=N sets the instruction clock (default: the firmware's).
 // FM1_HOT=N profiles the primary core: hot:on / hot:off start and
 // pause counting (without them, every step is counted), hot:print reports and
 // clears; peek:SYMBOL:WORDS prints WORDS 32-bit words at an ELF symbol; the report (top N functions, their hot address ranges) uses the
@@ -14,7 +14,7 @@
 // registers (PLAY_TRACE=N for the last N, default 40).
 use fm1_emu::{
     firmware::{elf_symbols, Symbol},
-    player::{knob, Player},
+    player::{knob, Player, OSCILLATOR_HZ},
     png,
     profile::{function_of, Profile},
 };
@@ -28,7 +28,10 @@ fn profile_symbols(firmware: &str) -> Result<Vec<Symbol>, String> {
         Err(_) => Path::new(firmware).with_extension("elf"),
     };
     if !path.exists() {
-        eprintln!("profile: no ELF at {} (set FM1_ELF): PCs only", path.display());
+        eprintln!(
+            "profile: no ELF at {} (set FM1_ELF): PCs only",
+            path.display()
+        );
         return Ok(vec![]);
     }
     let data = std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
@@ -117,9 +120,7 @@ fn record(player: &mut Player, seconds: f64, path: &str) -> Result<(), String> {
         }
     }
     out.extend_from_slice(b"fmt ");
-    for v in [16u32] {
-        out.extend_from_slice(&v.to_le_bytes());
-    }
+    out.extend_from_slice(&16u32.to_le_bytes());
     for v in [1u16, 2] {
         out.extend_from_slice(&v.to_le_bytes());
     }
@@ -150,15 +151,14 @@ fn main() -> Result<(), String> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(40);
     let mut player = Player::boot(Path::new(firmware), trace)?;
-    // Optional: FM1_NESTED_IRQ=1 enables interrupt nesting (USB audio builds).
-    player.cpu.nested_irqs = env::var("FM1_NESTED_IRQ").is_ok_and(|v| v == "1");
-    // Optional: FM1_CPU_MHZ=N emulates an N MHz CPU (default 24, real time).
+    // Optional: FM1_CPU_MHZ=N issues one instruction per N MHz of guest time.
     if let Ok(mhz) = env::var("FM1_CPU_MHZ") {
-        player.cpu.set_cpu_mhz(mhz.parse().map_err(|_| "invalid FM1_CPU_MHZ")?)?;
+        let mhz: u32 = mhz.parse().map_err(|_| "invalid FM1_CPU_MHZ")?;
+        player
+            .cpu
+            .bus
+            .set_instruction_clock(Some(mhz.max(1) * 1_000_000));
     }
-    // Optional: FM1_IDLE_SKIP=0 steps every slot of a core halted in `idle`
-    // instead of jumping to the next device event (same guest state).
-    player.cpu.idle_skip = env::var("FM1_IDLE_SKIP").map_or(true, |v| v != "0");
     // Optional: FM1_HOT=N profiles the primary core (see the top).
     let hot_top: usize = env::var("FM1_HOT")
         .ok()
@@ -166,7 +166,11 @@ fn main() -> Result<(), String> {
         .transpose()?
         .unwrap_or(0);
     let wants_symbols = hot_top > 0 || steps.iter().any(|step| step.starts_with("peek:"));
-    let symbols = if wants_symbols { profile_symbols(firmware)? } else { vec![] };
+    let symbols = if wants_symbols {
+        profile_symbols(firmware)?
+    } else {
+        vec![]
+    };
     let mut paused = None;
     if hot_top > 0 {
         let profile = Profile::new();
@@ -177,41 +181,13 @@ fn main() -> Result<(), String> {
         }
     }
     for step in steps {
-        let started = (std::time::Instant::now(), player.cpu.ticks());
+        let started = (std::time::Instant::now(), player.cpu.bus.oscillator_ticks());
         let parts: Vec<&str> = step.split(':').collect();
         let result = match parts.as_slice() {
             ["run", s] => player.run_seconds(seconds(step, s)?),
             ["turn", name, detents] => {
                 let detents: i32 = detents.parse().map_err(|_| format!("bad {step}"))?;
                 player.encoders.turn(knob(name)?, detents);
-                Ok(())
-            }
-            ["click", name, clicks] => {
-                // One detent at a time, each settled (as preset_sweep): a
-                // multi-detent turn can skip or add steps in the firmware.
-                let clicks: i32 = clicks.parse().map_err(|_| format!("bad {step}"))?;
-                let id = knob(name)?;
-                (0..clicks.abs()).try_for_each(|_| {
-                    player.encoders.turn(id, clicks.signum());
-                    player.settle_encoders(1.0)?;
-                    player.run_seconds(0.3)
-                })
-            }
-            ["align"] => {
-                // Run to the next audio DMA half boundary (the start of the
-                // audio ISR's burst). A key held or released here completes
-                // its debounce 2-4 ms (press) or 8-10 ms (release) later, in
-                // the gap between two bursts at any CPU load: the note lands
-                // on the same audio block whatever the render costs.
-                let start = player.cpu.bus.audio.halves;
-                let mut waited = 0u64;
-                while player.cpu.bus.audio.halves == start {
-                    player.run(64)?;
-                    waited += 64;
-                    if waited > 1_000_000_000 {
-                        return Err("align: the audio DMA is not running".into());
-                    }
-                }
                 Ok(())
             }
             ["hold", ids] => {
@@ -226,35 +202,38 @@ fn main() -> Result<(), String> {
                 Ok(())
             }
             ["wav", s, path] => record(&mut player, seconds(step, s)?, path),
-            ["cores"] => {
-                // Instructions per core and guest time (steps) so far.
-                let c = &player.cpu;
-                println!(
-                    "  cores: {} steps of guest time; CPU0 {} instructions, CPU1 {}; secondary pc {:?}",
-                    c.steps,
-                    c.core_steps[0],
-                    c.core_steps[1],
-                    c.secondary_pc().map(|pc| format!("0x{pc:08x}"))
-                );
-                Ok(())
-            }
             ["words", base, words] => {
                 // 32-bit words of guest memory (decimal), e.g. a firmware's counters.
-                let base = u32::from_str_radix(base.trim_start_matches("0x"), 16).map_err(|_| format!("bad {step}"))?;
+                let base = u32::from_str_radix(base.trim_start_matches("0x"), 16)
+                    .map_err(|_| format!("bad {step}"))?;
                 let words: u32 = words.parse().map_err(|_| format!("bad {step}"))?;
                 let values: Vec<String> = (0..words)
-                    .map(|w| player.cpu.bus.read(base + w * 4, 4).map_or("?".into(), |v| v.to_string()))
+                    .map(|w| {
+                        player
+                            .cpu
+                            .bus
+                            .read(base + w * 4, 4)
+                            .map_or("?".into(), |v| v.to_string())
+                    })
                     .collect();
                 println!("  0x{base:08x}: {}", values.join(" "));
                 Ok(())
             }
             ["halves", base, words] => {
                 // Non-zero words in each half of a DMA double buffer.
-                let base = u32::from_str_radix(base.trim_start_matches("0x"), 16).map_err(|_| format!("bad {step}"))?;
+                let base = u32::from_str_radix(base.trim_start_matches("0x"), 16)
+                    .map_err(|_| format!("bad {step}"))?;
                 let words: u32 = words.parse().map_err(|_| format!("bad {step}"))?;
                 for half in 0..2 {
                     let nonzero = (0..words)
-                        .filter(|w| player.cpu.bus.read(base + (half * words + w) * 4, 4).unwrap_or(0) != 0)
+                        .filter(|w| {
+                            player
+                                .cpu
+                                .bus
+                                .read(base + (half * words + w) * 4, 4)
+                                .unwrap_or(0)
+                                != 0
+                        })
                         .count();
                     println!("  half {half}: {nonzero} of {words} words non-zero");
                 }
@@ -269,7 +248,11 @@ fn main() -> Result<(), String> {
                 );
             }),
             ["hot", "on"] => {
-                player.profile = player.profile.take().or(paused.take()).or(Some(Profile::new()));
+                player.profile = player
+                    .profile
+                    .take()
+                    .or(paused.take())
+                    .or(Some(Profile::new()));
                 Ok(())
             }
             ["hot", "off"] => {
@@ -310,7 +293,7 @@ fn main() -> Result<(), String> {
             println!("{trace}");
             return Err(fault.to_string());
         }
-        let guest = (player.cpu.ticks() - started.1) as f64 / 24e6;
+        let guest = (player.cpu.bus.oscillator_ticks() - started.1) as f64 / OSCILLATOR_HZ;
         if guest > 0.0 {
             let host = started.0.elapsed().as_secs_f64();
             println!(

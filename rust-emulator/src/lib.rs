@@ -4,27 +4,22 @@ pub mod audio;
 pub mod bus;
 mod cache;
 mod clock;
-mod code_cache;
 pub mod cpu;
 mod crc;
-mod decode;
-pub use decode::{describe, Description};
 pub mod devices;
+pub mod encoders;
 pub mod firmware;
+mod float;
 pub mod gpio;
-pub mod husb;
 pub mod lcd;
 mod package;
 pub mod player;
 pub mod png;
 pub mod profile;
-pub mod radio;
-mod resample;
-mod rng;
+mod shift_spi;
 mod simd;
-pub mod spi2;
-pub mod uart1;
-pub mod ui_knobs;
+mod uart;
+mod wireless;
 
 pub const XIP: u32 = 0x0200_0120;
 pub const XIP_END: u32 = 0x0210_0000;
@@ -49,7 +44,11 @@ pub const NAMES: [&str; 12] = [
     "stack",
 ];
 
+mod blocks;
+mod decode;
+pub use decode::{describe, Description};
 mod extended;
+mod jit;
 
 pub mod system;
 
@@ -58,7 +57,6 @@ mod guards;
 mod nor;
 
 pub mod usb;
-pub mod usb_audio;
-pub mod usb_audio_host;
 pub mod usb_midi;
+#[cfg(feature = "web")]
 pub mod web;

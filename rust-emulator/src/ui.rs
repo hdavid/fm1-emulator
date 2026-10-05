@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Rect, Sense, Stroke, StrokeKind};
+use fm1_emu::encoders::knob;
 #[cfg(test)]
-use fm1_emu::bus::Bus;
-use fm1_emu::{cpu::Cpu, firmware::Firmware};
-mod ui_audio;
-mod ui_web;
-use fm1_emu::ui_knobs;
+use fm1_emu::{bus::Bus, cpu::Cpu, firmware::Firmware};
+mod host_audio;
+mod web_editor;
+mod worker;
 use std::{
-    io::{self, Write},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -35,17 +34,37 @@ const NOTE_KEYS: [egui::Key; 13] = [
     egui::Key::J,
     egui::Key::K,
 ];
+/// Where to draw the 240x240 LCD inside `area` (points) so that no guest pixel
+/// is dropped: never fewer than 240 physical pixels (nearest-neighbour
+/// downscaling skips rows and columns, so "TRACK" read "IRALK"), an integer
+/// scale when it fills at least 3/4 of the area, and snapped to the pixel grid.
+fn lcd_rect(area: Rect, pixels_per_point: f32) -> Rect {
+    const LCD: f32 = 240.;
+    let available = area.width().min(area.height()) * pixels_per_point;
+    let whole = (available / LCD).floor();
+    let pixels = if available < LCD {
+        LCD
+    } else if whole * LCD >= 0.75 * available {
+        whole * LCD
+    } else {
+        available.floor()
+    };
+    let size = pixels / pixels_per_point;
+    let min =
+        ((area.center() - vec2(size, size) / 2.) * pixels_per_point).round() / pixels_per_point;
+    Rect::from_min_size(min, vec2(size, size))
+}
 /// Drawn knobs: position, label, matrix encoder (None: the MASTER pot) and
 /// the keys that turn them (counter-clockwise / clockwise).
 const KNOBS: [(f32, f32, &str, Option<usize>, &str); 8] = [
     (91., 106., "MASTER", None, "N / M"),
-    (208., 106., "SELECT", Some(ui_knobs::knob::SELECT), "[ / ]"),
-    (91., 224., "PRESETS", Some(ui_knobs::knob::PRESETS), "9 / 0"),
-    (208., 224., "ALGORITHM", Some(ui_knobs::knob::ALGORITHM), "- / ="),
-    (632., 106., "KNOB1", Some(ui_knobs::knob::KNOB1), "1 / 2"),
-    (758., 106., "KNOB2", Some(ui_knobs::knob::KNOB1 + 1), "3 / 4"),
-    (884., 106., "KNOB3", Some(ui_knobs::knob::KNOB1 + 2), "5 / 6"),
-    (1010., 106., "KNOB4", Some(ui_knobs::knob::KNOB1 + 3), "7 / 8"),
+    (208., 106., "SELECT", Some(knob::SELECT), "[ / ]"),
+    (91., 224., "PRESETS", Some(knob::PRESETS), "9 / 0"),
+    (208., 224., "ALGORITHM", Some(knob::ALGORITHM), "- / ="),
+    (632., 106., "KNOB1", Some(knob::KNOB1), "1 / 2"),
+    (758., 106., "KNOB2", Some(knob::KNOB1 + 1), "3 / 4"),
+    (884., 106., "KNOB3", Some(knob::KNOB1 + 2), "5 / 6"),
+    (1010., 106., "KNOB4", Some(knob::KNOB1 + 3), "7 / 8"),
 ];
 const KNOB_KEYS: [(egui::Key, egui::Key); 8] = [
     (egui::Key::N, egui::Key::M),
@@ -61,94 +80,78 @@ const KNOB_KEYS: [(egui::Key, egui::Key); 8] = [
 const DETENT_PX: f32 = 12.;
 /// Encoder clicks per turn as drawn (the pointer moves 15 degrees a click).
 const DETENT_ANGLE: f32 = std::f32::consts::TAU / 24.;
-/// Where to draw the 240x240 LCD inside `area` (points) so no guest pixel is
-/// dropped: never fewer than 240 physical pixels (nearest-neighbour
-/// downscaling skips rows and columns: "TRACK" read "IRALK"), an integer
-/// scale when it fills at least 3/4 of the area, and snapped to the pixel grid.
-fn lcd_rect(area: Rect, pixels_per_point: f32) -> Rect {
-    const LCD: f32 = 240.;
-    let available = area.width().min(area.height()) * pixels_per_point;
-    let whole = (available / LCD).floor();
-    let pixels = if available < LCD {
-        LCD
-    } else if whole * LCD >= 0.75 * available {
-        whole * LCD
-    } else {
-        available.floor()
-    };
-    let size = pixels / pixels_per_point;
-    let min = ((area.center() - vec2(size, size) / 2.) * pixels_per_point).round() / pixels_per_point;
-    Rect::from_min_size(min, vec2(size, size))
-}
-
+/// Instruction clock choices: None follows the firmware's system clock (the
+/// accurate default); a lower rate gives the guest fewer instructions per
+/// second of guest time, so a light firmware can play in real time.
+const CLOCKS: [(Option<u32>, &str); 4] = [
+    (None, "Firmware clock"),
+    (Some(24), "24 MHz"),
+    (Some(48), "48 MHz"),
+    (Some(96), "96 MHz"),
+];
+/// The ADC model's MASTER reading at reset.
+const MASTER_DEFAULT: u16 = 512;
 /// MASTER pointer: -135..+135 degrees over the ADC range 0..=1023.
 fn master_angle(master: u16) -> f32 {
     (master as f32 / 1023. - 0.5) * 1.5 * std::f32::consts::PI
 }
-/// CPU clock choices: 24 MHz runs in real time; the real WL82 runs at
-/// 120-396 MHz, which busy-looping firmwares need (and which runs slower).
-const CPU_CLOCKS: [(u32, &str); 4] = [
-    (24, "24 MHz - real time"),
-    (96, "96 MHz"),
-    (192, "192 MHz - realistic"),
-    (312, "312 MHz - realistic, slowest"),
-];
 const INK: Color32 = Color32::from_rgb(190, 194, 193);
 const ACCENT: Color32 = Color32::from_rgb(231, 193, 91);
 
 struct Emulator {
     path: PathBuf,
-    cpu: Option<Cpu>,
+    worker: worker::Worker,
+    generation: u64,
+    loaded: bool,
+    steps: u64,
     fault: Option<String>,
     paused: bool,
     texture: Option<egui::TextureHandle>,
     pressed: [bool; 41],
     pulse: [Instant; 41],
     pulse_steps: [u64; 41],
-    /// Host playback; None in tests or when no device opens (`audio_error`).
-    audio: Option<ui_audio::HostAudio>,
-    audio_error: Option<String>,
-    encoders: ui_knobs::Encoders,
     /// MASTER potentiometer as the ADC reads it (0..=1023).
     master: u16,
-    /// Pointer angle per drawn knob (radians, 0 = up) and unspent drag/scroll.
+    /// Pointer angle per drawn knob (radians, 0 = up), unspent drag/scroll
+    /// and the knob centres of the last drawn frame.
     knob_angle: [f32; 8],
     knob_accum: [f32; 8],
-    /// Where each knob was last drawn (screen points).
     knob_centre: [egui::Pos2; 8],
-    /// Emulated CPU clock (a multiple of 24 MHz). 24 keeps every firmware in
-    /// real time; firmwares that burn CPU in busy loops (Baud Girl, stock)
-    /// need a realistic clock (the WL82 runs at 120-396 MHz) at the cost of
-    /// speed.
-    cpu_mhz: u32,
-    /// Guest speed against real time (24 M oscillator ticks/s), sampled each second.
+    /// Instruction clock in MHz; None follows the firmware.
+    clock_mhz: Option<u32>,
+    /// Host playback; None in tests or when no device opens (`audio_error`).
+    audio: Option<host_audio::HostAudio>,
+    audio_error: Option<String>,
+    /// Guest audio against real time, sampled about once a second.
     speed: Option<f64>,
     speed_mark: (Instant, u64),
     /// The firmware's web editor and its MIDI bridge (off without one).
-    web: ui_web::WebEditor,
+    web: web_editor::WebEditor,
 }
 impl Emulator {
     fn new(path: PathBuf) -> Self {
         let mut app = Self {
             path,
-            cpu: None,
+            worker: worker::Worker::new(),
+            generation: 0,
+            loaded: false,
+            steps: 0,
             fault: None,
             paused: false,
             texture: None,
             pressed: [false; 41],
             pulse: [Instant::now(); 41],
             pulse_steps: [0; 41],
-            audio: None,
-            audio_error: None,
-            encoders: ui_knobs::Encoders::default(),
-            master: 768,
+            master: MASTER_DEFAULT,
             knob_angle: [0.; 8],
             knob_accum: [0.; 8],
-            knob_centre: [egui::Pos2::ZERO; 8],
+            knob_centre: [pos2(0., 0.); 8],
+            clock_mhz: None,
+            audio: None,
+            audio_error: None,
             speed: None,
             speed_mark: (Instant::now(), 0),
-            cpu_mhz: 24,
-            web: ui_web::WebEditor::disabled("No web editor"),
+            web: web_editor::WebEditor::disabled("No web editor"),
         };
         app.knob_angle[0] = master_angle(app.master);
         app.reset();
@@ -160,126 +163,49 @@ impl Emulator {
         self.pulse_steps.fill(0);
         self.paused = false;
         self.texture = None;
-        self.encoders = ui_knobs::Encoders::default();
-        self.speed = None;
-        self.speed_mark = (Instant::now(), 0);
-        if let Some(audio) = &self.audio {
-            audio.clear();
-        }
-        match Firmware::load(&self.path).and_then(|firmware| {
-            let mut cpu = Cpu::new(firmware.bus()?, firmware.entry);
-            cpu.r[0] = 0x01c7fe08;
-            cpu.set_cpu_mhz(self.cpu_mhz)?;
-            // FM1_NESTED_IRQ=1: interrupt nesting (USB audio builds; off for the baselines).
-            cpu.nested_irqs = std::env::var("FM1_NESTED_IRQ").is_ok_and(|v| v == "1");
-            Ok(cpu)
-        }) {
-            Ok(mut cpu) => {
-                self.web.attach(&mut cpu.bus);
-                self.cpu = Some(cpu);
-                self.fault = None;
-            }
-            Err(error) => {
-                self.cpu = None;
-                self.fault = Some(error);
-            }
-        }
+        self.generation += 1;
+        self.loaded = false;
+        self.steps = 0;
+        self.fault = None;
+        self.worker.restart(self.generation, self.path.clone());
     }
-    fn run_slice(&mut self, ctx: &egui::Context) {
-        if let Some(cpu) = &mut self.cpu {
-            for (row, ids) in KEYMAP.iter().enumerate() {
-                for (column, &id) in ids.iter().enumerate() {
-                    if id >= 0 {
-                        cpu.bus
-                            .devices
-                            .gpio
-                            .press(column, row + 1, self.pressed[id as usize])
-                            .unwrap();
-                    }
-                }
-            }
-            cpu.bus.devices.adc.master = self.master;
-            self.web.pump(&mut cpu.bus);
-            if !self.paused && self.fault.is_none() {
-                // Keep the UI responsive even if guest code spins forever.
-                // While the guest streams audio to a host device, its pace is
-                // the playback queue (real time when the host keeps up);
-                // otherwise an instruction budget of about one frame of guest
-                // time. Neither is a cycle-accuracy claim.
-                let deadline = Instant::now() + Duration::from_millis(14);
-                let paced = self.audio.is_some() && cpu.bus.audio.frames > 0;
-                let budget = if paced { u64::MAX } else { 400_000 * cpu.instructions_per_tick as u64 };
-                let mut i = 0u64;
-                while i < budget {
-                    // Every 1024 instructions: panel, audio queue, deadline.
-                    let contacts = self
-                        .encoders
-                        .update(|column| cpu.bus.devices.gpio.column_scans(column));
-                    for (e, (a, b)) in contacts.into_iter().enumerate() {
-                        let [ac, ar, bc, br] = ui_knobs::CONTACTS[e];
-                        let gpio = &mut cpu.bus.devices.gpio;
-                        gpio.press(ac, ar, a).unwrap();
-                        gpio.press(bc, br, b).unwrap();
-                    }
-                    if let Some(audio) = &self.audio {
-                        audio.push(cpu.bus.audio.samples.drain(..));
-                        if paced && audio.queued() >= ui_audio::TARGET_FRAMES {
-                            break;
-                        }
-                    }
-                    if Instant::now() >= deadline {
-                        break;
-                    }
-                    let chunk = (budget - i).min(1024);
-                    if let Err(error) = cpu.run_steps(chunk) {
-                        self.fault = Some(error.to_string());
-                        break;
-                    }
-                    i += chunk;
-                }
-                if let Some(audio) = &self.audio {
-                    audio.push(cpu.bus.audio.samples.drain(..));
-                }
-                let (since, steps) = self.speed_mark;
-                let elapsed = since.elapsed().as_secs_f64();
-                if elapsed >= 1.0 {
-                    let ticks = (cpu.steps - steps) as f64 / cpu.instructions_per_tick as f64;
-                    self.speed = Some(ticks / 24e6 / elapsed);
-                    self.speed_mark = (Instant::now(), cpu.steps);
-                }
-            }
-            if !cpu.bus.usb.serial.is_empty() {
-                let bytes: Vec<u8> = cpu.bus.usb.serial.drain(..).collect();
-                let mut stdout = io::stdout().lock();
-                if let Err(error) = stdout.write_all(&bytes).and_then(|_| stdout.flush()) {
-                    self.fault = Some(format!("USB serial stdout: {error}"));
-                }
-            }
-            self.web.pump(&mut cpu.bus);
-            let visible = cpu.bus.screen_visible();
-            let pixels = cpu
-                .bus
-                .lcd
-                .pixels
-                .iter()
-                .map(|&rgb| {
-                    if visible {
-                        Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
-                    } else {
-                        Color32::BLACK
-                    }
-                })
-                .collect();
-            let image = egui::ColorImage {
-                size: [240, 240],
-                pixels,
-            };
-            if let Some(texture) = &mut self.texture {
-                texture.set(image, egui::TextureOptions::NEAREST);
-            } else {
-                self.texture =
-                    Some(ctx.load_texture("Guest LCD", image, egui::TextureOptions::NEAREST));
-            }
+    fn refresh(&mut self, ctx: &egui::Context) {
+        self.worker.input(self.pressed);
+        self.worker.pause(self.paused);
+        let Some(snapshot) = self.worker.snapshot() else {
+            return;
+        };
+        if snapshot.generation != self.generation {
+            return;
+        }
+        self.loaded = snapshot.loaded;
+        self.steps = snapshot.steps;
+        let (since, frames) = self.speed_mark;
+        let elapsed = since.elapsed().as_secs_f64();
+        if snapshot.frames < frames || self.paused {
+            self.speed = None;
+            self.speed_mark = (Instant::now(), snapshot.frames);
+        } else if elapsed >= 1.0 {
+            let guest = (snapshot.frames - frames) as f64 / fm1_emu::audio::SAMPLE_RATE as f64;
+            self.speed = (snapshot.frames > 0).then_some(guest / elapsed);
+            self.speed_mark = (Instant::now(), snapshot.frames);
+        }
+        self.fault = snapshot.fault;
+        let Some(pixels) = snapshot.pixels else {
+            return;
+        };
+        let image = egui::ColorImage {
+            size: [240, 240],
+            pixels: pixels
+                .into_iter()
+                .map(|rgb| Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8))
+                .collect(),
+        };
+        if let Some(texture) = &mut self.texture {
+            texture.set(image, egui::TextureOptions::NEAREST);
+        } else {
+            self.texture =
+                Some(ctx.load_texture("Guest LCD", image, egui::TextureOptions::NEAREST));
         }
     }
     fn key(
@@ -295,7 +221,7 @@ impl Emulator {
         let down = response.is_pointer_button_down_on();
         if down || response.clicked() {
             self.pulse[id] = Instant::now() + Duration::from_millis(100);
-            self.pulse_steps[id] = self.cpu.as_ref().map_or(0, |cpu| cpu.steps + 2_400_000 * cpu.instructions_per_tick as u64);
+            self.pulse_steps[id] = self.steps + 72_000_000;
         }
         let focused = ui.input(|i| i.focused);
         let binding = match id {
@@ -307,18 +233,16 @@ impl Emulator {
         let keyboard = binding.is_some_and(|key| ui.input(|i| i.key_down(key)));
         if binding.is_some_and(|key| ui.input(|i| i.key_pressed(key))) {
             self.pulse[id] = Instant::now() + Duration::from_millis(100);
-            self.pulse_steps[id] = self.cpu.as_ref().map_or(0, |cpu| cpu.steps + 2_400_000 * cpu.instructions_per_tick as u64);
+            self.pulse_steps[id] = self.steps + 72_000_000;
         }
         if !focused {
             self.pulse[id] = Instant::now();
             self.pulse_steps[id] = 0;
         }
-        // A slow host still gives the guest 100 ms of oscillator time to scan
+        // A slow host gives the guest at least 100 ms at up to 360 MHz,
+        // including two issued core instructions per shared clock step, to scan
         // and debounce a click; the wall-clock pulse keeps visual feedback.
-        let guest_pulse = self
-            .cpu
-            .as_ref()
-            .is_some_and(|cpu| cpu.steps < self.pulse_steps[id]);
+        let guest_pulse = self.steps < self.pulse_steps[id];
         let pressed =
             focused && (down || keyboard || Instant::now() < self.pulse[id] || guest_pulse);
         self.pressed[id] = pressed;
@@ -385,7 +309,7 @@ impl Emulator {
         });
     }
     /// Pointer movement on drawn knob `index`: whole encoder clicks are queued
-    /// for the guest, the rest is kept; MASTER moves the ADC value directly.
+    /// for the guest and the rest is kept; MASTER moves the ADC value.
     fn turn_knob(&mut self, index: usize, encoder: Option<usize>, amount: f32) {
         if amount == 0. {
             return;
@@ -401,13 +325,14 @@ impl Emulator {
                 self.master = value as u16;
                 self.knob_accum[index] = value - self.master as f32; // keep slow drags
                 self.knob_angle[index] = master_angle(self.master);
+                self.worker.master(self.master);
             }
             Some(e) => {
                 self.knob_accum[index] += amount;
                 let detents = (self.knob_accum[index] / DETENT_PX).trunc();
                 if detents != 0. {
                     self.knob_accum[index] -= detents * DETENT_PX;
-                    self.encoders.turn(e, detents as i32);
+                    self.worker.turn(e, detents as i32);
                     self.knob_angle[index] += detents * DETENT_ANGLE;
                 }
             }
@@ -439,8 +364,8 @@ impl Emulator {
         );
         for (index, (x, y, name, encoder, keys)) in KNOBS.iter().enumerate() {
             let hint = match encoder {
-                Some(_) => format!("{name} · drag or scroll to turn · keys {keys}"),
-                None => format!("{name} volume · drag or scroll · keys {keys}"),
+                Some(_) => format!("{name} · drag around or scroll to turn · keys {keys}"),
+                None => format!("{name} volume · drag around or scroll · keys {keys}"),
             };
             let response = c.knob(ui, *x, *y, name, self.knob_angle[index], &hint);
             // Circling the knob turns it by the pointer's angle around its
@@ -448,7 +373,10 @@ impl Emulator {
             let mut amount = 0.;
             let centre = c.origin + vec2(*x, *y) * c.scale;
             self.knob_centre[index] = centre;
-            if let Some(now) = response.interact_pointer_pos().filter(|_| response.dragged()) {
+            if let Some(now) = response
+                .interact_pointer_pos()
+                .filter(|_| response.dragged())
+            {
                 let (from, to) = (now - response.drag_delta() - centre, now - centre);
                 if from.length() > 6. * c.scale && to.length() > 6. * c.scale {
                     let mut turn = to.x.atan2(-to.y) - from.x.atan2(-from.y);
@@ -472,10 +400,9 @@ impl Emulator {
         c.box_at([290., 52., 270., 272.], 34., Color32::from_gray(8));
         c.box_at([310., 72., 230., 230.], 3., Color32::BLACK);
         if let Some(texture) = &self.texture {
-            let fit = lcd_rect(c.rect([315., 77., 220., 220.]), ui.ctx().pixels_per_point());
             c.painter.image(
                 texture.id(),
-                fit,
+                lcd_rect(c.rect([315., 77., 220., 220.]), ui.ctx().pixels_per_point()),
                 Rect::from_min_max(pos2(0., 0.), pos2(1., 1.)),
                 Color32::WHITE,
             );
@@ -563,7 +490,15 @@ impl Canvas {
         self.painter
             .rect_filled(self.rect(rect), radius * self.scale, color);
     }
-    fn knob(&self, ui: &mut egui::Ui, x: f32, y: f32, name: &str, angle: f32, hint: &str) -> egui::Response {
+    fn knob(
+        &self,
+        ui: &mut egui::Ui,
+        x: f32,
+        y: f32,
+        name: &str,
+        angle: f32,
+        hint: &str,
+    ) -> egui::Response {
         let p = self.origin + vec2(x, y) * self.scale;
         self.painter.text(
             p - vec2(0., 53.) * self.scale,
@@ -592,8 +527,10 @@ impl Canvas {
         self.painter
             .circle_filled(p, 19. * self.scale, Color32::from_gray(35));
         let pointer = vec2(angle.sin(), -angle.cos()) * self.scale;
-        self.painter
-            .line_segment([p + pointer * 11., p + pointer * 18.], Stroke::new(3. * self.scale, INK));
+        self.painter.line_segment(
+            [p + pointer * 11., p + pointer * 18.],
+            Stroke::new(3. * self.scale, INK),
+        );
         ui.interact(
             Rect::from_center_size(p, vec2(56., 56.) * self.scale),
             egui::Id::new(name),
@@ -626,39 +563,45 @@ impl eframe::App for Emulator {
                         if ui.button("Restart").clicked() {
                             self.reset();
                         }
-                        let editor = ui.add_enabled(self.web.active(), egui::Button::new("Open editor"));
+                        let editor =
+                            ui.add_enabled(self.web.active(), egui::Button::new("Open editor"));
                         let editor = match (self.web.url(), self.web.unavailable()) {
-                            (Some(url), _) => editor.on_hover_text(format!("Open {url} in the default browser")),
-                            (None, reason) => editor.on_disabled_hover_text(reason.unwrap_or_default()),
+                            (Some(url), _) => editor
+                                .on_hover_text(format!("Open {url} in the default browser")),
+                            (None, reason) => {
+                                editor.on_disabled_hover_text(reason.unwrap_or_default())
+                            }
                         };
                         if editor.clicked() {
                             if let Err(error) = self.web.open_in_browser() {
                                 eprintln!("{error}");
                             }
                         }
-                        let before = self.cpu_mhz;
-                        egui::ComboBox::from_id_salt("cpu_mhz")
-                            .selected_text(format!("CPU {} MHz", self.cpu_mhz))
+                        let before = self.clock_mhz;
+                        let selected = CLOCKS
+                            .iter()
+                            .find(|(mhz, _)| *mhz == self.clock_mhz)
+                            .map_or("Custom clock".into(), |(_, label)| label.to_string());
+                        egui::ComboBox::from_id_salt("clock")
+                            .selected_text(selected)
                             .show_ui(ui, |ui| {
-                                for (mhz, label) in CPU_CLOCKS {
-                                    ui.selectable_value(&mut self.cpu_mhz, mhz, label);
+                                for (mhz, label) in CLOCKS {
+                                    ui.selectable_value(&mut self.clock_mhz, mhz, label);
                                 }
                             })
                             .response
-                            .on_hover_text("Emulated CPU clock. Changing it restarts the firmware.");
-                        if self.cpu_mhz != before {
-                            self.reset();
+                            .on_hover_text("Instructions per second of guest time. Lower rates let light firmware play in real time; timers, audio and USB keep their own clocks.");
+                        if self.clock_mhz != before {
+                            self.worker.clock(self.clock_mhz.map(|mhz| mhz * 1_000_000));
                         }
                         if ui
                             .add_enabled(
-                                self.cpu.is_some() && self.fault.is_none(),
+                                self.loaded && self.fault.is_none(),
                                 egui::Button::new(if self.paused { "Resume" } else { "Pause" }),
                             )
                             .clicked()
                         {
                             self.paused = !self.paused;
-                            let steps = self.cpu.as_ref().map_or(0, |cpu| cpu.steps);
-                            self.speed_mark = (Instant::now(), steps);
                         }
                         let (label, color) = if self.fault.is_some() {
                             ("Stopped", Color32::LIGHT_RED)
@@ -676,31 +619,44 @@ impl eframe::App for Emulator {
                 ui.colored_label(Color32::LIGHT_RED, error);
                 ui.label("This firmware needs additional emulation support. The LCD retains its last guest-written pixels.");
             } else {
-                ui.label("Hold a key or button to press it · Arrow keys: octave · A W S E D R F G T H Y J K: notes · Knobs: drag, scroll, or 1–0 - = [ ] (MASTER: N / M)");
-                let speed = self.speed.map_or(String::from("measuring…"), |s| format!("{:.0}% of real time", s * 100.));
+                ui.label("Hold a key or button to press it · Arrow keys: octave · A W S E D R F G T H Y J K: notes · Knobs: drag around, scroll, or 1–0 - = [ ] (MASTER: N / M)");
+                let speed = self
+                    .speed
+                    .map_or(String::from("no guest audio yet"), |s| {
+                        format!("guest audio at {:.0}% of real time", s * 100.)
+                    });
                 let audio = match (&self.audio, &self.audio_error) {
-                    (Some(audio), _) => format!("audio {} Hz · {} dropouts", audio.device_rate, audio.underruns()),
-                    (None, Some(error)) => format!("no audio: {error}"),
-                    (None, None) => String::from("no audio"),
+                    (Some(audio), _) => format!(
+                        "output {} Hz, {} dropouts",
+                        audio.device_rate,
+                        audio.underruns()
+                    ),
+                    (None, Some(error)) => format!("no audio output: {error}"),
+                    (None, None) => String::from("no audio output"),
                 };
-                ui.weak(format!("Guest speed {speed} · {audio} · below 100% the sound breaks up"));
+                ui.weak(format!("{speed} · {audio} · below 100% the sound breaks up"));
+                self.web.refresh();
                 ui.horizontal(|ui| {
                     if self.web.active() {
-                        let lit = if self.web.busy() { ACCENT } else { Color32::from_gray(70) };
+                        let lit = if self.web.busy() {
+                            ACCENT
+                        } else {
+                            Color32::from_gray(70)
+                        };
                         ui.colored_label(lit, "●").on_hover_text("MIDI traffic");
                     }
                     ui.weak(self.web.status());
                 });
             }
         });
-        // Use input from the previous rendered frame, then collect this frame's
-        // input below. Losing focus immediately releases every matrix contact.
+        // Receive worker snapshots, then send this frame's input below.
+        // Losing focus immediately releases every matrix contact.
         if !ctx.input(|i| i.focused) {
             self.pressed.fill(false);
             self.pulse.fill(Instant::now());
             self.pulse_steps.fill(0);
         }
-        self.run_slice(ctx);
+        self.refresh(ctx);
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -708,36 +664,49 @@ impl eframe::App for Emulator {
                     .inner_margin(10.),
             )
             .show(ctx, |ui| self.panel(ui));
+        self.worker.input(self.pressed);
         ctx.request_repaint_after(Duration::from_millis(16));
     }
 }
-const USAGE: &str = "usage: fm1-ui FIRMWARE [--cpu-mhz=N] [--ui DIR]\n  \
-    N: a multiple of 24\n  \
-    DIR: web editor files to serve (default: FIRMWARE-ui.zip next to FIRMWARE.fwsc)";
-
-/// The command line: firmware, CPU clock and the web editor override.
-fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(PathBuf, u32, Option<PathBuf>), String> {
+/// The command line.
+#[derive(Debug, PartialEq)]
+struct Args {
+    path: PathBuf,
+    clock_mhz: Option<u32>,
+    /// Web editor files to serve instead of FIRMWARE-ui.zip.
+    ui: Option<PathBuf>,
+}
+const USAGE: &str = "usage: emulator [--cpu-mhz N] [--ui DIR] <firmware>";
+/// `[--cpu-mhz N] [--ui DIR] FIRMWARE`.
+fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Args, String> {
+    let mut path = None;
+    let mut clock = None;
+    let mut ui = None;
     let mut args = args.into_iter();
-    let path = args.next().ok_or("no firmware given")?;
-    let (mut cpu_mhz, mut ui) = (24, None);
     while let Some(arg) = args.next() {
-        if let Some(mhz) = arg.strip_prefix("--cpu-mhz=") {
-            cpu_mhz = mhz.parse().ok().filter(|m| *m > 0 && m % 24 == 0).ok_or("bad --cpu-mhz")?;
-        } else if let Some(dir) = arg.strip_prefix("--ui=") {
-            ui = Some(PathBuf::from(dir));
-        } else if arg == "--ui" {
+        if arg == "--ui" {
             ui = Some(PathBuf::from(args.next().ok_or("--ui needs a directory")?));
-        } else {
-            return Err(format!("unknown argument {arg}"));
+        } else if arg == "--cpu-mhz" {
+            let value = args.next().ok_or("--cpu-mhz needs a value")?;
+            let mhz = value
+                .to_str()
+                .and_then(|value| value.parse::<u32>().ok())
+                .filter(|mhz| (1..=1000).contains(mhz))
+                .ok_or("--cpu-mhz takes 1..1000")?;
+            clock = Some(mhz);
+        } else if path.replace(PathBuf::from(arg)).is_some() {
+            return Err("expected one firmware path".into());
         }
     }
-    Ok((PathBuf::from(path), cpu_mhz, ui))
+    Ok(Args {
+        path: path.ok_or(USAGE)?,
+        clock_mhz: clock,
+        ui,
+    })
 }
-
 fn main() -> eframe::Result {
-    let args = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned());
-    let (path, cpu_mhz, ui) = parse_args(args).unwrap_or_else(|error| {
-        eprintln!("fm1-ui: {error}\n{USAGE}");
+    let args = parse_args(std::env::args_os().skip(1)).unwrap_or_else(|error| {
+        eprintln!("{error}");
         std::process::exit(2);
     });
     let options = eframe::NativeOptions {
@@ -752,18 +721,25 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            let mut app = Emulator::new(path.clone());
-            app.web = ui_web::WebEditor::new(&path, ui.as_deref(), fm1_emu::web::ADDRESS);
+            let mut app = Emulator::new(args.path.clone());
+            app.clock_mhz = args.clock_mhz;
+            app.worker.clock(args.clock_mhz.map(|mhz| mhz * 1_000_000));
+            app.web =
+                web_editor::WebEditor::new(&args.path, args.ui.as_deref(), fm1_emu::web::ADDRESS);
             match app.web.url() {
-                Some(url) => eprintln!("fm1-ui: web editor at {url}"),
-                None => eprintln!("fm1-ui: {}", app.web.unavailable().unwrap_or_default()),
+                Some(url) => eprintln!("web editor at {url}"),
+                None => eprintln!("{}", app.web.unavailable().unwrap_or_default()),
             }
-            app.cpu_mhz = cpu_mhz;
-            app.reset();
-            match ui_audio::HostAudio::open() {
-                Ok(audio) => app.audio = Some(audio),
+            app.worker.web(app.web.hub());
+            match host_audio::HostAudio::open() {
+                Ok(audio) => {
+                    app.worker.audio(Some(audio.queue.clone()));
+                    app.audio = Some(audio);
+                }
                 Err(error) => app.audio_error = Some(error),
             }
+            app.reset(); // Apply the clock, audio and editor from the first instruction.
+            app.worker.read_stdin();
             Ok(Box::new(app))
         }),
     )
@@ -790,18 +766,7 @@ mod tests {
                 egui::CentralPanel::default().show(ctx, |ui| app.panel(ui));
             },
         );
-    }
-    #[test]
-    fn the_command_line_takes_a_clock_and_a_ui_directory() {
-        let args = |a: &[&str]| parse_args(a.iter().map(|s| s.to_string()));
-        assert_eq!(args(&["f.fwsc"]), Ok((PathBuf::from("f.fwsc"), 24, None)));
-        let ui = Some(PathBuf::from("web"));
-        assert_eq!(args(&["f.fwsc", "--ui", "web", "--cpu-mhz=48"]), Ok((PathBuf::from("f.fwsc"), 48, ui.clone())));
-        assert_eq!(args(&["f.fwsc", "--ui=web"]), Ok((PathBuf::from("f.fwsc"), 24, ui)));
-        assert!(args(&["f.fwsc", "--ui"]).is_err());
-        assert!(args(&["f.fwsc", "--cpu-mhz=25"]).is_err());
-        assert!(args(&["f.fwsc", "--bogus"]).is_err());
-        assert!(args(&[]).is_err());
+        app.worker.input(app.pressed);
     }
     #[test]
     fn keyboard_events_reach_guest_pixels_and_focus_loss_releases_keys() {
@@ -820,41 +785,59 @@ mod tests {
             true,
         );
         assert!(app.pressed[0]);
-        app.run_slice(&ctx);
+        app.paused = true;
+        app.refresh(&ctx);
         let stop = Firmware::load(&app.path).unwrap().symbols["display_frame_done"];
-        let cpu = app.cpu.as_mut().unwrap();
-        cpu.run(Some(stop), cpu.steps + 200_000, None).unwrap();
-        assert_eq!(cpu.bus.lcd.pixels[202 * 240 + 24], 0xf7cb00);
+        app.worker.inspect(move |machine| {
+            let cpu = machine.cpu.as_mut().unwrap();
+            cpu.run(Some(stop), cpu.steps + 200_000, None).unwrap();
+            assert_eq!(cpu.bus.lcd.pixels[202 * 240 + 24], 0xf7cb00);
+        });
         draw(&mut app, &ctx, vec![], false);
         assert!(app.pressed.iter().all(|&value| !value));
-        app.run_slice(&ctx);
-        let cpu = app.cpu.as_mut().unwrap();
-        cpu.run(Some(stop), cpu.steps + 200_000, None).unwrap();
-        assert_eq!(cpu.bus.lcd.pixels[202 * 240 + 24], 0x313031);
+        app.refresh(&ctx);
+        app.worker.inspect(move |machine| {
+            let cpu = machine.cpu.as_mut().unwrap();
+            cpu.step().unwrap(); // Leave the previous frame's stop address.
+            cpu.run(Some(stop), cpu.steps + 200_000, None).unwrap();
+            assert_eq!(cpu.bus.lcd.pixels[202 * 240 + 24], 0x313031);
+        });
     }
     #[test]
     fn pause_and_restart_control_the_actual_cpu() {
         let mut app = demo();
         let ctx = egui::Context::default();
-        app.run_slice(&ctx);
-        let steps = app.cpu.as_ref().unwrap().steps;
-        assert!(steps > 0);
+        app.worker.inspect(|_| ()); // Wait for loading without advancing on the UI.
+        std::thread::sleep(Duration::from_millis(20));
+        let steps = app
+            .worker
+            .inspect(|machine| machine.cpu.as_ref().unwrap().steps);
+        assert!(
+            steps > 0,
+            "guest execution must continue without drawing frames"
+        );
         app.paused = true;
-        app.run_slice(&ctx);
-        assert_eq!(app.cpu.as_ref().unwrap().steps, steps);
+        app.refresh(&ctx);
+        let paused = app.worker.inspect(|machine| {
+            assert!(machine.paused);
+            machine.cpu.as_ref().unwrap().steps
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            app.worker
+                .inspect(|machine| machine.cpu.as_ref().unwrap().steps),
+            paused
+        );
         app.reset();
-        assert_eq!(app.cpu.as_ref().unwrap().steps, 0);
+        assert_eq!(app.steps, 0);
         assert!(!app.paused);
+        assert!(!app.loaded);
         assert!(app.texture.is_none());
-        assert!(app
-            .cpu
-            .as_ref()
-            .unwrap()
-            .bus
-            .lcd
-            .pixels
-            .iter()
-            .all(|&pixel| pixel == 0));
+        app.worker.inspect(|machine| {
+            assert!(!machine.paused);
+            assert!(machine.fault.is_none());
+            assert!(machine.cpu.is_some());
+        });
     }
     #[test]
     fn a_short_keypress_survives_a_slow_host_until_guest_debounce_can_run() {
@@ -871,31 +854,51 @@ mod tests {
         app.pulse[0] = Instant::now(); // Wall-clock pulse expired on a slow host.
         draw(&mut app, &ctx, vec![key(false)], true);
         assert!(app.pressed[0]);
-        app.cpu.as_mut().unwrap().steps = 2_400_000;
+        app.worker
+            .inspect(|machine| machine.cpu.as_mut().unwrap().steps = 72_000_000);
+        app.refresh(&ctx);
         draw(&mut app, &ctx, vec![], true);
         assert!(!app.pressed[0]);
     }
     #[test]
     fn unsupported_firmware_stops_without_fabricating_a_screen() {
         let mut app = demo();
-        app.cpu = Some(Cpu::new(Bus::new(vec![0xff, 0x00]).unwrap(), 0x02000120));
+        app.worker.inspect(|machine| {
+            machine.cpu = Some(Cpu::new(Bus::new(vec![0xff, 0x00]).unwrap(), 0x02000120));
+            machine.fault = None;
+        });
+        // Wait for execution rather than relying on host scheduling speed.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !app.worker.inspect(|machine| machine.fault.is_some()) {
+            assert!(Instant::now() < deadline, "worker did not report the fault");
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let ctx = egui::Context::default();
-        app.run_slice(&ctx);
+        app.refresh(&ctx);
         assert!(app
             .fault
             .as_ref()
             .unwrap()
             .contains("unsupported instruction"));
-        let cpu = app.cpu.as_ref().unwrap();
-        let steps = cpu.steps;
-        assert!(cpu.bus.lcd.pixels.iter().all(|&pixel| pixel == 0));
-        app.run_slice(&ctx);
-        assert_eq!(app.cpu.as_ref().unwrap().steps, steps);
+        let steps = app.worker.inspect(|machine| {
+            let cpu = machine.cpu.as_ref().unwrap();
+            assert!(cpu.bus.lcd.pixels.iter().all(|&pixel| pixel == 0));
+            cpu.steps
+        });
+        app.refresh(&ctx);
+        assert_eq!(
+            app.worker
+                .inspect(|machine| machine.cpu.as_ref().unwrap().steps),
+            steps
+        );
     }
     #[test]
     fn circling_a_knob_clicks_its_encoder_and_master_stops_at_its_ends() {
         let mut app = demo();
         let ctx = egui::Context::default();
+        // Paused, the guest cannot play the queued clicks out before the check.
+        app.paused = true;
+        app.refresh(&ctx);
         draw(&mut app, &ctx, vec![], true);
         let drag = |app: &mut Emulator, index: usize, degrees: i32| {
             let centre = app.knob_centre[index];
@@ -912,20 +915,85 @@ mod tests {
             draw(app, &ctx, vec![egui::Event::PointerMoved(at(0))], true);
             draw(app, &ctx, vec![button(at(0), true)], true);
             let step = degrees.signum() * 5;
-            for d in (step..=degrees).step_by(5).chain((degrees..=step).rev().step_by(5)) {
+            for d in (step..=degrees)
+                .step_by(5)
+                .chain((degrees..=step).rev().step_by(5))
+            {
                 draw(app, &ctx, vec![egui::Event::PointerMoved(at(d))], true);
             }
             draw(app, &ctx, vec![button(at(degrees), false)], true);
         };
         // A quarter turn clockwise around KNOB1 is six 15-degree clicks.
         drag(&mut app, 4, 90);
-        assert!((app.knob_angle[4] - 6. * DETENT_ANGLE).abs() < 1e-4, "{}", app.knob_angle[4]);
+        assert!(
+            (app.knob_angle[4] - 6. * DETENT_ANGLE).abs() < 1e-4,
+            "{}",
+            app.knob_angle[4]
+        );
         // Endless: two full turns back keep counting.
         drag(&mut app, 4, -720);
-        assert!((app.knob_angle[4] + 42. * DETENT_ANGLE).abs() < 1e-4, "{}", app.knob_angle[4]);
+        assert!(
+            (app.knob_angle[4] + 42. * DETENT_ANGLE).abs() < 1e-4,
+            "{}",
+            app.knob_angle[4]
+        );
+        let pending = app.worker.inspect(|machine| machine.encoders.clone());
+        assert!(pending.busy(), "the worker received the clicks");
         // MASTER is a pot: a big clockwise turn pins it at full scale.
         drag(&mut app, 0, 300);
         assert_eq!(app.master, 1023);
+        let master = app
+            .worker
+            .inspect(|machine| machine.cpu.as_ref().unwrap().bus.devices.adc.master);
+        assert_eq!(master, 1023);
+    }
+    #[test]
+    fn the_command_line_takes_a_firmware_and_an_instruction_clock() {
+        let parse = |args: &[&str]| parse_args(args.iter().map(std::ffi::OsString::from));
+        let args = |clock_mhz, ui: Option<&str>| Args {
+            path: PathBuf::from("a.fwsc"),
+            clock_mhz,
+            ui: ui.map(PathBuf::from),
+        };
+        assert_eq!(parse(&["a.fwsc"]), Ok(args(None, None)));
+        assert_eq!(
+            parse(&["--cpu-mhz", "24", "a.fwsc"]),
+            Ok(args(Some(24), None))
+        );
+        assert_eq!(
+            parse(&["a.fwsc", "--ui", "web"]),
+            Ok(args(None, Some("web")))
+        );
+        assert!(parse(&["a.fwsc", "--ui"]).is_err());
+        assert!(parse(&["--cpu-mhz", "0", "a.fwsc"]).is_err());
+        assert!(parse(&["a.fwsc", "b.fwsc"]).is_err());
+        assert!(parse(&[]).is_err());
+    }
+    #[test]
+    fn the_worker_paces_the_guest_by_the_audio_queue() {
+        let mut app = demo();
+        let queue = host_audio::AudioQueue::default();
+        app.worker.audio(Some(queue.clone()));
+        app.reset();
+        app.worker.inspect(|machine| {
+            let cpu = machine.cpu.as_mut().unwrap();
+            cpu.bus.audio.frames = 1; // The guest has started streaming.
+        });
+        queue.push(std::iter::repeat_n([0, 0], host_audio::TARGET_FRAMES));
+        let steps = app
+            .worker
+            .inspect(|machine| machine.cpu.as_ref().unwrap().steps);
+        std::thread::sleep(Duration::from_millis(30));
+        let paced = app
+            .worker
+            .inspect(|machine| machine.cpu.as_ref().unwrap().steps);
+        assert_eq!(paced, steps, "a full queue holds the guest");
+        queue.clear();
+        std::thread::sleep(Duration::from_millis(30));
+        let resumed = app
+            .worker
+            .inspect(|machine| machine.cpu.as_ref().unwrap().steps);
+        assert!(resumed > paced, "an emptied queue lets it run");
     }
     #[test]
     fn the_lcd_is_never_downscaled_and_sits_on_the_pixel_grid() {
@@ -941,6 +1009,56 @@ mod tests {
             assert!(r.width() * ppp >= 240.);
             assert_eq!((r.min.x * ppp).fract(), 0.);
             assert_eq!((r.min.y * ppp).fract(), 0.);
+        }
+    }
+    #[test]
+    #[ignore = "requires FM1_STOCK_FWSC; measures GUI worker latency in release mode"]
+    fn stock_click_reaches_a_new_guest_frame_through_the_gui_worker() {
+        let path = std::env::var_os("FM1_STOCK_FWSC").expect("set FM1_STOCK_FWSC");
+        let mut app = Emulator::new(PathBuf::from(path));
+        let ctx = egui::Context::default();
+        let deadline = Instant::now() + Duration::from_secs(240);
+        while app.steps < 3_000_000_000 {
+            app.refresh(&ctx);
+            assert!(app.fault.is_none(), "{:?}", app.fault);
+            assert!(
+                Instant::now() < deadline,
+                "stock boot exceeded the host-time budget"
+            );
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        app.paused = true;
+        app.refresh(&ctx);
+        let before = app.worker.inspect(|machine| {
+            let cpu = machine.cpu.as_ref().unwrap();
+            assert!(cpu.bus.screen_visible());
+            cpu.bus.lcd.pixels.clone()
+        });
+        app.paused = false;
+        app.pressed[2] = true; // FX, sent through the GUI's matrix mapping.
+        let release = app.steps + 72_000_000;
+        let start = Instant::now();
+        app.refresh(&ctx);
+        loop {
+            std::thread::sleep(Duration::from_millis(16));
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "FX redraw exceeded ten seconds"
+            );
+            let Some(snapshot) = app.worker.snapshot() else {
+                continue;
+            };
+            assert!(snapshot.fault.is_none(), "{:?}", snapshot.fault);
+            app.steps = snapshot.steps;
+            app.pressed[2] = app.steps < release;
+            app.worker.input(app.pressed);
+            if snapshot.pixels.is_some_and(|pixels| pixels != before) {
+                eprintln!(
+                    "Stock FX click to guest LCD snapshot: {:.3} seconds",
+                    start.elapsed().as_secs_f64()
+                );
+                break;
+            }
         }
     }
 }

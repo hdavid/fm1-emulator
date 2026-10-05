@@ -37,7 +37,10 @@ fn punch_filter_sweeps_floor_at_their_packed_bounds() {
     // 0x02006ee0 / 0x02006f04 (punch.c): cut = cut > (34 << 8) ? cut - 96 :
     // 34 << 8, and the HPF one at 88 << 8. The packed immediates 0d08 and
     // 0cb0 decode to 0x2200 and 0x5800, the values the arms then load.
-    for (words, bound) in [([0xeea2, 0x0d08, 0xe041, 0x2200], 0x2200u32), ([0xeea2, 0x0cb0, 0xe041, 0x5800], 0x5800)] {
+    for (words, bound) in [
+        ([0xeea2, 0x0d08, 0xe041, 0x2200], 0x2200u32),
+        ([0xeea2, 0x0cb0, 0xe041, 0x5800], 0x5800),
+    ] {
         let mut c = cpu(&words);
         c.r[2] = bound;
         c.r[1] = bound - 96;

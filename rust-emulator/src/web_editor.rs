@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // The GUI side of the web editor bridge (fm1_emu::web): which editor this
 // firmware has (X-ui.zip next to X.fwsc, or --ui DIR), the loopback server
-// for it, the MIDI pump between the server and the emulated USB device, and
-// what the toolbar button and the status line show.
-use fm1_emu::{
-    bus::Bus,
-    usb_midi::Decoder,
-    web::{self, Hub, Server, Source},
-};
+// for it, and what the toolbar button and the status line show. The worker
+// moves MIDI between the server's hub and the emulated USB device.
+use fm1_emu::web::{self, Hub, Server, Source};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -24,7 +20,6 @@ pub struct WebEditor {
     unavailable: Option<String>,
     /// Where the editor's files come from.
     origin: Option<PathBuf>,
-    decoder: Decoder,
     counted: (u64, u64),
     last_traffic: Option<Instant>,
 }
@@ -37,7 +32,6 @@ impl WebEditor {
             server: None,
             unavailable: Some(reason.to_owned()),
             origin: None,
-            decoder: Decoder::default(),
             counted: (0, 0),
             last_traffic: None,
         }
@@ -90,20 +84,16 @@ impl WebEditor {
         self.unavailable.as_deref()
     }
 
-    /// A fresh device (restart): forget a half-received message.
-    pub fn attach(&mut self, bus: &mut Bus) {
-        self.decoder = Decoder::default();
-        if self.active() {
-            bus.usb.enable_midi_host();
-        }
+    /// The hub the worker pumps, when an editor is served.
+    pub fn hub(&self) -> Option<Arc<Hub>> {
+        self.active().then(|| self.hub.clone())
     }
 
-    /// Move MIDI between the browser clients and the device.
-    pub fn pump(&mut self, bus: &mut Bus) {
+    /// Notice MIDI traffic for the indicator (once per UI frame).
+    pub fn refresh(&mut self) {
         if !self.active() {
             return;
         }
-        web::pump(&self.hub, bus, &mut self.decoder);
         let stats = self.hub.stats();
         let counted = (stats.to_device, stats.from_device);
         if counted != self.counted {
@@ -187,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ui_directory_starts_the_server_and_enables_the_midi_host() {
+    fn a_ui_directory_starts_the_server_and_offers_its_hub() {
         let dir = scratch("dir");
         std::fs::write(dir.join("index.html"), "<html><head></head></html>").unwrap();
         let mut editor = WebEditor::new(&dir.join("x.fwsc"), Some(&dir), "127.0.0.1:0");
@@ -198,9 +188,8 @@ mod tests {
             "{}",
             editor.status()
         );
-        let mut bus = Bus::new(vec![0; 64]).unwrap();
-        editor.attach(&mut bus);
-        editor.pump(&mut bus);
+        assert!(editor.hub().is_some());
+        editor.refresh();
         assert!(editor.status().contains("device not enumerated yet"));
         assert!(!editor.busy());
     }

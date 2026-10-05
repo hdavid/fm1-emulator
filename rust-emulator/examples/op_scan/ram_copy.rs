@@ -34,7 +34,11 @@ impl Copies {
         // As examples/diagnose: the loader leaves r0 pointing at its
         // parameter block.
         cpu.r[0] = 0x01c7_fe08;
-        let _ = cpu.run_steps(steps);
+        for _ in 0..steps {
+            if cpu.step().is_err() {
+                break;
+            }
+        }
         let ram: Vec<u8> = (0..(RAM_SIZE / 4) as u32)
             .flat_map(|i| cpu.bus.read(RAM + 4 * i, 4).unwrap_or(0).to_le_bytes())
             .collect();

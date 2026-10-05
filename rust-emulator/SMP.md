@@ -41,20 +41,3 @@ pending words stay zero. CPU 1 remained in reset and its registers returned
 zero, so that capture does not validate cross-core visibility. A later probe
 attempting to start CPU 1 reset before returning results and was discarded;
 the USB updater recovered and FM-1_981 display firmware was restored.
-
-## Time with both cores running (feat/dual-core-emu)
-
-Both cores run on one clock. A step that executes an instruction on each core
-now advances guest time once: `cpu.steps` is guest time, `cpu.core_steps`
-counts each core's instructions (`diagnose` prints both, `play_check cores`).
-Before, the secondary's instructions also advanced time, so with CPU1 running
-every timer, the audio DMA and the firmware's own CPU meter ran twice as fast
-per primary instruction. When CPU0 is paused (C0_CON stopped bit) the
-secondary alone carries time. Stock FM-1 / Baud Girl therefore do twice the
-CPU0 work per unit of guest time than before; their 200M-step counters changed
-(they still boot to their home screens), the single-core firmwares' did not.
-
-The SLOOP dual-core prototype (sloop `feat/dual-core`, docs/DUAL-CORE.md)
-renders two synth parts on CPU1 per audio block; in this model it cut the
-CPU0 audio load by 40-44 % with bit-identical output. The model has no cycle,
-cache, wait-state or bus-contention costs, so hardware will gain less.

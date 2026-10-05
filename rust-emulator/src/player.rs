@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Headless "user at the panel" for play_check and preset_sweep: boots a
-// firmware, holds matrix keys, turns encoders (the fm1-ui knob model) and
+// firmware, holds matrix keys, turns encoders (the same model as fm1-ui) and
 // keeps the last instructions for a fault report.
-use crate::{cpu::Cpu, firmware::Firmware, profile::Profile, ui_knobs};
+use crate::{
+    cpu::Cpu,
+    encoders::{self, Encoders},
+    firmware::Firmware,
+    profile::Profile,
+};
 use std::{collections::VecDeque, path::Path};
 
-/// Guest instructions per second of guest time.
-pub const RATE: f64 = 24e6;
+/// Oscillator ticks per second of guest time.
+pub const OSCILLATOR_HZ: f64 = 24e6;
 
 /// Instructions between two scans of the held keys and turned encoders.
 const PANEL_SCAN_STEPS: u64 = 1024;
@@ -21,7 +26,7 @@ const KEYMAP: [[i8; 11]; 4] = [
 
 pub struct Player {
     pub cpu: Cpu,
-    pub encoders: ui_knobs::Encoders,
+    pub encoders: Encoders,
     pub held: [bool; 41],
     /// When set, every primary-core instruction run by `run` is counted.
     pub profile: Option<Profile>,
@@ -42,7 +47,7 @@ impl Level {
         (self.sum / (self.frames.max(1) * 2) as f64).sqrt()
     }
 
-    /// Add the samples the guest produced and clear them.
+    /// Add the samples the guest produced (24-bit full scale) and clear them.
     pub fn take(&mut self, cpu: &mut Cpu) {
         let samples = &mut cpu.bus.audio.samples;
         for [l, r] in samples.iter() {
@@ -64,7 +69,7 @@ impl Player {
         cpu.r[0] = 0x01c7_fe08;
         Ok(Self {
             cpu,
-            encoders: ui_knobs::Encoders::default(),
+            encoders: Encoders::default(),
             held: [false; 41],
             profile: None,
             recent: VecDeque::new(),
@@ -76,55 +81,55 @@ impl Player {
     /// instructions (PC, form, registers after it) as a trace.
     pub fn run(&mut self, steps: u64) -> Result<(), String> {
         let end = self.cpu.steps + steps;
-        // The panel is scanned every 1024 instructions (a halted span jumped
-        // over by `skip_idle` stops at the next scan).
-        let mut next_scan = self.cpu.steps.next_multiple_of(PANEL_SCAN_STEPS);
         while self.cpu.steps < end {
-            if self.cpu.steps >= next_scan {
+            if self.cpu.steps.is_multiple_of(PANEL_SCAN_STEPS) {
                 self.scan_panel()?;
-                next_scan = (self.cpu.steps / PANEL_SCAN_STEPS + 1) * PANEL_SCAN_STEPS;
             }
-            if self.cpu.halted() {
-                let skipped = self.cpu.skip_idle(end.min(next_scan) - self.cpu.steps);
-                if skipped > 0 {
-                    if let Some(profile) = self.profile.as_mut() {
-                        profile.record_idle(skipped);
-                    }
-                    continue;
-                }
-            }
-            let pc = self.cpu.pc;
-            if let Some(profile) = self.profile.as_mut() {
-                if self.cpu.halted() {
-                    profile.record_idle(1);
-                } else {
-                    profile.record(pc, self.cpu.in_interrupt());
-                }
-            }
-            match self.cpu.step() {
-                Ok(op) => {
-                    if self.recent.len() >= self.trace {
-                        self.recent.pop_front();
-                    }
-                    self.recent.push_back((pc, op, self.cpu.r));
-                }
-                Err(fault) => {
-                    let mut report = String::new();
-                    for (pc, op, r) in &self.recent {
-                        let regs: Vec<_> = r.iter().map(|v| format!("{v:x}")).collect();
-                        report += &format!("  0x{pc:08x} {op:<24} [{}]\n", regs.join(" "));
-                    }
-                    report += &format!("fault after {} instructions: {fault}", self.cpu.steps);
-                    return Err(report);
-                }
-            }
+            self.step()?;
         }
         Ok(())
     }
 
+    fn step(&mut self) -> Result<(), String> {
+        let pc = self.cpu.pc;
+        if let Some(profile) = self.profile.as_mut() {
+            if self.cpu.halted() {
+                profile.record_idle(1);
+            } else {
+                profile.record(pc, self.cpu.in_interrupt());
+            }
+        }
+        match self.cpu.step() {
+            Ok(op) => {
+                if self.recent.len() >= self.trace {
+                    self.recent.pop_front();
+                }
+                self.recent.push_back((pc, op, self.cpu.r));
+                Ok(())
+            }
+            Err(fault) => {
+                let mut report = String::new();
+                for (pc, op, r) in &self.recent {
+                    let regs: Vec<_> = r.iter().map(|v| format!("{v:x}")).collect();
+                    report += &format!("  0x{pc:08x} {op:<24} [{}]\n", regs.join(" "));
+                }
+                report += &format!("fault after {} instructions: {fault}", self.cpu.steps);
+                Err(report)
+            }
+        }
+    }
+
+    /// Run `seconds` of guest time: oscillator ticks, whatever the
+    /// instruction clock.
     pub fn run_seconds(&mut self, seconds: f64) -> Result<(), String> {
-        // Guest seconds: oscillator ticks times the CPU clock multiple.
-        self.run((seconds * RATE * self.cpu.instructions_per_tick as f64) as u64)
+        let end = self.cpu.bus.oscillator_ticks() + (seconds * OSCILLATOR_HZ) as u64;
+        while self.cpu.bus.oscillator_ticks() < end {
+            if self.cpu.steps.is_multiple_of(PANEL_SCAN_STEPS) {
+                self.scan_panel()?;
+            }
+            self.step()?;
+        }
+        Ok(())
     }
 
     /// Run `seconds` of guest time and measure the audio produced, in slices
@@ -161,18 +166,13 @@ impl Player {
                 }
             }
         }
-        let contacts = self.encoders.update(|column| gpio.column_scans(column));
-        for (e, (a, b)) in contacts.into_iter().enumerate() {
-            let [ac, ar, bc, br] = ui_knobs::CONTACTS[e];
-            gpio.press(ac, ar, a)?;
-            gpio.press(bc, br, b)?;
-        }
+        self.encoders.drive(gpio);
         Ok(())
     }
 }
 
 pub fn knob(name: &str) -> Result<usize, String> {
-    use ui_knobs::knob::*;
+    use encoders::knob::*;
     Ok(match name {
         "SELECT" => SELECT,
         "ALGORITHM" => ALGORITHM,

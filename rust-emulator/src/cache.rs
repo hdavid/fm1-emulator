@@ -3,7 +3,7 @@
 // Register layout: vendor SDK asm/csfr.h; startup ranges: unchanged stock code.
 pub(crate) struct Cache {
     regs: [u32; 3],
-    pub(crate) cores: [u32; 2],
+    cores: [u32; 2],
     tags: Vec<u8>,
     ram: Vec<u8>,
 }
@@ -18,6 +18,9 @@ impl Default for Cache {
     }
 }
 impl Cache {
+    pub(crate) fn core_control(&self, core: usize) -> u32 {
+        self.cores[core]
+    }
     fn offset(a: u32, n: usize, base: u32, len: usize) -> Option<usize> {
         let offset = a.checked_sub(base)? as usize;
         (offset.checked_add(n)? <= len).then_some(offset)

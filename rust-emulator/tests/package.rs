@@ -19,6 +19,8 @@ fn full_package_preserves_application_and_supplies_the_spl_handoff() {
         (0x40300, 1),
         (0x40304, 0),
         (0x16a04, 0x8881c3),
+        (0x51000, 0xe0c),
+        (0x51004, 0),
     ] {
         assert_eq!(bus.read(address, 4).unwrap(), value);
     }
@@ -61,7 +63,7 @@ fn full_package_preserves_application_and_supplies_the_spl_handoff() {
     );
     let mut cpu = Cpu::new(bus, package.entry);
     cpu.r[0] = 0x01c7fe08;
-    for _ in 0..35_000_000 {
+    for _ in 0..200_000_000 {
         cpu.step().unwrap();
     }
     assert!(cpu.bus.screen_visible());

@@ -43,7 +43,7 @@ registers = [0x10000, 0x10008, 0x1000c, 0x10010, 0x10014, 0x10018,
              0x119a0, 0x119a4, 0x119a8, 0x119ac, 0x13e00, 0x13e04,
              0x40200, 0x40204, 0x40208, 0x4020c, 0x40300, 0x40304,
              0x40308, 0x4030c, 0x40310, 0x40314, 0x16a00, 0x16a04, 0x16a08,
-             0x10200]
+             0x10200, 0x16a0c, 0x16a10, 0x16a14]
 report += f'static uint32_t boot_registers[{len(registers)}];\n'
 report += '''static void clocks_report(void) {
     uint32_t i;
@@ -90,7 +90,7 @@ code = code.replace('    fm1_audio_stop();\n    f=irq_save();',
             for i, address in enumerate(registers)) + '    fm1_audio_stop();\n    f=irq_save();')
 p.write_text(code)
 b.FW=src; b.OUT=base/'build'; b.GEN=b.OUT/'gen'; b.LDR=b.OUT/'loader'
-b.PRODUCT='FM-1_982'; b.NAME='fm1-atomic'; b.HARDWARE_DISPLAY=False
+b.PRODUCT='FM-1_995'; b.NAME='fm1-atomic'; b.HARDWARE_DISPLAY=False
 b.GEN.mkdir(parents=True,exist_ok=True)
 (b.GEN/'probe_hash.h').write_text(Path('build/gen/probe_hash.h').read_text())
 pkg.SDK=Path('.deps/sdk').resolve()

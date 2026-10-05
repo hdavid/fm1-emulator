@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
+#![cfg(feature = "web")]
 // End to end: a WebSocket client (what the Web MIDI shim is) talks to the
 // unchanged firmware through the server, the hub, `web::pump` and the USB
 // MIDI host. Set MIDI_FWSC to a Felucca, Jangada or SLOOP package and run
-// in release mode with --ignored.
+// in release mode with --ignored (24 MHz instruction clock).
 use fm1_emu::{
     cpu::Cpu,
     firmware::Firmware,
@@ -27,7 +28,10 @@ fn client(server: &Server) -> WebSocket<TcpStream> {
 fn run(cpu: &mut Cpu, hub: &Hub, decoder: &mut Decoder, slices: u32) {
     for _ in 0..slices {
         pump(hub, &mut cpu.bus, decoder);
-        cpu.run_steps(1_000_000).unwrap();
+        for _ in 0..1_000_000 {
+            cpu.step()
+                .unwrap_or_else(|error| panic!("after {} instructions: {error}", cpu.steps));
+        }
     }
     pump(hub, &mut cpu.bus, decoder);
 }
@@ -57,6 +61,7 @@ fn a_websocket_client_plays_the_firmware_and_reads_its_sysex_replies() {
     let firmware = Firmware::load(Path::new(&path)).unwrap();
     let mut bus = firmware.bus().unwrap();
     bus.usb.enable_midi_host();
+    bus.set_instruction_clock(Some(24_000_000));
     let mut cpu = Cpu::new(bus, firmware.entry);
     cpu.r[0] = 0x01c7fe08;
     let hub = Arc::new(Hub::default());

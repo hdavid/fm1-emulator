@@ -2,9 +2,11 @@
 
 **Compatibility: partially functioning.** The reported FX failure was fixed on
 2026-10-05. Both the published package and local `felucca.elf` now render FX and
-continue servicing audio DMA and the watchdog. Other paths remain incomplete:
-the local presets page stopped on opcode `0xe1c8` at PC `0x0200b6f4` during the
-desktop check. This separate failure is not covered by the tests below.
+continue servicing audio DMA and the watchdog. Other paths need broader
+coverage. An earlier desktop check stopped on opcode `0xe1c8` at PC
+`0x0200b6f4` on the local presets page. The stock firmware work subsequently
+added register arithmetic shifts, including that encoding; the complete
+presets path has not been retested.
 
 Full, unchanged Felucca now boots into its main screen. The published 0.9-beta
 application and the local source build both run for 100 million instructions
@@ -15,8 +17,8 @@ presses/releases a note and selects ENV: after 112 million instructions it has
 produces nonzero stereo DMA samples. Host speaker playback is not implemented.
 
 This is bounded boot/input validation, not full synth compatibility. Other
-engines and UI paths may encounter more instruction gaps. Flash programming,
-flash persistence, rotary input, USB MIDI host input and CDC host input remain.
+engines and UI paths may encounter more instruction gaps. Flash persistence,
+rotary input, USB MIDI host input and CDC host input remain.
 No Felucca application bytes, source, feature flags or watchdog were patched.
 
 ## FX failure (resolved on 2026-10-05)
@@ -159,8 +161,9 @@ application build; no emulator-only guest replacement was introduced.
    encoders/master control to the existing hardware inputs.
 2. Add CDC OUT and USB MIDI host transfers, then exercise console commands and
    other synth engines without guest modifications.
-3. Support NOR write enable, program, erase and persistence so project/settings
-   saves work. Load real flash snapshots when comparing user sample playback.
+3. Add flash persistence and verify project/settings saves against the existing
+   NOR write-enable, program and erase model. Load real flash snapshots when
+   comparing user sample playback.
 4. Extend CPU and peripheral coverage only where unchanged guest execution or
    independent hardware comparisons demonstrate the required semantics.
 

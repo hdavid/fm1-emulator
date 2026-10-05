@@ -48,6 +48,152 @@ pub(crate) fn sfc(data: &mut [u8], key: u16) {
         enc(block, key ^ (index * 8) as u16);
     }
 }
+
+fn resource(raw: &[u8], key: u16, offset: usize, expected: u16) -> Result<Vec<u8>, String> {
+    if !offset.is_multiple_of(32) {
+        return Err("unsupported resource cipher alignment".into());
+    }
+    let mut data = raw.to_vec();
+    // UFW auxiliary files use the same 32-byte SFC cipher, keyed by their
+    // absolute position in the logical package, not their target flash address.
+    // FM-1_015 USR at 0x93400 verifies CRC e3bc and contains factory voices.
+    for (index, block) in data.chunks_mut(32).enumerate() {
+        enc(block, key ^ ((offset / 4 + index * 8) as u16));
+    }
+    check(&data, expected, "USR")?;
+    Ok(data)
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    // Synthetic data encoded independently with tools/fm1pkg_make.py;
+    // spans two complete cipher blocks and a one-byte final block.
+    const RAW: [u8; 65] = [
+        0x49, 0x72, 0x6e, 0x9e, 0x2e, 0xe2, 0x58, 0x18, 0xb0, 0xf4, 0x56, 0x2d, 0xca, 0x53, 0xb7,
+        0xfc, 0x58, 0x09, 0x91, 0x9c, 0xd1, 0xa1, 0xff, 0x59, 0x3f, 0xe6, 0x11, 0x74, 0xe7, 0x7d,
+        0x71, 0x0b, 0x63, 0x4a, 0x09, 0x97, 0xbe, 0xfe, 0x16, 0x0a, 0xb1, 0xe3, 0x4f, 0x33, 0xc8,
+        0x20, 0xe0, 0x24, 0x35, 0x4b, 0x96, 0x2c, 0x79, 0xf2, 0xe4, 0xe9, 0xf3, 0xe6, 0xcc, 0x98,
+        0x11, 0x22, 0x65, 0xeb, 0x3e,
+    ];
+
+    #[test]
+    fn auxiliary_cipher_uses_package_position_and_checks_plaintext_crc() {
+        let data = resource(&RAW, 0x980f, 0x93400, 0x05e6).unwrap();
+        assert_eq!(
+            data,
+            b"FM1 synthetic preset bytes; not device firmware.\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0!"
+        );
+        assert_eq!(RAW[0], 0x49);
+        // Flash target and a relocated container offset give different keys.
+        for offset in [0xea000, 0xae400] {
+            assert!(resource(&RAW, 0x980f, offset, 0x05e6).is_err());
+        }
+        assert!(resource(&RAW, 0x980f, 0x93401, 0x05e6).is_err());
+        let mut corrupt = RAW;
+        corrupt[64] ^= 1;
+        assert!(resource(&corrupt, 0x980f, 0x93400, 0x05e6).is_err());
+        assert!(resource(&RAW[..64], 0x980f, 0x93400, 0x05e6).is_err());
+    }
+
+    fn with_usr(target: u32, capacity: u32, corrupt: bool) -> Vec<u8> {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../build/display/firmware.fwsc");
+        let raw = std::fs::read(path).unwrap();
+        let mut logical = Vec::new();
+        for block in raw[..960].chunks_exact(48) {
+            logical.extend_from_slice(&block[..47]);
+        }
+        logical.extend_from_slice(&raw[960..]);
+        let mut header = logical[..64].to_vec();
+        enc(&mut header, 0xffff);
+        // Make a full-size flash payload with a sentinel in key_mac. The
+        // fixture only needs flash.bin and USR; omit the unused OTA entry.
+        let mut flash_entry = logical[64..144].to_vec();
+        enc(&mut flash_entry, 0xffff);
+        assert_eq!(name(&flash_entry, 64), b"flash.bin");
+        let start = u32_at(&flash_entry, 8).unwrap() as usize;
+        let size = u32_at(&flash_entry, 12).unwrap() as usize;
+        assert_eq!(start, 0x400);
+        let mut flash = logical[start..start + size].to_vec();
+        flash.resize(1024 * 1024, 255);
+        flash[0xff000..0xff004].copy_from_slice(b"KEEP");
+        flash_entry[4..6].copy_from_slice(&crc(&flash).to_le_bytes());
+        for at in [12, 16] {
+            flash_entry[at..at + 4].copy_from_slice(&(flash.len() as u32).to_le_bytes());
+        }
+        enc(&mut flash_entry, 0xffff);
+        logical.truncate(start);
+        logical[64..144].copy_from_slice(&flash_entry);
+        logical.extend_from_slice(&flash);
+        let count = 1;
+        assert!(64 + (count + 1) * 80 <= 0x400);
+        let offset = logical.len().next_multiple_of(32);
+        let mut payload = resource(&RAW, 0x980f, 0x93400, 0x05e6).unwrap();
+        for (i, block) in payload.chunks_mut(32).enumerate() {
+            enc(block, 0x980f ^ (offset / 4 + i * 8) as u16);
+        }
+        if corrupt {
+            payload[0] ^= 1;
+        }
+        logical.resize(offset, 255);
+        logical.extend_from_slice(&payload);
+        let mut entry = vec![0; 80];
+        for (at, value) in [
+            (8, offset as u32),
+            (12, RAW.len() as u32),
+            (16, 96),
+            (28, target),
+            (32, capacity),
+        ] {
+            entry[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        entry[..2].copy_from_slice(&0x32u16.to_le_bytes());
+        entry[4..6].copy_from_slice(&0x05e6u16.to_le_bytes());
+        entry[64..67].copy_from_slice(b"USR");
+        enc(&mut entry, 0xffff);
+        logical[64 + count * 80..64 + (count + 1) * 80].copy_from_slice(&entry);
+        header[4..8].copy_from_slice(&(logical.len() as u32).to_le_bytes());
+        header[8..10].copy_from_slice(&((count + 1) as u16).to_le_bytes());
+        let checksum = crc(&logical[64..64 + (count + 1) * 80]);
+        header[2..4].copy_from_slice(&checksum.to_le_bytes());
+        let checksum = crc(&header[2..]);
+        header[..2].copy_from_slice(&checksum.to_le_bytes());
+        enc(&mut header, 0xffff);
+        logical[..64].copy_from_slice(&header);
+        let mut packed = Vec::new();
+        for (i, block) in logical[..940].chunks_exact(47).enumerate() {
+            packed.extend_from_slice(block);
+            packed.push(raw[i * 48 + 47]);
+        }
+        packed.extend_from_slice(&logical[940..]);
+        packed
+    }
+
+    #[test]
+    fn preset_loading_preserves_the_application_and_flash_key_region() {
+        let raw = with_usr(0xea000, 0x12000, false);
+        let (package, image) = Package::decode(&raw).unwrap();
+        let bad = with_usr(0xea000, 0x12000, true);
+        let (without_usr, unchanged) = Package::decode(&bad).unwrap();
+        assert_eq!(image, unchanged);
+        assert_eq!(
+            &package.flash[0xea000..0xea041],
+            resource(&RAW, 0x980f, 0x93400, 0x05e6).unwrap()
+        );
+        assert_eq!(&without_usr.flash[0xea000..0xea041], &[255; 65]);
+        assert_eq!(package.flash.len(), without_usr.flash.len());
+        assert_eq!(&package.flash[0xff000..], &without_usr.flash[0xff000..]);
+        assert_eq!(&package.flash[..0xea000], &without_usr.flash[..0xea000]);
+    }
+
+    #[test]
+    fn auxiliary_file_cannot_overwrite_code_or_exceed_its_reservation() {
+        for (target, capacity) in [(0x4000, 0x12000), (0xea000, 64), (0xea000, u32::MAX)] {
+            assert!(Package::decode(&with_usr(target, capacity, false)).is_err());
+        }
+    }
+}
 fn name(data: &[u8], start: usize) -> &[u8] {
     let bytes = &data[start..];
     &bytes[..bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len())]
@@ -89,6 +235,7 @@ impl Package {
         let table = slice(&logical, 64, count * 80)?;
         check(table, u16_at(&head, 2)?, "package file table")?;
         let mut flash = None;
+        let mut usr = None;
         for stored in table.chunks_exact(80) {
             let mut e = stored.to_vec();
             enc(&mut e, 0xffff);
@@ -99,9 +246,22 @@ impl Package {
                 let payload = slice(&logical, u32_at(&e, 8)? as usize, u32_at(&e, 12)? as usize)?;
                 check(payload, u16_at(&e, 4)?, "flash.bin")?;
                 flash = Some(payload.to_vec());
+            } else if name(&e, 64) == b"USR" {
+                if usr.is_some() || u16_at(&e, 0)? != 0x32 {
+                    return Err("unsupported or duplicate USR resource".into());
+                }
+                let offset = u32_at(&e, 8)? as usize;
+                let size = u32_at(&e, 12)? as usize;
+                let target = u32_at(&e, 28)? as usize;
+                let capacity = u32_at(&e, 32)? as usize;
+                if size > capacity || u32_at(&e, 16)? as usize > capacity {
+                    return Err("USR payload exceeds its reserved area".into());
+                }
+                let payload = slice(&logical, offset, size)?;
+                usr = Some((offset, u16_at(&e, 4)?, target, capacity, payload));
             }
         }
-        let flash = flash.ok_or("package has no flash.bin")?;
+        let mut flash = flash.ok_or("package has no flash.bin")?;
         if flash.len() > 1024 * 1024 {
             return Err("flash.bin exceeds the FM-1 flash".into());
         }
@@ -176,6 +336,34 @@ impl Package {
         }
         let image = slice(&area, offset, size)?.to_vec();
         check(&image, u16_at(app_entry, 2)?, "app.bin")?;
+        if let Some((offset, expected, target, capacity, payload)) = usr {
+            // Match the guest's reserved-region descriptor before installing
+            // bytes. An auxiliary payload must never overwrite code or keys.
+            let reserved = area[32..0x120].chunks_exact(32).any(|entry| {
+                name(entry, 16) == b"USR"
+                    && entry[12] == 0x92
+                    && u32_at(entry, 4).ok() == Some(target as u32)
+                    && u32_at(entry, 8).ok() == Some(capacity as u32)
+            });
+            let end = target
+                .checked_add(capacity)
+                .ok_or("USR flash range overflow")?;
+            if !reserved || target < 0x4000 + u32_at(area_entry, 8)? as usize || end > 0xff000 {
+                return Err("USR does not match a separate reserved flash area".into());
+            }
+            match resource(payload, key, offset, expected) {
+                Ok(data) => {
+                    flash.resize(flash.len().max(end), 255);
+                    flash[target..target + data.len()].copy_from_slice(&data);
+                }
+                Err(error) => {
+                    // Modified update packages can retain an auxiliary file
+                    // encrypted at its old package offset. Keep application
+                    // boot support, but do not install unverified preset data.
+                    eprintln!("FWSC: {error}; USR preset data was not loaded");
+                }
+            }
+        }
         Ok((Self { flash, key, header }, image))
     }
 
