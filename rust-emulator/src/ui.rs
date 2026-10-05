@@ -31,6 +31,26 @@ const NOTE_KEYS: [egui::Key; 13] = [
     egui::Key::J,
     egui::Key::K,
 ];
+/// Where to draw the 240x240 LCD inside `area` (points) so that no guest pixel
+/// is dropped: never fewer than 240 physical pixels (nearest-neighbour
+/// downscaling skips rows and columns, so "TRACK" read "IRALK"), an integer
+/// scale when it fills at least 3/4 of the area, and snapped to the pixel grid.
+fn lcd_rect(area: Rect, pixels_per_point: f32) -> Rect {
+    const LCD: f32 = 240.;
+    let available = area.width().min(area.height()) * pixels_per_point;
+    let whole = (available / LCD).floor();
+    let pixels = if available < LCD {
+        LCD
+    } else if whole * LCD >= 0.75 * available {
+        whole * LCD
+    } else {
+        available.floor()
+    };
+    let size = pixels / pixels_per_point;
+    let min =
+        ((area.center() - vec2(size, size) / 2.) * pixels_per_point).round() / pixels_per_point;
+    Rect::from_min_size(min, vec2(size, size))
+}
 const INK: Color32 = Color32::from_rgb(190, 194, 193);
 const ACCENT: Color32 = Color32::from_rgb(231, 193, 91);
 
@@ -247,7 +267,7 @@ impl Emulator {
         if let Some(texture) = &self.texture {
             c.painter.image(
                 texture.id(),
-                c.rect([315., 77., 220., 220.]),
+                lcd_rect(c.rect([315., 77., 220., 220.]), ui.ctx().pixels_per_point()),
                 Rect::from_min_max(pos2(0., 0.), pos2(1., 1.)),
                 Color32::WHITE,
             );
@@ -625,6 +645,22 @@ mod tests {
                 .inspect(|machine| machine.cpu.as_ref().unwrap().steps),
             steps
         );
+    }
+    #[test]
+    fn the_lcd_is_never_downscaled_and_sits_on_the_pixel_grid() {
+        let area = |side: f32| Rect::from_min_size(pos2(10.3, 20.7), vec2(side, side));
+        // 1x display, 220-point box: drawn at 240 pixels, not squeezed to 220.
+        assert_eq!(lcd_rect(area(220.), 1.).width(), 240.);
+        // Retina, 220 points = 440 px: 1x would fill only 55%, so use all 440.
+        assert_eq!(lcd_rect(area(220.), 2.).width(), 220.);
+        // Retina, 250 points = 500 px: 2x (480 px) fills 96%: integer scale.
+        assert_eq!(lcd_rect(area(250.), 2.).width(), 240.);
+        for ppp in [1., 1.5, 2.] {
+            let r = lcd_rect(area(233.), ppp);
+            assert!(r.width() * ppp >= 240.);
+            assert_eq!((r.min.x * ppp).fract(), 0.);
+            assert_eq!((r.min.y * ppp).fract(), 0.);
+        }
     }
     #[test]
     #[ignore = "requires FM1_STOCK_FWSC; measures GUI worker latency in release mode"]
