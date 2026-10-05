@@ -875,7 +875,25 @@ fn execute_wide(
         Op::BranchCompareRegister => {
             let lhs = cpu.r[d];
             let rhs = cpu.r[n];
-            let test = match h & 0xfff0 {
+            // x bit 11 compares IEEE singles. Inferred: every use (stock
+            // 0x02021d3c after e53f e120; SDK libVolcEngineRTCLite.a, e.g.
+            // ee02 1801 after e53f 2202 in rtp_packet_history) follows FPU
+            // code, and the integer-only Felucca/SLOOP/Jangada code never
+            // sets it. NaN and signed-zero behaviour are unverified.
+            let float = if x & 0x800 != 0 {
+                let (a, b) = (f32::from_bits(lhs), f32::from_bits(rhs));
+                Some(match h & 0xfff0 {
+                    0xe800 => a == b,
+                    0xe880 => a != b,
+                    0xed00 => a >= b,
+                    0xed80 => a < b,
+                    0xee00 => a > b,
+                    _ => a <= b,
+                })
+            } else {
+                None
+            };
+            let test = float.unwrap_or_else(|| match h & 0xfff0 {
                 0xe800 => lhs == rhs,
                 0xe880 => lhs != rhs,
                 0xe900 => lhs >= rhs,
@@ -886,7 +904,7 @@ fn execute_wide(
                 0xed80 => (lhs as i32) < (rhs as i32),
                 0xee00 => (lhs as i32) > (rhs as i32),
                 _ => (lhs as i32) <= (rhs as i32),
-            };
+            });
             if test {
                 next = next.wrapping_add((signed(x & 511, 9) * 2) as u32);
             }

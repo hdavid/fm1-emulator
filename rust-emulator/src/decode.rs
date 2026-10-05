@@ -415,8 +415,11 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
     } else if matches!(
         h & 0xfff0,
         0xe800 | 0xe880 | 0xe900 | 0xe980 | 0xec00 | 0xec80 | 0xed00 | 0xed80 | 0xee00 | 0xee80
-    ) && x & 0xe00 == 0
+    ) && (x & 0xe00 == 0
+        || (x & 0xe00 == 0x800
+            && matches!(h & 0xfff0, 0xe800 | 0xe880 | 0xed00 | 0xed80 | 0xee00 | 0xee80)))
     {
+        // x bit 11: float compare (only the equality and signed kinds).
         BranchCompareRegister
     } else if matches!(
         h,

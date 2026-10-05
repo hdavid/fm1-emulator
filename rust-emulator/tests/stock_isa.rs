@@ -523,6 +523,20 @@ fn memory_register_add_mode_two_subtracts() {
 }
 
 #[test]
+fn float_compare_branch_orders_singles() {
+    // FM-1_093 0x02021d3c: ee81 e8a5 = if (r14 <= r1) goto +0x14a, float
+    // (x bit 11), with r14 = 0.192f and r1 = 1.0f from the e53f add before.
+    // Negative operands show the float ordering (integer order would invert).
+    for (r14, r1, taken) in [(0.192f32, 1.0f32, true), (2.0, 1.0, false), (-2.0, -1.0, true)] {
+        let mut c = cpu(&[0xee81, 0xe8a5]);
+        c.r[14] = r14.to_bits();
+        c.r[1] = r1.to_bits();
+        c.step().unwrap();
+        assert_eq!(c.pc, if taken { XIP + 4 + 0x14a } else { XIP + 4 }, "{r14} <= {r1}");
+    }
+}
+
+#[test]
 fn register_repeat_with_a_zero_count_skips_its_block() {
     let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);
     c.r[1] = RAM;
