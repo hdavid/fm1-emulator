@@ -8,6 +8,7 @@ pub mod cpu;
 mod crc;
 pub mod devices;
 pub mod firmware;
+mod float;
 pub mod gpio;
 pub mod lcd;
 mod package;

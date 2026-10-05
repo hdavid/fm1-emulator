@@ -141,7 +141,22 @@ pub(crate) fn execute(
         let s = ((x >> 4) & 15) as usize;
         let c = ((x >> 8) & 15) as usize;
         next = pc + 4;
-        if matches!(h & 0xff00, 0xfa00 | 0xfb00) {
+        if h == 0xe53f {
+            let value = crate::float::result(x, &cpu.r).map_err(|reason| Fault::Access {
+                pc,
+                fault: crate::bus::AccessFault {
+                    address: pc,
+                    size: 4,
+                    operation: "floating-point",
+                    reason,
+                },
+            })?;
+            let Some(value) = value else {
+                return Ok(None);
+            };
+            cpu.r[d] = value;
+            op = "float_register";
+        } else if matches!(h & 0xff00, 0xfa00 | 0xfb00) {
             let test = (cpu.r[n] & cpu.r[((h >> 4) & 15) as usize] != 0) == (h & 0x100 != 0);
             if test {
                 next = next.wrapping_add((signed(x, 16) * 2) as u32);
