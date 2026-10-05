@@ -470,10 +470,12 @@ fn execute_wide(
             };
         }
         Op::ShiftRegisterExtended => {
+            // Quarkslab pi32v2 imm1619: 0 and 1 lsl, 2 lsr, 3 asr (qasr).
             let shift = cpu.r[c];
-            cpu.r[d] = match x & 3 {
-                0 => cpu.r[s].checked_shl(shift).unwrap_or(0),
+            cpu.r[d] = match x & 15 {
+                0 | 1 => cpu.r[s].checked_shl(shift).unwrap_or(0),
                 2 => cpu.r[s].checked_shr(shift).unwrap_or(0),
+                3 => ((cpu.r[s] as i32) >> shift.min(31)) as u32,
                 _ => return Err(unsupported(pc, h)),
             };
             name = "shift_register_extended";
