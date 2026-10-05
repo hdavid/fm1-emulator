@@ -691,6 +691,11 @@ pub(crate) fn execute(
             };
             cpu.r[n] = cpu.arithmetic(cpu.r[d], value, false, 0);
             op = "add_immediate";
+        } else if h == 0xe8f0 && x & 0xe003 == 0 {
+            // Vendor r3 assembler: aligned signed 13-bit stack adjustment.
+            // Stock allocates/reclaims its 616-byte filesystem frame here.
+            cpu.sr[14] = cpu.sr[14].wrapping_add(signed(x, 13) as u32);
+            op = "add_sp_extended";
         } else if h == 0xe8f8 {
             cpu.r[d] = cpu.sr[14].wrapping_add(x & 4095);
             op = "add_stack_extended";

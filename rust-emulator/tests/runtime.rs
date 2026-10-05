@@ -8,6 +8,42 @@ fn cpu(words: &[u16]) -> Cpu {
     )
 }
 #[test]
+fn large_stack_frames_preserve_flags_and_return_to_the_caller() {
+    // Vendor r3 assembly, including the stock filesystem's 616-byte frame.
+    let mut c = cpu(&[
+        0x0410, 0xe8f0, 0x1d98, 0x2080, 0x2001, 0xe8f0, 0x0268, 0x0400,
+    ]);
+    c.sr[14] = RAM + 1024;
+    c.sr[3] = XIP + 16;
+    c.sr[5] = 0xa5a5_000f;
+    c.r[0] = 0x1234_5678;
+    for _ in 0..6 {
+        c.step().unwrap();
+    }
+    assert_eq!(c.r[1], c.r[0]);
+    assert_eq!(c.sr[14], RAM + 1024);
+    assert_eq!(c.sr[5], 0xa5a5_000f);
+    assert_eq!(c.pc, XIP + 16);
+
+    for (word, delta) in [
+        (0x1000, -4096i32),
+        (0x1d80, -640),
+        (0x0280, 640),
+        (0x0ffc, 4092),
+    ] {
+        let mut c = cpu(&[0xe8f0, word]);
+        c.sr[14] = 0;
+        c.sr[5] = 15;
+        c.step().unwrap();
+        assert_eq!(c.sr[14], delta as u32);
+        assert_eq!(c.sr[5], 15);
+        assert_eq!(c.pc, XIP + 4);
+    }
+    for word in [0x2000, 0x0269] {
+        assert!(cpu(&[0xe8f0, word]).step().is_err());
+    }
+}
+#[test]
 fn scheduler_restores_the_task_frame_and_stack_pointer_banks() {
     let mut c = cpu(&[0x04e8, 0x04a8, 0x1442, 0x1443, 0x1440, 0x1441]);
     c.sr[14] = RAM + 64;
@@ -157,8 +193,7 @@ fn stock_uart_pin_routing_preserves_the_lcd_and_other_map_bits() {
     // Original startup at 0x02023b6a: clear/select UT1 RX input channel,
     // then route input channel 1 from PH8, using high base register r8.
     let mut c = cpu(&[
-        0xefc2, 0x8080, 0xefc2, 0x8070, 0xef02, 0x8050,
-        0xefc1, 0x8d7c, 0xef01, 0x8d44,
+        0xefc2, 0x8080, 0xefc2, 0x8070, 0xef02, 0x8050, 0xefc1, 0x8d7c, 0xef01, 0x8d44,
     ]);
     c.r[8] = 0x51020;
     c.bus.write(0x51020, 0x10, 4).unwrap();
