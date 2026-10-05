@@ -57,7 +57,37 @@ fn timer5_prescaler_period_and_interrupt_masks() {
 }
 
 #[test]
-fn irq_priority_register_tracks_the_handler_and_restores_on_return() {
+fn software_irq_context_matches_all_eight_measured_priorities() {
+    for priority in 0..8 {
+        let mut c = Cpu::new(Bus::new(vec![0x61, 0, 0, 0]).unwrap(), fm1_emu::XIP);
+        let handler = fm1_emu::RAM + 512;
+        c.bus.write(handler, 0x0081, 2).unwrap();
+        c.bus.write(0x01c7fe00 + 120 * 4, handler, 4).unwrap();
+        c.bus.write(IRQ_CONFIG + 15 * 4, 1 | priority << 1, 4).unwrap();
+        c.bus.write(0x1eef1a0, 1, 4).unwrap();
+        c.sr[11] = 0x100;
+        c.sr[14] = USER_STACK;
+        c.sr[13] = SYSTEM_STACK;
+        c.step().unwrap();
+        assert_eq!(c.sr[11], priority << 24 | 0x00780300 | 1 << priority);
+        assert_eq!(c.bus.read(0x1eef1a8, 4).unwrap(), 0);
+        c.bus.write(0x1eef1a4, 1, 4).unwrap();
+        c.step().unwrap();
+        c.step().unwrap(); // nop after return; source/priority remain latched.
+        assert_eq!(c.sr[11], priority << 24 | 0x00780700);
+    }
+    let mut bus = Bus::new(vec![0; 4]).unwrap();
+    bus.write(IRQ_CONFIG + 15 * 4, 0x55, 4).unwrap();
+    bus.write(0x1eef1a0, 3, 4).unwrap();
+    assert_eq!(bus.pending_irq(0x100), Some(120)); // Equal priorities: lower source first.
+    bus.write(IRQ_CONFIG + 15 * 4, 0xb5, 4).unwrap();
+    assert_eq!(bus.pending_irq(0x100), Some(121));
+    bus.write(0x1eef1a8, 6, 4).unwrap();
+    assert_eq!(bus.pending_irq(0x100), None);
+}
+
+#[test]
+fn irq_context_matches_hardware_without_overwriting_the_guest_mask() {
     let mut c = Cpu::new(Bus::new(vec![0x61, 0, 0, 0]).unwrap(), fm1_emu::XIP);
     let handler = fm1_emu::RAM + 512;
     c.bus.write(handler, 0x0081, 2).unwrap();
@@ -69,12 +99,12 @@ fn irq_priority_register_tracks_the_handler_and_restores_on_return() {
     c.sr[13] = SYSTEM_STACK;
     c.step().unwrap();
     assert_eq!(c.pc, handler);
-    assert_eq!(c.bus.read(0x1eef1a8, 4).unwrap(), 5);
-    assert_eq!(c.sr[11] & 255, 127);
+    assert_eq!(c.bus.read(0x1eef1a8, 4).unwrap(), 0);
+    assert_eq!(c.sr[11], 0x057f0320);
     c.bus.write(0x1eef1a4, 128, 4).unwrap();
     c.step().unwrap();
     assert_eq!(c.bus.read(0x1eef1a8, 4).unwrap(), 0);
-    assert_eq!(c.sr[11] & 0x3ff, 0x300);
+    assert_eq!(c.sr[11], 0x057f0700);
 }
 
 #[test]

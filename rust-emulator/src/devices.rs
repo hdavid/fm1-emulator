@@ -392,7 +392,12 @@ impl Devices {
         .filter(|(source, pending)| {
             *pending && self.irq_priority_for(*source, icfg, core).is_some()
         })
-        .max_by_key(|(source, _)| self.irq_priority_for(*source, icfg, core).unwrap())
+        .max_by_key(|(source, _)| {
+            (
+                self.irq_priority_for(*source, icfg, core).unwrap(),
+                std::cmp::Reverse(*source),
+            )
+        })
         .map(|(source, _)| source)
     }
     pub fn irq_priority(&self, source: usize, icfg: u32) -> Option<u32> {
@@ -400,7 +405,9 @@ impl Devices {
     }
     pub(crate) fn irq_priority_for(&self, source: usize, icfg: u32, core: usize) -> Option<u32> {
         let bits = self.irq_config[core][source >> 3] >> ((source & 7) * 4);
-        (icfg & 0x100 != 0 && bits & 1 != 0).then_some((bits >> 1) & 7)
+        let priority = (bits >> 1) & 7;
+        (icfg & 0x100 != 0 && bits & 1 != 0 && priority >= self.priority_mask[core])
+            .then_some(priority)
     }
 }
 

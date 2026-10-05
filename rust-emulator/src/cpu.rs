@@ -149,12 +149,10 @@ pub struct Cpu {
     irq_repeat: Option<Repeat>,
     bus_locked: bool,
     secondary: Option<Core>,
-    irq_priority_mask: u32,
 }
 
 // Per-core context. Memory and devices remain on the one shared bus.
 struct Core {
-    irq_priority_mask: u32,
     r: [u32; 16],
     sr: [u32; 16],
     pc: u32,
@@ -171,7 +169,6 @@ impl Core {
         let mut sr = [0; 16];
         sr[6] = 1;
         Self {
-            irq_priority_mask: 0,
             r: [0; 16],
             sr,
             pc,
@@ -197,7 +194,6 @@ impl Core {
         swap(&mut self.repeat, &mut cpu.repeat);
         swap(&mut self.irq_repeat, &mut cpu.irq_repeat);
         swap(&mut self.bus_locked, &mut cpu.bus_locked);
-        swap(&mut self.irq_priority_mask, &mut cpu.irq_priority_mask);
     }
 }
 
@@ -243,7 +239,6 @@ impl Cpu {
             irq_repeat: None,
             bus_locked: false,
             secondary: None,
-            irq_priority_mask: 0,
         }
     }
 
@@ -777,8 +772,7 @@ impl Cpu {
             self.predicate_skip = self.irq_predicate.take();
             self.repeat = self.irq_repeat.take();
             self.interrupts_enabled = true;
-            self.sr[11] = (self.sr[11] & !255) | 0x200;
-            self.write(0x1eef1a8 + self.sr[6] * 0x200, self.irq_priority_mask)?;
+            self.sr[11] = (self.sr[11] & !255) | 0x600;
             op = "rti";
         } else if h == 0x0060 {
             self.interrupts_enabled = false;
@@ -818,14 +812,11 @@ impl Cpu {
             return Ok(());
         }
         if let Some(source) = self.bus.pending_irq_for(self.sr[11], self.sr[6] as usize) {
-            let mask_register = 0x1eef1a8 + self.sr[6] * 0x200;
             let priority = self
                 .bus
                 .devices
                 .irq_priority_for(source, self.sr[11], self.sr[6] as usize)
                 .unwrap();
-            self.irq_priority_mask = self.read(mask_register, 4)?;
-            self.write(mask_register, priority)?;
             let handler = self.read(0x01c7_fe00 + source as u32 * 4, 4)?;
             self.bus
                 .fetch(handler)
@@ -834,11 +825,16 @@ impl Cpu {
             self.sr[12] = self.sr[14];
             self.sr[14] = self.sr[13];
             self.pc = handler;
-            self.sr[11] = (self.sr[11] & !0x2ff) | source as u32;
+            // FM-1_989: ICFG records source/priority above the active
+            // priority bitmap. Entry preserves the global enable and clears
+            // thread mode; INTPRI is a guest mask, not the active priority.
+            self.sr[11] = (self.sr[11] & !0x077f04ff)
+                | ((source as u32) << 16)
+                | (priority << 24)
+                | (1 << priority);
             self.in_interrupt = true;
             self.irq_predicate = self.predicate_skip.take();
             self.irq_repeat = self.repeat.take();
-            self.interrupts_enabled = false;
             self.irq_entries += 1;
         }
         Ok(())
