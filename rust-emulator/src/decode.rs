@@ -446,6 +446,7 @@ fn conditional_kind(kind: u32) -> bool {
             | 0xd9
             | 0xda
             | 0xdb
+            | 0xe1
             | 0xe9
             | 0xeb
     )

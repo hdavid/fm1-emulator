@@ -192,6 +192,28 @@ fn register_repeat_runs_its_block_count_times_even_when_the_body_reuses_the_regi
 }
 
 #[test]
+fn signed_greater_than_register_conditional_guards_its_then_block() {
+    // FM-1_093 0x02002bea: ee15 4200 ed50 5097 1652 =
+    // if (r5 > r2) { h[r9+6] = r5; mov } with r2 = h[r9+6] (s) = -1 just
+    // loaded. Kind 0xe1 is the register form of the signed greater-than
+    // test, matching the compare-branch family where 0xee00 is signed >.
+    for (r5, taken) in [(3u32, true), (0xffff_fffe, false), (0xffff_ffff, false)] {
+        let mut c = cpu(&[0xee15, 0x4200, 0xed50, 0x5097, 0x1652, 0x0000]);
+        c.r[2] = 0xffff_ffff;
+        c.r[5] = r5;
+        c.r[9] = RAM;
+        c.bus.write(RAM + 6, 0x7777, 2).unwrap();
+        while c.pc < XIP + 10 {
+            c.step().unwrap();
+            assert!(c.steps <= 3);
+        }
+        assert_eq!(c.pc, XIP + 10, "r5 = {r5:#x}");
+        let stored = c.bus.read(RAM + 6, 2).unwrap();
+        assert_eq!(stored, if taken { r5 & 0xffff } else { 0x7777 }, "r5 = {r5:#x}");
+    }
+}
+
+#[test]
 fn register_repeat_with_a_zero_count_skips_its_block() {
     let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);
     c.r[1] = RAM;

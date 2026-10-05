@@ -657,6 +657,9 @@ fn execute_wide(
                 0xc9..=0xcb => lhs <= rhs,
                 0xd1..=0xd3 => (lhs as i32) >= (rhs as i32),
                 0xd9..=0xdb => (lhs as i32) < (rhs as i32),
+                // Same condition order as the compare-branches: 0xee00 is
+                // signed >, 0xee80 signed <= (FM-1_093 0x02002bea: ee15).
+                0xe1 => (lhs as i32) > (rhs as i32),
                 _ => (lhs as i32) <= (rhs as i32),
             };
             next = cpu.conditional(test, x)?;
