@@ -562,6 +562,33 @@ fn execute_wide(
             cpu.r[d + 1] = (value >> 32) as u32;
             name = "shift_pair_register";
         }
+        Op::FloatOp => {
+            // e53f, x = d c s op on IEEE single bits: rD = rS op rC with
+            // 0 add, 1 sub, 2 mul, 3 div (SDK rx_net_samples_avg: sum / n),
+            // 5 min, 6 max (clamp pairs), 7 rD += rS*rC, 8 rD -= rS*rC
+            // (stock complex multiply at 0x0208bd30). Op 15 is unary on rC
+            // with the sub-operation in s: 8 (float)i32, 9 (float)u32,
+            // 1 (i32) truncation. Rounding of 7/8 (fused or not), NaN
+            // ordering in min/max and conversion saturation are unverified.
+            let fl = |v: u32| f32::from_bits(v);
+            let (a, b) = (fl(cpu.r[s]), fl(cpu.r[c]));
+            cpu.r[d] = match x & 15 {
+                0 => (a + b).to_bits(),
+                1 => (a - b).to_bits(),
+                2 => (a * b).to_bits(),
+                3 => (a / b).to_bits(),
+                5 => a.min(b).to_bits(),
+                6 => a.max(b).to_bits(),
+                7 => (fl(cpu.r[d]) + a * b).to_bits(),
+                8 => (fl(cpu.r[d]) - a * b).to_bits(),
+                _ => match (x >> 4) & 15 {
+                    8 => (cpu.r[c] as i32 as f32).to_bits(),
+                    9 => (cpu.r[c] as f32).to_bits(),
+                    _ => b as i32 as u32,
+                },
+            };
+            name = "float_op";
+        }
         Op::BranchLong => {
             let value = match h & 0x60 {
                 0 => x & 4095,

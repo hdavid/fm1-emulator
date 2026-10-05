@@ -105,6 +105,7 @@ pub(crate) enum Op {
     ShiftExtended,
     ShiftPair,
     ShiftPairRegister,
+    FloatOp,
     BranchLong,
     LogicThree,
     StoreRegisterList,
@@ -361,6 +362,12 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         // As e1c8 (amount in rC, mode in bits 0-1) on the pair rD+1:rD;
         // only the even-pair, zero-source forms seen in the stock image.
         ShiftPairRegister
+    } else if h == 0xe53f
+        && (matches!(x & 15, 0 | 1 | 2 | 3 | 5 | 6 | 7 | 8) || matches!(x & 255, 0x1f | 0x8f | 0x9f))
+    {
+        // Single-precision FPU (SDK -mfprev1); only the operations whose
+        // meaning the stock image and SDK objects show.
+        FloatOp
     } else if h & 0xff80 == 0xff00 && matches!(h & 15, 0 | 1 | 2 | 3 | 8 | 9 | 10 | 11 | 12 | 13) {
         BranchLong
     } else if h == 0xe190 && x & 15 <= 3 {

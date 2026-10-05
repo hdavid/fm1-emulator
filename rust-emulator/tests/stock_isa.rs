@@ -390,6 +390,70 @@ fn signed_greater_than_immediate_conditional_keeps_non_negative_bytes() {
     }
 }
 
+fn f(value: f32) -> u32 {
+    value.to_bits()
+}
+
+#[test]
+fn single_float_arithmetic_follows_the_sdk_library_patterns() {
+    // e53f x = d c s op: rD = rS op rC. AC79 SDK libVolcEngineRTCLite.a
+    // (fprev1 ELF objects): rx_net_samples_avg is r1 = (float)r1
+    // (e53f 119f); r0 = r0 / r1 (e53f 0103). Stock FM-1_093 clamps with
+    // r0 = max(r0, r3); r4 = 100.0f; r0 = min(r0, r4) (e53f 0306, 0405 at
+    // 0x0201ac16), and its complex multiply (0x0208bd30) is r8 = r4*r6;
+    // r9 = r6*r5; r8 -= r5*r7 (e53f 8758); r9 += r4*r7 (e53f 9747).
+    let mut c = cpu(&[0xe53f, 0x119f, 0xe53f, 0x0103]);
+    c.r[0] = f(10.0);
+    c.r[1] = 4;
+    c.step().unwrap();
+    assert_eq!(c.r[1], f(4.0));
+    c.step().unwrap();
+    assert_eq!(c.r[0], f(2.5));
+    for (x, clamped) in [(-3.0f32, 0.0f32), (42.5, 42.5), (250.0, 100.0)] {
+        let mut c = cpu(&[0xe53f, 0x0306, 0xe53f, 0x0405]);
+        c.r[0] = f(x);
+        c.r[3] = f(0.0);
+        c.r[4] = f(100.0);
+        c.step().unwrap();
+        c.step().unwrap();
+        assert_eq!(c.r[0], f(clamped), "x = {x}");
+    }
+    let (a, b, cc, d) = (1.5f32, -2.0f32, 0.5f32, 3.0f32);
+    let mut c = cpu(&[0xe53f, 0x8642, 0xe53f, 0x9562, 0xe53f, 0x8758, 0xe53f, 0x9747]);
+    c.r[4] = f(a);
+    c.r[5] = f(b);
+    c.r[6] = f(cc);
+    c.r[7] = f(d);
+    for _ in 0..4 {
+        c.step().unwrap();
+    }
+    assert_eq!(c.r[8], f(a * cc - b * d));
+    assert_eq!(c.r[9], f(b * cc + a * d));
+    let mut c = cpu(&[0xe53f, 0x0101, 0xe53f, 0x0100]); // r0 = r0 - r1; r0 = r0 + r1
+    c.r[0] = f(1.0);
+    c.r[1] = f(0.25);
+    c.step().unwrap();
+    assert_eq!(c.r[0], f(0.75));
+    c.step().unwrap();
+    assert_eq!(c.r[0], f(1.0));
+}
+
+#[test]
+fn float_integer_conversions_select_signedness_by_sub_operation() {
+    // 0x8f signed and 0x9f unsigned int -> float (stock 0x02004ade converts
+    // the result of an unsigned min with 9f); 0x1f float -> int, truncating.
+    let mut c = cpu(&[0xe53f, 0x008f, 0xe53f, 0x119f, 0xe53f, 0x221f]);
+    c.r[0] = 0xffff_fffe;
+    c.r[1] = 0xffff_fffe;
+    c.r[2] = f(-7.75);
+    c.step().unwrap();
+    c.step().unwrap();
+    c.step().unwrap();
+    assert_eq!(c.r[0], f(-2.0));
+    assert_eq!(c.r[1], f(4294967294.0));
+    assert_eq!(c.r[2], (-7i32) as u32);
+}
+
 #[test]
 fn register_repeat_with_a_zero_count_skips_its_block() {
     let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);

@@ -171,6 +171,12 @@ fn run() -> Result<(), String> {
     if cpu.bus.devices.timer4.lsb_stub_used || cpu.bus.devices.timer5.lsb_stub_used {
         eprintln!("STUB timer: lsb_clk source counted at the oscillator rate");
     }
+    if cpu.bus.spi2.transfers > 0 {
+        eprintln!(
+            "STUB SPI2 (no device): {} transfers",
+            cpu.bus.spi2.transfers
+        );
+    }
     let radio = cpu.bus.radio.accesses.get();
     if radio > 0 {
         eprintln!("STUB radio (JL_WL, no RF emulated): {radio} register accesses");

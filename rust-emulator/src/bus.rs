@@ -38,6 +38,7 @@ pub struct Bus {
     resample: crate::resample::Resampler,
     rng: crate::rng::Rng,
     pub radio: crate::radio::Radio,
+    pub spi2: crate::spi2::Spi2,
     code: crate::code_cache::CodeCache,
     /// NOR generation the code cache was last synchronized with.
     nor_generation: u64,
@@ -79,6 +80,7 @@ impl Bus {
             resample: Default::default(),
             rng: Default::default(),
             radio: Default::default(),
+            spi2: Default::default(),
             code: Default::default(),
             nor_generation: 0,
             mmio_stats: Default::default(),
@@ -169,6 +171,18 @@ impl Bus {
             }
             if let Some(value) = self.crc.read(address) {
                 return Ok(value);
+            }
+            if crate::spi2::Spi2::contains(address) {
+                return if size == 4 && address.is_multiple_of(4) {
+                    Ok(self.spi2.read(address))
+                } else {
+                    Err(Self::fault(
+                        address,
+                        size,
+                        operation,
+                        "SPI registers require word accesses",
+                    ))
+                };
             }
             if crate::radio::Radio::contains(address) {
                 return match (size, self.radio.read(address)) {
@@ -327,6 +341,18 @@ impl Bus {
             return Ok(());
         }
         if self.crc.write(address, value).is_some() {
+            return Ok(());
+        }
+        if crate::spi2::Spi2::contains(address) {
+            if size != 4 {
+                return Err(Self::fault(
+                    address,
+                    size,
+                    "write",
+                    "SPI registers require word accesses",
+                ));
+            }
+            self.spi2.write(address, value);
             return Ok(());
         }
         if crate::radio::Radio::contains(address) {
