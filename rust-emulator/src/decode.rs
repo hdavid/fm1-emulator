@@ -137,6 +137,13 @@ pub(crate) enum Op {
     WordPostincrementStore,
     WordPostincrementLoad,
     MemoryIndexed,
+    // Packed 16-bit forms (simd.rs).
+    HalfAddSubtract,
+    HalfMultiply,
+    HalfMultiplyWord,
+    Pack,
+    DualAddSubtract,
+    DualMultiply,
     Unsupported,
 }
 
@@ -451,6 +458,27 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
         WordPostincrementLoad
     } else if matches!(h, 0xecd8 | 0xedd8 | 0xeed8) {
         MemoryIndexed
+    } else {
+        decode_simd(h, x)
+    }
+}
+
+/// The packed 16-bit forms of simd.rs: only the signed-saturating ones whose
+/// mode bits the vendor objdump prints (other bits stay unsupported).
+fn decode_simd(h: u32, x: u32) -> Op {
+    use Op::*;
+    if h == 0xe500 {
+        HalfAddSubtract
+    } else if matches!(h, 0xe541 | 0xe543) && x & 1 == 0 {
+        HalfMultiply
+    } else if matches!(h, 0xe551 | 0xe553) && x & 9 == 0 {
+        HalfMultiplyWord
+    } else if h == 0xe404 && x & 9 == 0 {
+        Pack
+    } else if h & 0xfff3 == 0xe511 {
+        DualAddSubtract
+    } else if h & 0xfff1 == 0xe561 && x & 12 == 0 {
+        DualMultiply
     } else {
         Unsupported
     }

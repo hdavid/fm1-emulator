@@ -5,6 +5,7 @@
 use crate::code_cache::Operands;
 use crate::cpu::{signed, Cpu, Fault, Step};
 use crate::decode::Op;
+use crate::simd;
 
 /// A deferred load or store: (register, base, address, size, store,
 /// sign-extend, updated base).
@@ -1061,6 +1062,59 @@ fn execute_wide(cpu: &mut Cpu, op: Op, h: u32, pc: u32, code: Operands) -> Step<
                 None,
             ));
             name = "memory_indexed";
+        }
+        Op::HalfAddSubtract => {
+            let (a, b) = (
+                simd::half(cpu.r[s], x & 4 != 0),
+                simd::half(cpu.r[c], x & 2 != 0),
+            );
+            let v = if x & 1 == 0 { a + b } else { a - b };
+            cpu.r[d] = simd::set_half(cpu.r[d], x & 8 != 0, v);
+            name = if x & 1 == 0 {
+                "half_add"
+            } else {
+                "half_subtract"
+            };
+        }
+        Op::HalfMultiply => {
+            let (a, b) = (
+                simd::half(cpu.r[s], x & 4 != 0),
+                simd::half(cpu.r[c], x & 2 != 0),
+            );
+            let v = simd::mul16(a, b, h & 2 != 0);
+            cpu.r[d] = simd::set_half(cpu.r[d], x & 8 != 0, v);
+            name = "half_multiply";
+        }
+        Op::HalfMultiplyWord => {
+            let (a, b) = (
+                simd::half(cpu.r[s], x & 4 != 0),
+                simd::half(cpu.r[c], x & 2 != 0),
+            );
+            cpu.r[d] = simd::mul32(a, b, h & 2 != 0);
+            name = "half_multiply_word";
+        }
+        Op::Pack => {
+            let (a, b) = (
+                simd::half(cpu.r[s], x & 4 != 0),
+                simd::half(cpu.r[c], x & 2 != 0),
+            );
+            cpu.r[d] = simd::join(a, b);
+            name = "pack";
+        }
+        Op::DualAddSubtract => {
+            let (a0, a1) = simd::lanes(cpu.r[s], x & 2 != 0, x & 1 != 0);
+            let (b0, b1) = simd::lanes(cpu.r[c], h & 8 != 0, h & 4 != 0);
+            let first = if x & 8 == 0 { a0 + b0 } else { a0 - b0 };
+            let second = if x & 4 == 0 { a1 + b1 } else { a1 - b1 };
+            cpu.r[d] = simd::join(simd::sat16(first as i64), simd::sat16(second as i64));
+            name = "dual_add_subtract";
+        }
+        Op::DualMultiply => {
+            let (a0, a1) = simd::lanes(cpu.r[s], x & 2 != 0, x & 1 != 0);
+            let (b0, b1) = simd::lanes(cpu.r[c], h & 8 != 0, h & 4 != 0);
+            let x2 = h & 2 != 0;
+            cpu.r[d] = simd::join(simd::mul16(a0, b0, x2), simd::mul16(a1, b1, x2));
+            name = "dual_multiply";
         }
         _ => return Err(unsupported(pc, h)),
     }
