@@ -583,9 +583,13 @@ impl Cpu {
                 self.r[a] = self.read(address, 4)?;
                 op = "load32";
             }
-        } else if h == 0xe8d8 || h == 0xe8d4 {
+        } else if matches!(h, 0xe8d4 | 0xe8d5 | 0xe8d8 | 0xe8d9) {
             let mask = self.read(pc + 2, 2)?;
-            if h == 0xe8d8 {
+            next = pc + 4;
+            if h & 4 == 0 {
+                if h & 1 != 0 {
+                    self.push(self.sr[3])?;
+                }
                 for n in (0..16).rev() {
                     if mask & (1 << n) != 0 {
                         self.push(self.r[n])?;
@@ -598,9 +602,11 @@ impl Cpu {
                         self.r[n] = self.pop()?;
                     }
                 }
+                if h & 1 != 0 {
+                    next = self.pop()?;
+                }
                 op = "pop_mask";
             }
-            next = pc + 4;
         } else if h & 0xfff0 == 0x0460 {
             let boundary = (h & 15) as usize;
             let range = if boundary < 4 {

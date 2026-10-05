@@ -1304,3 +1304,32 @@ fn float_arithmetic_and_conversions_match_the_fm1_986_capture() {
         assert_eq!(c.pc, XIP + 4);
     }
 }
+
+#[test]
+fn masked_call_frame_restores_noncontiguous_registers_and_returns() {
+    let mut c = cpu(&[0xe8d9, 0x0df0, 0xe8d5, 0x0df0]);
+    c.sr[14] = RAM + 128;
+    c.sr[3] = XIP + 8;
+    for i in 0..16 {
+        c.r[i] = 0x12340000 + i as u32;
+    }
+    c.step().unwrap();
+    assert_eq!(c.sr[14], RAM + 96);
+    assert_eq!(c.bus.read(RAM + 96, 4).unwrap(), 0x12340004);
+    assert_eq!(c.bus.read(RAM + 120, 4).unwrap(), 0x1234000b);
+    assert_eq!(c.bus.read(RAM + 124, 4).unwrap(), XIP + 8);
+    c.r.fill(0);
+    c.step().unwrap();
+    for i in 0..16 {
+        assert_eq!(
+            c.r[i],
+            if 0x0df0 & (1 << i) != 0 {
+                0x12340000 + i as u32
+            } else {
+                0
+            }
+        );
+    }
+    assert_eq!(c.sr[14], RAM + 128);
+    assert_eq!(c.pc, XIP + 8);
+}
