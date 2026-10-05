@@ -2,7 +2,7 @@
 // Probe decodings mirror emu.py, checked against vendor objdump and the FM-1.
 // Startup-only additions use the pinned Quarkslab pi32v2 reference; see README.
 use crate::code_cache::Operands;
-use crate::decode::{decode, decode_wide, is_parallel, primary, Op};
+use crate::decode::{decode, decode_wide, is_parallel, primary, skip_length, Op};
 use crate::devices::OSC_TICKS_PER_INSTRUCTION;
 use crate::{
     bus::{AccessFault, Bus},
@@ -330,7 +330,7 @@ impl Cpu {
     }
 
     #[inline]
-    fn push(&mut self, value: u32) -> Step<()> {
+    pub(crate) fn push(&mut self, value: u32) -> Step<()> {
         let address = self.sr[14].wrapping_sub(4);
         self.write(address, value)?;
         self.sr[14] = address;
@@ -338,7 +338,7 @@ impl Cpu {
     }
 
     #[inline]
-    fn pop(&mut self) -> Step<u32> {
+    pub(crate) fn pop(&mut self) -> Step<u32> {
         let value = self.read(self.sr[14], 4)?;
         self.sr[14] = self.sr[14].wrapping_add(4);
         Ok(value)
@@ -721,24 +721,11 @@ impl Cpu {
         let else_count = (counts >> 12) & 3;
         for i in 0..then_count + else_count {
             let h = self.read(cursor, 2)?;
-            let length = if matches!(h & 0xffe0, 0xffc0 | 0xffe0) || h == 0xff80 {
-                6
-            } else if h >> 13 == 7 {
-                4
-            } else {
-                2
-            };
-            cursor += length;
+            cursor += skip_length(h);
             // A parallel pair counts as one conditional instruction bundle.
             if h >> 13 == 6 || h & 0xf800 == 0xf000 {
                 let following = self.read(cursor, 2)?;
-                cursor += if matches!(following & 0xffe0, 0xffc0 | 0xffe0) || following == 0xff80 {
-                    6
-                } else if following >> 13 == 7 {
-                    4
-                } else {
-                    2
-                };
+                cursor += skip_length(following);
             }
             if i + 1 == then_count {
                 then_end = cursor;
@@ -842,19 +829,9 @@ impl Cpu {
             }
             Op::MovMask => {
                 let extra = self.operand(code.x, pc + 2)?;
-                let byte = extra & 255;
-                let mode = (extra >> 10) & 3;
-                let value = if mode != 0 {
-                    ((0x80 | (extra & 127)) << (32 - mode * 8)) >> ((extra >> 7) & 7)
-                } else if extra & 0x0f00 == 0x0300 {
-                    byte * 0x0101_0101
-                } else if extra & 0x0f00 == 0x0100 {
-                    (byte << 24) | (byte << 8)
-                } else if extra & 0x0f00 == 0 {
-                    byte
-                } else {
-                    return Err(Fault::Unsupported { pc, word: h as u16 }.into());
-                };
+                // The packed immediate of the other forms (JieLi objdump:
+                // e060 3164 is r3 = 0x640064, 3264 is r3 = 0x64006400).
+                let value = crate::extended::packed(extra);
                 self.r[((extra >> 12) & 15) as usize] = value;
                 next = pc + 4;
                 name = "mov_mask";
@@ -1060,30 +1037,24 @@ impl Cpu {
                 }
                 name = "move_stack_pointer";
             }
-            Op::PushIrqFrame => {
-                // 0x04c0 | mask over {reti 0, rets 3, psr 5}, highest first
-                // (04e9 = {psr, rets, reti}; 04e1 = {psr, reti}).
-                for index in [5, 3, 0] {
+            Op::PushSpecial => {
+                // 0x04c0 | mask over {reti 0, rete 1, retx 2, rets 3, sr4 4,
+                // psr 5}, highest first, so the lowest is at the lowest
+                // address (04e9 = {psr, rets, reti}; fm1_vec.S stubs: 04c8 =
+                // {rets}).
+                for index in (0..6).rev() {
                     if h & (1 << index) != 0 {
                         self.push(self.sr[index])?;
                     }
                 }
-                name = "push_irq_frame";
-            }
-            Op::PopIrqFrame => {
-                for index in [0, 3, 5] {
-                    if h & (1 << index) != 0 {
-                        self.sr[index] = self.pop()?;
-                    }
-                }
-                name = "pop_irq_frame";
+                name = "push_special";
             }
             Op::PopSpecial => {
-                // pop {reti, rete, retx, rets}: bit n restores sr[n], lowest
-                // first (SLOOP's tail calls: pop {rets}; goto f).
-                for n in 0..4 {
-                    if h & (1 << n) != 0 {
-                        self.sr[n] = self.pop()?;
+                // 0x0480 | the same mask, lowest first (SLOOP's tail calls:
+                // pop {rets}; goto f; irq exit: 04a9 = {psr, rets, reti}).
+                for index in 0..6 {
+                    if h & (1 << index) != 0 {
+                        self.sr[index] = self.pop()?;
                     }
                 }
                 name = "pop_special";

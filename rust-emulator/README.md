@@ -193,6 +193,40 @@ register mappings were checked against the Apache-2.0
 [Quarkslab pi32v2 reference](https://github.com/quarkslab/ghidra-jieli/tree/e1bd0707874b77b759401555d24839ad43af1267/data/languages).
 New CPU/peripheral behavior needs separate hardware validation.
 
+### Instruction coverage scan
+
+`scripts/op-scan.sh [--out DIR] FIRMWARE...` (Docker and the JieLi toolchain,
+as `scripts/pi32-objdump.sh`) disassembles each firmware with the vendor objdump
+and runs `examples/op_scan` on the listing: every instruction objdump decodes is
+classified by the interpreter's decoder (`fm1_emu::describe`) and executed once
+on a scratch CPU. The report groups, by encoding, the instructions the
+interpreter decodes as unsupported, rejects when executing, advances over with
+another length than objdump, or would skip in a conditional block with another
+length. An ELF is split into code by its STT_FUNC symbols; a `.fwsc` or raw
+image by recursive descent from the entry (branch and call targets, tbb/tbh
+tables, pointers to function prologues), with unreached clean runs and data
+reported separately. `--check-against ELF` (op_scan) measures that heuristic
+against the ELF the image was built from, and `--classes FILE` writes every
+instruction's class.
+
+objdump runs with `-mattr=+fprev1` (`PI32_OBJDUMP_FLAGS`): without it the FPU
+instructions (`e53f`, the `iff` compares) are `<unknown>`. For an image, the
+scan boots it in the emulator (`--boot-steps`, default 5M; 0 disables) and
+matches RAM against the image to find the code startup copies to RAM, so
+branches into RAM code and code pointers to it are followed. The report also
+flags, inside code, halfwords objdump cannot decode (`vendor-unknown`) and
+`??` predicates (`vendor-ambiguous`), with what the interpreter does there.
+
+Reliability, measured against the ELFs of four SLOOP builds (sloop,
+sloop-merged, sloop-dx7, sloop-ui) and their `.fwsc`: every reachable
+instruction is an instruction of the ELF (100%), and reachable covers
+99.5% of the ELF's instructions (flash and RAM code; the rest is a few
+functions called only through computed pointers, such as `srec_finish`).
+The unreached clean runs are 0.7% code and the rest is data (none of their
+findings fall on an ELF instruction); likely data is 0% code. Stock
+firmware has no ELF to check against; there, only the reachable class
+should be read as code.
+
 ## Agreed foundation checklist
 
 The completion criterion is five of these ten foundations exercised by booted

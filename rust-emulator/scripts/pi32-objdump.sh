@@ -9,7 +9,11 @@
 # Toolchain: tools/get_toolchain.sh of Jangada/Felucca installs it in ~/.jieli;
 # set JIELI_TOOLCHAIN to the real directory (not the 'toolchain' symlink:
 # Docker refuses to execute through it).
+# The FM-1's core has the single-precision FPU: objdump only decodes its
+# instructions (e53f, the iff compares) with -mattr=+fprev1, the default of
+# PI32_OBJDUMP_FLAGS.
 set -euo pipefail
+FLAGS="${PI32_OBJDUMP_FLAGS:--mattr=+fprev1}"
 TC="${JIELI_TOOLCHAIN:-$(ls -d "$HOME"/.jieli/jieli-linux-toolchains-* 2>/dev/null | sort | tail -1)}"
 [ -x "$TC/common/bin/objdump" ] || { echo "pi32-objdump: no JieLi toolchain at '$TC'" >&2; exit 1; }
 work="$(mktemp -d "${TMPDIR:-/tmp}/pi32dis.XXXXXX")"
@@ -29,7 +33,7 @@ else
 fi
 printf '\t.text\n\t.globl q\nq:\n\t.short %s\n' "$(for w in $words; do printf '0x%s,' "$w"; done | sed 's/,$//')" >"$work/q.s"
 docker run --rm --platform linux/amd64 -v "$work:/work" -v "$TC:/opt/jieli:ro" -w /work debian:bookworm-slim \
-    sh -c "/opt/jieli/common/bin/clang -target pi32v2 -c q.s -o q.o && /opt/jieli/common/bin/objdump -d q.o" |
+    sh -c "/opt/jieli/common/bin/clang -target pi32v2 -c q.s -o q.o && /opt/jieli/common/bin/objdump -d $FLAGS q.o" |
     grep -E '^\s+[0-9a-f]+:' |
     if [ -n "$start" ]; then
         python3 -c "
