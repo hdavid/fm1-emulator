@@ -8,6 +8,34 @@ fn cpu(words: &[u16]) -> Cpu {
     )
 }
 #[test]
+fn replicated_immediates_fill_both_pixels_and_keep_byte_lanes() {
+    // Vendor r3 assembly: r0=r2*0x10001, then the other replicated forms.
+    for (word, input, expected) in [
+        (0x2101, 0x1234, 0x12341234),
+        (0x2101, 0xffff, u32::MAX),
+        (0x2201, 0x1234, 0x34123400),
+        (0x2301, 0x7f, 0x7f7f7f7f),
+    ] {
+        let mut c = cpu(&[0xe1e0, word]);
+        c.r[2] = input;
+        c.sr[5] = 15;
+        c.step().unwrap();
+        assert_eq!(c.r[0], expected);
+        assert_eq!(c.r[2], input);
+        assert_eq!(c.sr[5], 15);
+    }
+    for (word, expected) in [
+        (0x21ff, 0x00ff00ff),
+        (0x22ff, 0xff00ff00),
+        (0x2301, 0x01010101),
+    ] {
+        let mut c = cpu(&[0xe140, word]);
+        c.step().unwrap();
+        assert_eq!(c.r[0], expected);
+    }
+}
+
+#[test]
 fn usb_line_status_tracks_the_measured_idle_pullup_configuration() {
     let mut c = cpu(&[0x0020]);
     for (control, expected) in [(0xe0c, 0), (0x164c, 2), (0x0c, 0), (0x064c, 0), (0x160c, 0)] {
