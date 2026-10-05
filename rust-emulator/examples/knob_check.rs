@@ -53,9 +53,9 @@ fn main() -> Result<(), String> {
     cpu.r[0] = 0x01c7_fe08;
     let mut encoders = ui_knobs::Encoders::default();
     run_for(&mut cpu, &mut encoders, BOOT_STEPS)?;
-    *cpu.bus.mmio_stats.borrow_mut() = Some(Default::default());
+    cpu.bus.start_mmio_stats();
     run_for(&mut cpu, &mut encoders, 24_000_000)?;
-    if let Some(stats) = cpu.bus.mmio_stats.borrow_mut().take() {
+    if let Some(stats) = cpu.bus.take_mmio_stats() {
         for port in [0x50004u32, 0x50044] {
             let reads: u64 = stats.iter().filter(|((a, _), _)| *a == port).map(|(_, c)| c[0]).sum();
             println!("GPIO IN 0x{port:x}: {reads} reads in 1 s of guest time");

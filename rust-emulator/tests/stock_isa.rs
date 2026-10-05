@@ -737,3 +737,56 @@ fn long_divide_with_bit_12_set_is_signed() {
     c.step().unwrap();
     assert_eq!((c.r[2], c.r[3]), (0xfff4_fde6, 0xffff_ffff));
 }
+
+#[test]
+fn byte_load_and_store_post_increment_by_a_register() {
+    // Stock FM-1_015 / Baud Girl 0x0200de98: 13c0. The vendor objdump (JieLi
+    // pi32v2 toolchain) prints it as "r0 = b[r4++=r15] (u)", and decodes the
+    // whole 0x1000-0x13ff range as this family: bits 0-2 data register,
+    // bit 3 store, bits 4-6 base, bits 7-9 increment register r8-r15
+    // (all 1024 codes checked against objdump). "++=" is post-increment, as
+    // its "h[r15++=2]" for edd0 (and "b[++r3=-18]" for the pre form ee59).
+    let mut c = cpu(&[0x13c0]);
+    c.r[4] = RAM + 0x40;
+    c.r[15] = 3;
+    c.bus.write(RAM + 0x40, 0x0a, 1).unwrap();
+    c.bus.write(RAM + 0x43, 0x55, 1).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.r[0], 0x0a); // read at the old r4
+    assert_eq!(c.r[4], RAM + 0x43);
+    assert_eq!(c.pc, XIP + 2);
+    let mut c = cpu(&[0x13c8]); // b[r4++=r15] = r0
+    c.r[4] = RAM + 0x40;
+    c.r[15] = 1;
+    c.r[0] = 0x1234_56fe;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x40, 1).unwrap(), 0xfe);
+    assert_eq!(c.bus.read(RAM + 0x41, 1).unwrap(), 0);
+    assert_eq!(c.r[4], RAM + 0x41);
+}
+
+#[test]
+fn rotate_right_by_immediate() {
+    // Stock / Baud Girl 0x0201eaa8 (printf's length-letter switch): r0 = c - 'h';
+    // e1c4 0001; if (r0 > 9) ...; tbb [r0]. JieLi's objdump prints e1c4 0001 as
+    // "r0 = r0 <> 1" and decodes rD = x >> 12, rS = (x >> 4) & 15, amount =
+    // ((x >> 8) & 1) * 16 + (x & 15), 0 printed as 32. Right rotation is what
+    // makes the switch work: odd offsets become huge and fail the range check.
+    let mut c = cpu(&[0xe1c4, 0x0001]);
+    c.r[0] = 4; // 'l' - 'h'
+    c.step().unwrap();
+    assert_eq!(c.r[0], 2);
+    let mut c = cpu(&[0xe1c4, 0x0001]);
+    c.r[0] = 3; // 'k' - 'h': not a case
+    c.step().unwrap();
+    assert_eq!(c.r[0], 0x8000_0001);
+    let mut c = cpu(&[0xe1c4, 0x2101]); // r2 = r0 <> 17
+    c.r[0] = 0x0001_0000; // bit 16 rotated right by 17 lands on bit 31
+    c.step().unwrap();
+    assert_eq!(c.r[2], 0x8000_0000);
+    let mut c = cpu(&[0xe1c4, 0x0010]); // r0 = r1 <> 32
+    c.r[1] = 0x1234_5678;
+    c.step().unwrap();
+    assert_eq!(c.r[0], 0x1234_5678);
+    assert_eq!(c.pc, XIP + 4);
+}
