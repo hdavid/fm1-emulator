@@ -116,6 +116,16 @@ impl System {
         (wdt & 0x10 != 0).then(|| 24_000_000u64 * (1u64 << (wdt & 15).saturating_sub(10)))
     }
 
+    /// Oscillator ticks until the enabled watchdog expires (a fault), if it
+    /// can; before that `advance` only counts.
+    pub(crate) fn ticks_to_event(&self) -> Option<u64> {
+        let timeout = self.watchdog_timeout()?;
+        if self.watchdog_expiry_disabled && self.watchdog_ticks >= timeout {
+            return None;
+        }
+        Some(timeout.saturating_sub(self.watchdog_ticks).max(1))
+    }
+
     pub fn advance(&mut self, ticks: u32) -> Result<(), &'static str> {
         let wdt = self.registers[0x80];
         if wdt & 0x10 != 0 {

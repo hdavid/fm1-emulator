@@ -71,6 +71,12 @@ impl Audio {
     pub fn pending_irq(&self) -> bool {
         self.control & 0x800 != 0 && self.config & (1 << 14) != 0 && self.pending & 0x80 != 0
     }
+    /// Oscillator ticks until the running DMA transfers its next frame.
+    pub(crate) fn ticks_to_event(&self) -> Option<u64> {
+        (self.control & 0x800 != 0)
+            .then(|| (24_000_000u64.saturating_sub(self.phase)).div_ceil(SAMPLE_RATE).max(1))
+    }
+
     pub fn advance(&mut self, ticks: u32, ram: &[u8]) -> Result<(), &'static str> {
         if self.control & 0x800 == 0 {
             return Ok(());

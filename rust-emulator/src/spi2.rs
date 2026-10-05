@@ -67,6 +67,11 @@ impl Spi2 {
         self.busy = (bytes * 8 * ((self.registers[1] & 0xff) as u64 + 1)).max(1);
     }
 
+    /// Oscillator ticks until the transfer in progress completes.
+    pub(crate) fn ticks_to_event(&self) -> Option<u64> {
+        (self.busy != 0).then(|| self.busy.div_ceil(LSB_PER_OSC))
+    }
+
     /// Advance by oscillator ticks; a finished transfer sets pending.
     pub fn advance(&mut self, ticks: u32) {
         if self.busy == 0 {
