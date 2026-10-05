@@ -456,6 +456,137 @@ pub(crate) fn decode_wide(h: u32, x: u32) -> Op {
     }
 }
 
+/// Length in bytes the interpreter gives a form whose word is `h` (after
+/// `primary`); `None` for `Unsupported` and for `Wide` without its extension.
+pub(crate) fn length(op: Op) -> Option<u32> {
+    use Op::*;
+    match op {
+        Unsupported | Wide => None,
+        MovImm32 | CallRel32 | BranchLong => Some(6),
+        MovSpecial | MovMask | MovImm16 | PushPopMask | Rel22 => Some(4),
+        // Every form decided by the extension halfword.
+        BranchRegisterMask
+        | MemoryShift
+        | MemoryAddRegister
+        | HalfwordExtended
+        | HalfwordPostincrement
+        | BytePostincrementStore
+        | BytePostincrementLoad
+        | MultiplyImmediate
+        | BitMask
+        | StackPair
+        | ReverseBytes
+        | SubtractPackedImmediate
+        | ReverseSubtract
+        | MultiplyLong
+        | MultiplyAccumulateLong
+        | DivideLong
+        | CarryArithmetic
+        | MultiplyExtended
+        | Divide
+        | CountLeadingZeros
+        | Absolute
+        | Maximum
+        | Minimum
+        | MemoryAdd
+        | DecrementBranch
+        | MemoryBit
+        | AddSubtractExtended
+        | ShiftRegisterExtended
+        | BytePreincrement
+        | RotateRightImmediate
+        | ShiftExtended
+        | ShiftPair
+        | ShiftPairRegister
+        | FloatOp
+        | LogicThree
+        | StoreRegisterList
+        | LoadRegisterList
+        | StackSubword
+        | StackExtended
+        | MemoryPair
+        | BitField
+        | BranchEqualFlag
+        | BranchBit
+        | MemoryMask
+        | ConditionalBlock
+        | MemoryLogic
+        | LogicImmediate
+        | StoreImmediate
+        | AddImmediate
+        | AddStackExtended
+        | AdjustStackExtended
+        | BranchCompareImmediate
+        | BranchCompareRegister
+        | ByteExtended
+        | WordExtended
+        | WordRegisterPreincrementStore
+        | WordRegisterPreincrement
+        | HalfwordRegisterPreincrement
+        | HalfwordRegisterPreincrementStore
+        | WordPostincrementStore
+        | WordPostincrementLoad
+        | MemoryIndexed => Some(4),
+        _ => Some(2),
+    }
+}
+
+/// Length in bytes of the instruction word `h` as a conditional block counts
+/// it when it skips instructions (`Cpu::conditional`), from the word alone.
+pub(crate) fn skip_length(h: u32) -> u32 {
+    if matches!(h & 0xffe0, 0xffc0 | 0xffe0) || h == 0xff80 {
+        6
+    } else if h >> 13 == 7 {
+        4
+    } else {
+        2
+    }
+}
+
+/// The interpreter's view of one instruction (examples/op_scan.rs compares
+/// it with the vendor disassembler).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Description {
+    /// The form's name (`Op` variant), "Unsupported" when not decoded.
+    pub form: String,
+    /// Bytes the interpreter advances over this slot; `None` if unsupported.
+    pub length: Option<u32>,
+    /// Bytes a conditional block skips for this slot.
+    pub skip_length: u32,
+    /// The word the interpreter executes for this slot (`primary`).
+    pub word: u16,
+    /// Whether the word opens a parallel bundle (this slot is its primary).
+    pub parallel: bool,
+}
+
+/// Describe the instruction whose halfwords start at `words[0]`; the slot of
+/// a parallel bundle is described as the interpreter executes it (its
+/// primary word, with the bundle's own length).
+pub fn describe(words: &[u16]) -> Description {
+    let h = words.first().copied().unwrap_or(0) as u32;
+    let word = primary(h);
+    let mut op = decode(word);
+    if op == Op::Wide {
+        if let Some(&x) = words.get(1) {
+            op = decode_wide(word, x as u32);
+        }
+    }
+    let parallel = is_parallel(h);
+    // A bundle's primary slot advances as `Cpu::execute_bundle` does.
+    let length = length(op).map(|length| match (parallel, h >> 13 == 6) {
+        (true, true) => 2,
+        (true, false) => 4,
+        (false, _) => length,
+    });
+    Description {
+        form: format!("{op:?}"),
+        length,
+        skip_length: skip_length(h),
+        word: word as u16,
+        parallel,
+    }
+}
+
 fn conditional_kind(kind: u32) -> bool {
     matches!(
         kind,
@@ -511,5 +642,25 @@ mod tests {
         assert_eq!(decode_wide(0xe86c, 1), Op::Unsupported);
         assert_eq!(decode(0xe064), Op::MovSpecial);
         assert_eq!(decode(0x2010), Op::MovNegative);
+    }
+
+    #[test]
+    fn describe_reports_the_interpreted_form_and_its_length() {
+        // r3 = 29392640 (6 bytes), r1 = [r3+32] (2), call (4).
+        let d = describe(&[0xffc3, 0x7f00, 0x01c0]);
+        assert_eq!((d.form.as_str(), d.length), ("MovImm32", Some(6)));
+        assert_eq!(describe(&[0x68b1]).length, Some(2));
+        assert_eq!(describe(&[0xea80, 0xc6ba]).length, Some(4));
+        // A wide word without its extension halfword is not decided yet.
+        assert_eq!(describe(&[0xe86c]).length, None);
+        // Bundles: "r6 = r0  #" (0xd606, 2 bytes) and "r0 = r8 >> 8  #"
+        // (0xf1c0 0x0888, 4 bytes) execute their primary word.
+        let d = describe(&[0xd606]);
+        assert!(d.parallel);
+        assert_eq!((d.word, d.length), (0x1606, Some(2)));
+        let d = describe(&[0xf1c0, 0x0888]);
+        assert_eq!((d.word, d.length), (0xe1c0, Some(4)));
+        assert_eq!(describe(&[0x0081]).form, "Rti");
+        assert_eq!(describe(&[0x0002]).length, None);
     }
 }

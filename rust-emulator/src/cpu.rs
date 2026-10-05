@@ -2,7 +2,7 @@
 // Probe decodings mirror emu.py, checked against vendor objdump and the FM-1.
 // Startup-only additions use the pinned Quarkslab pi32v2 reference; see README.
 use crate::code_cache::Operands;
-use crate::decode::{decode, decode_wide, is_parallel, primary, Op};
+use crate::decode::{decode, decode_wide, is_parallel, primary, skip_length, Op};
 use crate::devices::OSC_TICKS_PER_INSTRUCTION;
 use crate::{
     bus::{AccessFault, Bus},
@@ -503,24 +503,11 @@ impl Cpu {
         let else_count = (counts >> 12) & 3;
         for i in 0..then_count + else_count {
             let h = self.read(cursor, 2)?;
-            let length = if matches!(h & 0xffe0, 0xffc0 | 0xffe0) || h == 0xff80 {
-                6
-            } else if h >> 13 == 7 {
-                4
-            } else {
-                2
-            };
-            cursor += length;
+            cursor += skip_length(h);
             // A parallel pair counts as one conditional instruction bundle.
             if h >> 13 == 6 || h & 0xf800 == 0xf000 {
                 let following = self.read(cursor, 2)?;
-                cursor += if matches!(following & 0xffe0, 0xffc0 | 0xffe0) || following == 0xff80 {
-                    6
-                } else if following >> 13 == 7 {
-                    4
-                } else {
-                    2
-                };
+                cursor += skip_length(following);
             }
             if i + 1 == then_count {
                 then_end = cursor;

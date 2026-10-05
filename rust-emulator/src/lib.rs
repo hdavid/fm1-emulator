@@ -8,6 +8,7 @@ mod code_cache;
 pub mod cpu;
 mod crc;
 mod decode;
+pub use decode::{describe, Description};
 pub mod devices;
 pub mod firmware;
 pub mod gpio;
