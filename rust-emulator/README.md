@@ -46,6 +46,34 @@ slow guest scan can observe and debounce them.
 Losing window focus releases contacts. Pause stops guest execution; Restart
 reloads the selected image and resets CPU, RAM, peripherals, and input state.
 
+### Web editor (USB-MIDI over a local WebSocket)
+
+When the firmware has a web editor, `fm1-ui` serves it on
+`http://127.0.0.1:8765/` (loopback only) and connects it to the emulated
+device: `FIRMWARE-ui.zip` next to `FIRMWARE.fwsc`, or `--ui DIR` (a folder with
+`index.html` or `editor.html`, e.g. a Felucca-family `web/`). "Open editor"
+opens the default browser; the status line shows the URL, connected pages, MIDI
+message counts and the port name. Without an editor the button is disabled.
+
+```sh
+fm1-ui ~/GitHub/fm1-firmware/jangada-0.1-alpha.fwsc --cpu-mhz=48
+fm1-ui firmware.fwsc --ui ~/GitHub/jangada/web
+scripts/make-ui-sidecar.sh ~/GitHub/sloop v2.2 ~/GitHub/fm1-firmware/sloop-2.2.fwsc
+```
+
+- The USB host model then also acts as a USB-MIDI host (`usb.enable_midi_host()`):
+  it reads the product string and moves class-compliant 4-byte event packets on
+  the MIDI streaming endpoints (`usb_midi.rs`: SysEx split / reassembly).
+- Every served HTML page gets a Web MIDI shim (`web/shim.js`):
+  `navigator.requestMIDIAccess` returns one input and one output named
+  `"<USB product> (FM-1 Emulator)"` ("Felucca (FM-1 Emulator)" for Felucca,
+  Jangada and SLOOP, whose editors look for /felucca/i), so editors run unchanged
+  in any browser.
+- `/midi` is a WebSocket of binary frames of raw MIDI bytes: from the browser any
+  split (running status allowed), to the browser one complete message per frame.
+- Requests with a Host other than 127.0.0.1 / localhost / [::1] on that port,
+  and WebSocket Origins other than those, are refused (DNS rebinding).
+
 The UI reads only the panel's 240×240 framebuffer, gated by display enable,
 sleep, and active-low PA2 backlight. There are no symbol-specific drawing hooks
 or substituted application functions. SPI1 commands and SRAM DMA implement
