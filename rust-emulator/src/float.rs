@@ -89,7 +89,13 @@ pub(crate) fn result(x: u32, registers: &[u32; 16]) -> Result<Option<FloatResult
         8 => f32::from_bits(registers[d]) - a * b,
         _ => return Ok(None),
     };
-    if !value.is_finite() {
+    // A finite value over zero with the divide-by-zero trap off (the trap is
+    // taken before this). X0X runs this way on physical FM-1s: clang hoists
+    // guarded divides, so its master limiter divides 1 by a silent sample's
+    // magnitude every sample and discards the quotient. The quotient itself
+    // is unmeasured; the IEEE value (infinity, or NaN for 0/0) is kept.
+    let divide_by_zero = x & 15 == 3 && b == 0.0 && a.is_finite();
+    if !value.is_finite() && !divide_by_zero {
         return Err("exceptional floating-point arithmetic is not implemented");
     }
     Ok(Some(FloatResult {
