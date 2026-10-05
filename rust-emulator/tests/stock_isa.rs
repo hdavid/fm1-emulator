@@ -212,7 +212,9 @@ fn register_list_store_and_load_keep_stock_linked_lists_consistent() {
     // eb00 0006 {r1, r2} <- [r0]; 6192 [r1+4] = r2; 60a1 [r2] = r1.
     // Nodes are {next, prev}; the list starts as head <-> a.
     let (head, a, node) = (RAM + 0x100, RAM + 0x180, RAM + 0x200);
-    let mut c = cpu(&[0x6112, 0x6190, 0xeb20, 0x0006, 0x60a0, 0xeb00, 0x0006, 0x6192, 0x60a1]);
+    let mut c = cpu(&[
+        0x6112, 0x6190, 0xeb20, 0x0006, 0x60a0, 0xeb00, 0x0006, 0x6192, 0x60a1,
+    ]);
     for (at, value) in [(head, a), (head + 4, a), (a, head), (a + 4, head)] {
         c.bus.write(at, value, 4).unwrap();
     }

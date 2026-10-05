@@ -3,8 +3,7 @@
 // LCD, play `detents` quadrature clicks into encoder `e` exactly as fm1-ui
 // does, save the LCD again and report how many pixels changed.
 //   knob_check FIRMWARE KNOB DETENTS OUT_PREFIX   (KNOB: SELECT ALGORITHM PRESETS KNOB1..KNOB4)
-#[path = "../src/ui_knobs.rs"]
-mod ui_knobs;
+use fm1_emu::ui_knobs;
 use fm1_emu::{cpu::Cpu, firmware::Firmware, png};
 use std::{env, path::Path};
 

@@ -4,7 +4,7 @@ use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Rect, Sense, Strok
 use fm1_emu::bus::Bus;
 use fm1_emu::{cpu::Cpu, firmware::Firmware};
 mod ui_audio;
-mod ui_knobs;
+use fm1_emu::ui_knobs;
 use std::{
     io::{self, Write},
     path::PathBuf,
