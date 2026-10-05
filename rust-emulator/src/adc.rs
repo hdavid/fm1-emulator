@@ -59,10 +59,12 @@ impl Adc {
                     self.sample = match (value >> 8) & 15 {
                         3 => self.battery,
                         4 => self.master,
-                        // P33 ANA_CON4 mux: nominal 1.2 V reference and
-                        // quarter of a 4.2 V battery, measured against 3.3 V.
+                        // P33 ANA_CON4 mux: WL82 adc_api.c uses CENTER0=800
+                        // mV for the nominal untrimmed bandgap reference.
+                        // The battery channel measures one quarter of 4.2 V;
+                        // both sources are sampled against the same 3.3 V rail.
                         15 => match self.pmu_channel {
-                            0 => (1023u32 * 1200 / 3300) as u16,
+                            0 => (1023u32 * 800 / 3300) as u16,
                             5 => (1023u32 * 1050 / 3300) as u16,
                             _ => return Some(Err("unsupported PMU ADC source")),
                         },

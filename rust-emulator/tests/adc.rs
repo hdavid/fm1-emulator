@@ -34,7 +34,8 @@ fn stock_pmu_calibration_samples_the_mux_and_restarts_with_completion_clear() {
     // Set P33 ANA_CON4 through the guest's serial bridge, then configure ADC
     // channel 15. Exercise repeated conversion acknowledgements and IRQ 24.
     bus.write(IRQ_CONFIG + 12, 1, 4).unwrap();
-    for (source, millivolts) in [(5, 1050), (0, 1200)] {
+    let mut samples = Vec::new();
+    for (source, millivolts) in [(5, 1050), (0, 800)] {
         bus.write(0x13e08, 0, 4).unwrap();
         bus.write(0x13e08, 1, 4).unwrap();
         for byte in [0, 4, (source << 1) | 1] {
@@ -53,10 +54,15 @@ fn stock_pmu_calibration_samples_the_mux_and_restarts_with_completion_clear() {
             assert_eq!(bus.read(IRQ_PENDING, 4).unwrap(), 1 << 24);
             let measured_mv = bus.read(RESULT, 4).unwrap() * 3300 / 1023;
             assert!((millivolts - 3..=millivolts).contains(&measured_mv));
+            samples.push(bus.read(RESULT, 4).unwrap());
             let control = bus.read(CONTROL, 4).unwrap();
             bus.write(CONTROL, control | 64, 4).unwrap();
         }
     }
+    // Exercise the SDK's nominal calibration formula, not just ADC codes:
+    // adc_get_voltage(VBAT) * 4 must report a full battery, not ~2.8 V.
+    let battery_mv = samples[0] * 800 / samples[20] * 4;
+    assert!((4180..=4220).contains(&battery_mv));
     assert_eq!(bus.devices.adc.conversions, 40);
     bus.write(CONTROL, 64, 4).unwrap();
     assert_eq!(bus.pending_irq(0x100), None);
