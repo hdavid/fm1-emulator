@@ -23,7 +23,7 @@ impl fmt::Display for AccessFault {
 }
 
 pub struct Bus {
-    pub flash: Vec<u8>,
+    flash: Vec<u8>,
     pub devices: Devices,
     pub lcd: Lcd,
     pub system: crate::system::System,
@@ -35,6 +35,9 @@ pub struct Bus {
     cache: crate::cache::Cache,
     crc: crate::crc::Crc,
     clock: crate::clock::Clock,
+    code: crate::code_cache::CodeCache,
+    /// NOR generation the code cache was last synchronized with.
+    nor_generation: u64,
     /// Optional diagnostic counts of MMIO reads/writes by address.
     pub mmio_stats: std::cell::RefCell<Option<std::collections::BTreeMap<u32, [u64; 2]>>>,
 }
@@ -42,6 +45,7 @@ pub struct Bus {
 impl Bus {
     pub(crate) fn load_flash(&mut self, bytes: &[u8], key: u16) {
         self.nor.load(bytes, key);
+        self.sync_code_cache();
         // SPL handoff values measured before peripheral initialization.
         self.usb
             .write(0x10010, 0x10000, &mut self.ram)
@@ -66,6 +70,8 @@ impl Bus {
             cache: Default::default(),
             crc: Default::default(),
             clock: Default::default(),
+            code: Default::default(),
+            nor_generation: 0,
             mmio_stats: Default::default(),
         })
     }
@@ -84,10 +90,20 @@ impl Bus {
         }
     }
 
+    #[inline]
     fn count_mmio(&self, address: u32, kind: usize) {
         if let Some(stats) = self.mmio_stats.borrow_mut().as_mut() {
-            stats.entry(address).or_default()[kind] += 1;
+            Self::record_mmio(stats, address, kind);
         }
+    }
+
+    #[cold]
+    fn record_mmio(
+        stats: &mut std::collections::BTreeMap<u32, [u64; 2]>,
+        address: u32,
+        kind: usize,
+    ) {
+        stats.entry(address).or_default()[kind] += 1;
     }
 
     /// The core control word at 0x1eee000 + 4 * core, as a 4-byte bus read
@@ -210,6 +226,53 @@ impl Bus {
             .fold(0, |value, (i, byte)| value | ((*byte as u32) << (i * 8))))
     }
 
+    /// A code halfword from memory whose reads have no side effects and can
+    /// be cached: the first two cases of `read_as`, when they succeed.
+    fn code_halfword(&self, address: u32) -> Option<u16> {
+        if address & 1 != 0 {
+            return None;
+        }
+        let bytes = if let Some(offset) = Self::offset(address, 2, XIP, self.flash.len()) {
+            if !self.nor.xip_active() {
+                return None;
+            }
+            if self.nor.packaged() {
+                return self.nor.xip(address, 2)?.ok().map(|value| value as u16);
+            }
+            &self.flash[offset..offset + 2]
+        } else {
+            let offset = Self::offset(address, 2, RAM, self.ram.len())?;
+            &self.ram[offset..offset + 2]
+        };
+        Some(u16::from_le_bytes([bytes[0], bytes[1]]))
+    }
+
+    /// The decoded instruction at `pc`, if it lies in cacheable memory.
+    #[inline]
+    pub(crate) fn decoded(&mut self, pc: u32) -> Option<crate::code_cache::Entry> {
+        if let Some(entry) = self.code.get(pc) {
+            return Some(entry);
+        }
+        let h = self.code_halfword(pc)?;
+        let x = self.code_halfword(pc.wrapping_add(2));
+        let y = self.code_halfword(pc.wrapping_add(4));
+        Some(self.code.fill(pc, h, x, y))
+    }
+
+    /// Whether the decoded instruction at `pc` is cached and still current.
+    pub(crate) fn is_cached(&self, pc: u32) -> bool {
+        self.code.get(pc).is_some()
+    }
+
+    /// Drop cached code after NOR contents or XIP configuration changed.
+    fn sync_code_cache(&mut self) {
+        let generation = self.nor.generation();
+        if generation != self.nor_generation {
+            self.nor_generation = generation;
+            self.code.flush();
+        }
+    }
+
     pub fn read(&self, address: u32, size: usize) -> Result<u32, AccessFault> {
         self.read_as(address, size, "read")
     }
@@ -238,8 +301,10 @@ impl Bus {
         }
         if address == 0x500c0 {
             self.nor.chip_select(value & 1 == 0);
+            self.sync_code_cache();
         }
         if let Some(result) = self.nor.write(address, value) {
+            self.sync_code_cache();
             return result.map_err(|reason| Self::fault(address, size, "write", reason));
         }
         self.guards
@@ -298,13 +363,21 @@ impl Bus {
             )
         })?;
         self.ram[offset..offset + size].copy_from_slice(&value.to_le_bytes()[..size]);
+        self.code.invalidate_ram(offset, size);
         Ok(())
     }
 
     pub fn advance_usb(&mut self, ticks: u32) -> Result<(), AccessFault> {
+        let setups = self.usb.setups;
         self.usb
             .advance(ticks, &mut self.ram)
-            .map_err(|reason| Self::fault(0x11800, 4, "USB host", reason))
+            .map_err(|reason| Self::fault(0x11800, 4, "USB host", reason))?;
+        if self.usb.setups != setups {
+            // The host model wrote an 8-byte SETUP packet into SRAM.
+            let offset = self.usb.setup_address().wrapping_sub(RAM) as usize;
+            self.code.invalidate_ram(offset, 8);
+        }
+        Ok(())
     }
 
     pub fn screen_visible(&self) -> bool {
@@ -324,6 +397,10 @@ impl Bus {
         self.pending_irq_for(icfg, 0)
     }
     pub(crate) fn pending_irq_for(&self, icfg: u32, core: usize) -> Option<usize> {
+        // With the controller disabled no source has a priority.
+        if icfg & 0x100 == 0 {
+            return None;
+        }
         let timer = self.devices.pending_irq_for(icfg, core);
         let audio_priority = self.devices.irq_priority_for(crate::audio::IRQ, icfg, core);
         if self.audio.pending_irq() {

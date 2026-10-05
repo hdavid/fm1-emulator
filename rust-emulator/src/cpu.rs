@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Probe decodings mirror emu.py, checked against vendor objdump and the FM-1.
 // Startup-only additions use the pinned Quarkslab pi32v2 reference; see README.
+use crate::code_cache::Operands;
+use crate::decode::{decode, decode_wide, is_parallel, primary, Op};
 use crate::devices::OSC_TICKS_PER_INSTRUCTION;
 use crate::{
     bus::{AccessFault, Bus},
@@ -271,6 +273,22 @@ impl Cpu {
         result
     }
 
+    /// A bundle's following slot at `self.pc`: its raw word (executed without
+    /// normalization), classification and known operands.
+    fn following(&mut self) -> Result<(u32, Op, Operands), Fault> {
+        let pc = self.pc;
+        Ok(match self.bus.decoded(pc) {
+            Some(entry) if !is_parallel(entry.h as u32) => {
+                (entry.h as u32, entry.op, entry.operands())
+            }
+            Some(entry) => (entry.h as u32, decode(entry.h as u32), entry.operands()),
+            None => {
+                let h = self.read(pc, 2)?;
+                (h, decode(h), Operands::default())
+            }
+        })
+    }
+
     fn step_core(&mut self) -> Result<&'static str, Fault> {
         if let Some((at, end)) = self.predicate_skip {
             if self.pc == at {
@@ -279,26 +297,37 @@ impl Cpu {
             }
         }
         let pc = self.pc;
-        let h = self
-            .bus
-            .fetch(pc)
-            .map_err(|fault| Fault::Access { pc, fault })? as u32;
-        let parallel = h >> 13 == 6 || h & 0xf800 == 0xf000;
-        let op = if parallel {
+        let (h, op, code) = match self.bus.decoded(pc) {
+            Some(entry) => (entry.h as u32, entry.op, entry.operands()),
+            None => {
+                let h = self
+                    .bus
+                    .fetch(pc)
+                    .map_err(|fault| Fault::Access { pc, fault })? as u32;
+                (h, decode(primary(h)), Operands::default())
+            }
+        };
+        let op = if is_parallel(h) {
             let length = if h >> 13 == 6 { 2 } else { 4 };
-            let normalized = if length == 2 { h & 0x1fff } else { h & !0x1000 };
             self.pc = pc + length;
-            let following = self.read(self.pc, 2)?;
+            let (following, following_op, following_code) = self.following()?;
             let before = self.r;
             let specials_before = self.sr;
-            self.execute(following)?;
+            self.execute(following, following_op, following_code)?;
             let following_registers = self.r;
             let following_specials = self.sr;
             let continuation = self.pc;
             self.r = before;
             self.sr = specials_before;
             self.pc = pc;
-            let op = self.execute(normalized)?;
+            // The primary slot reads its operands after the following slot
+            // ran; if that slot stored over them, decode them afresh.
+            let (op, code) = if self.bus.is_cached(pc) {
+                (op, code)
+            } else {
+                (decode(primary(h)), Operands::default())
+            };
+            let op = self.execute(primary(h), op, code)?;
             // Both slots read the incoming registers. Compiler bundles have
             // distinct destinations; retain writes from the following slot
             // where the primary slot did not change that register.
@@ -313,7 +342,7 @@ impl Cpu {
             self.pc = continuation;
             op
         } else {
-            self.execute(h)?
+            self.execute(h, op, code)?
         };
         if let Some((start, end, count)) = self.repeat {
             if self.pc == end {
@@ -387,339 +416,403 @@ impl Cpu {
         }
     }
 
-    fn execute(&mut self, h: u32) -> Result<&'static str, Fault> {
+    /// A code halfword after the instruction word: the decode cache's copy
+    /// when it has one, otherwise a bus read (with the bus's faults).
+    pub(crate) fn operand(&self, known: Option<u16>, address: u32) -> Result<u32, Fault> {
+        match known {
+            Some(value) => Ok(value as u32),
+            None => self.read(address, 2),
+        }
+    }
+
+    /// Execute the instruction word `h` at `self.pc`, classified as `op`.
+    fn execute(&mut self, h: u32, op: Op, code: Operands) -> Result<&'static str, Fault> {
         let pc = self.pc;
         let a = (h & 7) as usize;
         let b = ((h >> 4) & 7) as usize;
         let mut next = pc.wrapping_add(2);
-        let op;
-        if matches!(h & 0xfff0, 0xffc0 | 0xffe0) {
-            let value = self.read(pc + 2, 2)? | (self.read(pc + 4, 2)? << 16);
-            let n = (h & 15) as usize;
-            if h & 0xfff0 == 0xffc0 {
-                self.r[n] = value;
-                op = "mov_imm32";
-            } else if matches!(n, 0 | 12 | 13 | 14) {
-                self.sr[n] = value;
-                op = "stack_imm32";
-            } else {
-                return Err(Fault::Unsupported { pc, word: h as u16 });
-            }
-            next = pc + 6;
-        } else if h & 0xff00 == 0x0300 {
-            // Register-count repeat: one block per dispatch, with the remaining
-            // count tested by the compiler's following backward branch.
-            let register = (h & 15) as usize;
-            let length = (((h >> 4) & 15) + 1) * 2;
-            if self.r[register] == 0 {
-                next = pc + 2 + length;
-            } else {
-                self.r[register] -= 1;
-            }
-            op = "repeat_register";
-        } else if h & 0xe00f == 0x8000 {
-            if self.repeat.is_some() {
-                return Err(Fault::Unsupported { pc, word: h as u16 });
-            }
-            let length = (((h >> 4) & 15) + 1) * 2;
-            let count = ((h >> 8) & 31) + 1;
-            self.repeat = Some((pc + 2, pc + 2 + length, count));
-            op = "repeat_immediate";
-        } else if h == 0xe064 {
-            let extra = self.read(pc + 2, 2)?;
-            let reg = ((extra >> 12) & 15) as usize;
-            let special = ((extra >> 8) & 15) as usize;
-            // Deliberately exclude PC writes and unrecognized reserved encodings.
-            if special == 15 || !matches!(extra & 255, 0 | 128) {
-                return Err(Fault::Unsupported { pc, word: h as u16 });
-            }
-            if extra & 255 == 128 {
-                self.sr[special] = self.r[reg];
-                if special == 11 {
-                    self.interrupts_enabled = self.sr[11] & 0x200 != 0;
+        let name;
+        match op {
+            Op::MovImm32 => {
+                let value = self.operand(code.x, pc + 2)? | (self.operand(code.y, pc + 4)? << 16);
+                let n = (h & 15) as usize;
+                if h & 0xfff0 == 0xffc0 {
+                    self.r[n] = value;
+                    name = "mov_imm32";
+                } else if matches!(n, 0 | 12 | 13 | 14) {
+                    self.sr[n] = value;
+                    name = "stack_imm32";
+                } else {
+                    return Err(Fault::Unsupported { pc, word: h as u16 });
                 }
-            } else {
-                self.r[reg] = self.sr[special];
+                next = pc + 6;
             }
-            next = pc + 4;
-            op = "mov_special";
-        } else if h == 0xe060 {
-            let extra = self.read(pc + 2, 2)?;
-            let byte = extra & 255;
-            let mode = (extra >> 10) & 3;
-            let value = if mode != 0 {
-                ((0x80 | (extra & 127)) << (32 - mode * 8)) >> ((extra >> 7) & 7)
-            } else if extra & 0x0f00 == 0x0300 {
-                byte * 0x0101_0101
-            } else if extra & 0x0f00 == 0x0100 {
-                (byte << 24) | (byte << 8)
-            } else if extra & 0x0f00 == 0 {
-                byte
-            } else {
-                return Err(Fault::Unsupported { pc, word: h as u16 });
-            };
-            self.r[((extra >> 12) & 15) as usize] = value;
-            next = pc + 4;
-            op = "mov_mask";
-        } else if h & 0xfff0 == 0xe040 {
-            self.r[(h & 15) as usize] = signed(self.read(pc + 2, 2)?, 16) as u32;
-            next = pc + 4;
-            op = "mov_imm16";
-        } else if h & 0xe0c0 == 0x2040 {
-            self.r[a] = (((h >> 3) & 7) << 5) | ((h >> 8) & 31);
-            op = "mov_imm8";
-        } else if h & 0xe0f8 == 0x2010 {
-            self.r[a] = 0xffff_ffe0 | ((h >> 8) & 31);
-            op = "mov_negative";
-        } else if h & 0xff00 == 0x1600 {
-            self.r[(h & 15) as usize] = self.r[((h >> 4) & 15) as usize];
-            op = "mov_reg";
-        } else if matches!(h & 0xfe00, 0x1c00 | 0x1e00) {
-            let c = (((h >> 7) & 3) * 2 + ((h >> 3) & 1)) as usize;
-            // These forms produce the carry consumed by addc/subc in the
-            // compiler's 64-bit arithmetic (C = carry out / no borrow).
-            let (lhs, rhs) = (self.r[b], self.r[c]);
-            if h & 0xfe00 == 0x1e00 {
-                self.r[a] = lhs.wrapping_sub(rhs);
-                self.set_carry(lhs >= rhs);
-                op = "sub";
-            } else {
-                let (sum, carry) = lhs.overflowing_add(rhs);
-                self.r[a] = sum;
-                self.set_carry(carry);
-                op = "add";
+            Op::RepeatRegister => {
+                // Register-count repeat: one block per dispatch, with the remaining
+                // count tested by the compiler's following backward branch.
+                let register = (h & 15) as usize;
+                let length = (((h >> 4) & 15) + 1) * 2;
+                if self.r[register] == 0 {
+                    next = pc + 2 + length;
+                } else {
+                    self.r[register] -= 1;
+                }
+                name = "repeat_register";
             }
-        } else if h & 0xe0c0 == 0x20c0 {
-            let imm = signed((((h >> 3) & 7) << 5) | ((h >> 8) & 31), 8);
-            self.r[a] = self.r[a].wrapping_add(imm as u32);
-            op = "add_imm8";
-        } else if h & 0xe01f == 0x8002 {
-            let imm = (signed((h >> 5) & 7, 3) << 7) | (((h >> 8) & 31) << 2) as i32;
-            self.sr[14] = self.sr[14].wrapping_add(imm as u32);
-            op = "add_sp";
-        } else if h & 0xe088 == 0x8008 {
-            self.r[a] = self.r[b].wrapping_add((h >> 8) & 31);
-            op = "add_small";
-        } else if matches!(h & 0xff88, 0x1900 | 0x1908 | 0x1980 | 0x1988) {
-            match h & 0xff88 {
+            Op::RepeatImmediate => {
+                if self.repeat.is_some() {
+                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                }
+                let length = (((h >> 4) & 15) + 1) * 2;
+                let count = ((h >> 8) & 31) + 1;
+                self.repeat = Some((pc + 2, pc + 2 + length, count));
+                name = "repeat_immediate";
+            }
+            Op::MovSpecial => {
+                let extra = self.operand(code.x, pc + 2)?;
+                let reg = ((extra >> 12) & 15) as usize;
+                let special = ((extra >> 8) & 15) as usize;
+                // Deliberately exclude PC writes and unrecognized reserved encodings.
+                if special == 15 || !matches!(extra & 255, 0 | 128) {
+                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                }
+                if extra & 255 == 128 {
+                    self.sr[special] = self.r[reg];
+                    if special == 11 {
+                        self.interrupts_enabled = self.sr[11] & 0x200 != 0;
+                    }
+                } else {
+                    self.r[reg] = self.sr[special];
+                }
+                next = pc + 4;
+                name = "mov_special";
+            }
+            Op::MovMask => {
+                let extra = self.operand(code.x, pc + 2)?;
+                let byte = extra & 255;
+                let mode = (extra >> 10) & 3;
+                let value = if mode != 0 {
+                    ((0x80 | (extra & 127)) << (32 - mode * 8)) >> ((extra >> 7) & 7)
+                } else if extra & 0x0f00 == 0x0300 {
+                    byte * 0x0101_0101
+                } else if extra & 0x0f00 == 0x0100 {
+                    (byte << 24) | (byte << 8)
+                } else if extra & 0x0f00 == 0 {
+                    byte
+                } else {
+                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                };
+                self.r[((extra >> 12) & 15) as usize] = value;
+                next = pc + 4;
+                name = "mov_mask";
+            }
+            Op::MovImm16 => {
+                self.r[(h & 15) as usize] = signed(self.operand(code.x, pc + 2)?, 16) as u32;
+                next = pc + 4;
+                name = "mov_imm16";
+            }
+            Op::MovImm8 => {
+                self.r[a] = (((h >> 3) & 7) << 5) | ((h >> 8) & 31);
+                name = "mov_imm8";
+            }
+            Op::MovNegative => {
+                self.r[a] = 0xffff_ffe0 | ((h >> 8) & 31);
+                name = "mov_negative";
+            }
+            Op::MovReg => {
+                self.r[(h & 15) as usize] = self.r[((h >> 4) & 15) as usize];
+                name = "mov_reg";
+            }
+            Op::AddSub => {
+                let c = (((h >> 7) & 3) * 2 + ((h >> 3) & 1)) as usize;
+                // These forms produce the carry consumed by addc/subc in the
+                // compiler's 64-bit arithmetic (C = carry out / no borrow).
+                let (lhs, rhs) = (self.r[b], self.r[c]);
+                if h & 0xfe00 == 0x1e00 {
+                    self.r[a] = lhs.wrapping_sub(rhs);
+                    self.set_carry(lhs >= rhs);
+                    name = "sub";
+                } else {
+                    let (sum, carry) = lhs.overflowing_add(rhs);
+                    self.r[a] = sum;
+                    self.set_carry(carry);
+                    name = "add";
+                }
+            }
+            Op::AddImm8 => {
+                let imm = signed((((h >> 3) & 7) << 5) | ((h >> 8) & 31), 8);
+                self.r[a] = self.r[a].wrapping_add(imm as u32);
+                name = "add_imm8";
+            }
+            Op::AddSp => {
+                let imm = (signed((h >> 5) & 7, 3) << 7) | (((h >> 8) & 31) << 2) as i32;
+                self.sr[14] = self.sr[14].wrapping_add(imm as u32);
+                name = "add_sp";
+            }
+            Op::AddSmall => {
+                self.r[a] = self.r[b].wrapping_add((h >> 8) & 31);
+                name = "add_small";
+            }
+            Op::Logic => match h & 0xff88 {
                 0x1900 => {
                     self.r[a] |= self.r[b];
-                    op = "or";
+                    name = "or";
                 }
                 0x1908 => {
                     self.r[a] ^= self.r[b];
-                    op = "xor";
+                    name = "xor";
                 }
                 0x1980 => {
                     self.r[a] &= self.r[b];
-                    op = "and";
+                    name = "and";
                 }
                 _ => {
                     self.r[a] = !self.r[b];
-                    op = "not";
+                    name = "not";
+                }
+            },
+            Op::Asr => {
+                self.r[a] = ((self.r[b] as i32) >> ((h >> 8) & 31)) as u32;
+                name = "asr";
+            }
+            Op::Shift => {
+                let shift = (h >> 8) & 31;
+                if h & 0x80 != 0 {
+                    self.r[a] = self.r[b] >> shift;
+                    name = "lsr";
+                } else {
+                    self.r[a] = self.r[b] << shift;
+                    name = "lsl";
                 }
             }
-        } else if h & 0xe088 == 0xa088 {
-            self.r[a] = ((self.r[b] as i32) >> ((h >> 8) & 31)) as u32;
-            op = "asr";
-        } else if h & 0xe008 == 0xa000 {
-            let shift = (h >> 8) & 31;
-            if h & 0x80 != 0 {
-                self.r[a] = self.r[b] >> shift;
-                op = "lsr";
-            } else {
-                self.r[a] = self.r[b] << shift;
-                op = "lsl";
+            Op::LoadStore32 => {
+                let address = self.r[b].wrapping_add((signed((h >> 8) & 31, 5) * 4) as u32);
+                if h & 0x80 != 0 {
+                    self.write(address, self.r[a])?;
+                    name = "store32";
+                } else {
+                    self.r[a] = self.read(address, 4)?;
+                    name = "load32";
+                }
             }
-        } else if h & 0xe008 == 0x6000 {
-            let address = self.r[b].wrapping_add((signed((h >> 8) & 31, 5) * 4) as u32);
-            if h & 0x80 != 0 {
-                self.write(address, self.r[a])?;
-                op = "store32";
-            } else {
-                self.r[a] = self.read(address, 4)?;
-                op = "load32";
-            }
-        } else if h == 0xe8d8 || h == 0xe8d4 {
-            let mask = self.read(pc + 2, 2)?;
-            if h == 0xe8d8 {
-                for n in (0..16).rev() {
-                    if mask & (1 << n) != 0 {
-                        self.push(self.r[n])?;
+            Op::PushPopMask => {
+                let mask = self.operand(code.x, pc + 2)?;
+                if h == 0xe8d8 {
+                    for n in (0..16).rev() {
+                        if mask & (1 << n) != 0 {
+                            self.push(self.r[n])?;
+                        }
                     }
-                }
-                op = "push_mask";
-            } else {
-                for n in 0..16 {
-                    if mask & (1 << n) != 0 {
-                        self.r[n] = self.pop()?;
+                    name = "push_mask";
+                } else {
+                    for n in 0..16 {
+                        if mask & (1 << n) != 0 {
+                            self.r[n] = self.pop()?;
+                        }
                     }
+                    name = "pop_mask";
                 }
-                op = "pop_mask";
+                next = pc + 4;
             }
-            next = pc + 4;
-        } else if h & 0xfff0 == 0x0460 {
-            let boundary = (h & 15) as usize;
-            let range = if boundary < 4 {
-                boundary..=3
-            } else {
-                4..=boundary
-            };
-            for n in range.rev() {
-                self.push(self.r[n])?;
+            Op::PushRegs => {
+                let boundary = (h & 15) as usize;
+                let range = if boundary < 4 {
+                    boundary..=3
+                } else {
+                    4..=boundary
+                };
+                for n in range.rev() {
+                    self.push(self.r[n])?;
+                }
+                name = "push_regs";
             }
-            op = "push_regs";
-        } else if h == 0x0400 {
-            next = self.pop()?;
-            op = "pop_pc";
-        } else if h == 0x0410 {
-            self.push(self.sr[3])?;
-            op = "push_rets";
-        } else if h & 0xfff0 == 0x0440 {
-            let boundary = (h & 15) as usize;
-            let range = if boundary < 4 {
-                boundary..=3
-            } else {
-                4..=boundary
-            };
-            for n in range {
-                self.r[n] = self.pop()?;
+            Op::PopPc => {
+                next = self.pop()?;
+                name = "pop_pc";
             }
-            op = "pop_regs";
-        } else if h & 0xfff0 == 0x0470 && h & 15 >= 4 {
-            self.push(self.sr[3])?;
-            for n in (4..=(h & 15) as usize).rev() {
-                self.push(self.r[n])?;
+            Op::PushRets => {
+                self.push(self.sr[3])?;
+                name = "push_rets";
             }
-            op = "push_rets_regs";
-        } else if h & 0xfff0 == 0x0430 && h & 15 >= 4 {
-            for n in 4..=(h & 15) as usize {
-                self.r[n] = self.pop()?;
+            Op::PopRegs => {
+                let boundary = (h & 15) as usize;
+                let range = if boundary < 4 {
+                    boundary..=3
+                } else {
+                    4..=boundary
+                };
+                for n in range {
+                    self.r[n] = self.pop()?;
+                }
+                name = "pop_regs";
             }
-            self.sr[3] = self.pop()?;
-            op = "pop_rets_regs";
-        } else if h & 0xfff0 == 0x0450 && h & 15 >= 4 {
-            for n in 4..=(h & 15) as usize {
-                self.r[n] = self.pop()?;
+            Op::PushRetsRegs => {
+                self.push(self.sr[3])?;
+                for n in (4..=(h & 15) as usize).rev() {
+                    self.push(self.r[n])?;
+                }
+                name = "push_rets_regs";
             }
-            next = self.pop()?;
-            op = "pop_pc_regs";
-        } else if matches!(h, 0x1440..=0x1443) {
-            match h {
-                0x1440 => self.sr[14] = self.sr[12],
-                0x1441 => self.sr[14] = self.sr[13],
-                0x1442 => self.sr[12] = self.sr[14],
-                _ => self.sr[13] = self.sr[14],
+            Op::PopRetsRegs => {
+                for n in 4..=(h & 15) as usize {
+                    self.r[n] = self.pop()?;
+                }
+                self.sr[3] = self.pop()?;
+                name = "pop_rets_regs";
             }
-            op = "move_stack_pointer";
-        } else if matches!(h, 0x04e8 | 0x04e9) {
-            self.push(self.sr[5])?;
-            self.push(self.sr[3])?;
-            if h == 0x04e9 {
-                self.push(self.sr[0])?;
+            Op::PopPcRegs => {
+                for n in 4..=(h & 15) as usize {
+                    self.r[n] = self.pop()?;
+                }
+                next = self.pop()?;
+                name = "pop_pc_regs";
             }
-            op = "push_irq_frame";
-        } else if matches!(h, 0x04a8 | 0x04a9) {
-            if h == 0x04a9 {
-                self.sr[0] = self.pop()?;
+            Op::MoveStackPointer => {
+                match h {
+                    0x1440 => self.sr[14] = self.sr[12],
+                    0x1441 => self.sr[14] = self.sr[13],
+                    0x1442 => self.sr[12] = self.sr[14],
+                    _ => self.sr[13] = self.sr[14],
+                }
+                name = "move_stack_pointer";
             }
-            self.sr[3] = self.pop()?;
-            self.sr[5] = self.pop()?;
-            op = "pop_irq_frame";
-        } else if h == 0xff80 {
-            // Vendor startup uses a signed byte displacement after a 6-byte call.
-            let displacement = self.read(pc + 2, 2)? | (self.read(pc + 4, 2)? << 16);
-            self.sr[3] = pc + 6;
-            next = (pc + 6).wrapping_add(displacement);
-            op = "call_rel32";
-        } else if matches!(h & 0xffc0, 0xea80 | 0xeac0) {
-            let displacement = signed(((h & 63) << 16) | self.read(pc + 2, 2)?, 22) * 2;
-            if h & 0xffc0 == 0xea80 {
-                self.sr[3] = pc + 4;
-                op = "call_rel22";
-            } else {
-                op = "goto_rel22";
+            Op::PushIrqFrame => {
+                self.push(self.sr[5])?;
+                self.push(self.sr[3])?;
+                if h == 0x04e9 {
+                    self.push(self.sr[0])?;
+                }
+                name = "push_irq_frame";
             }
-            next = (pc + 4).wrapping_add(displacement as u32);
-        } else if h & 0xe08f == 0x8001 {
-            // Vendor assembler's short relative call (signed 9-bit byte offset).
-            let displacement = signed((((h >> 4) & 7) << 6) | (((h >> 8) & 31) << 1), 9);
-            self.sr[3] = pc + 2;
-            next = (pc + 2).wrapping_add(displacement as u32);
-            op = "call_rel9";
-        } else if h & 0xe00c == 0x8004 {
-            let displacement = signed(
-                ((h & 3) << 10) | (((h >> 4) & 15) << 6) | (((h >> 8) & 31) << 1),
-                12,
-            );
-            next = (pc + 2).wrapping_add(displacement as u32);
-            op = "goto_rel12";
-        } else if h & 0xe008 == 0x4000 {
-            let displacement = signed((((h >> 4) & 7) << 6) | (((h >> 8) & 31) << 1), 9);
-            let nonzero = h & 0x80 != 0;
-            if (self.r[a] != 0) == nonzero {
+            Op::PopIrqFrame => {
+                if h == 0x04a9 {
+                    self.sr[0] = self.pop()?;
+                }
+                self.sr[3] = self.pop()?;
+                self.sr[5] = self.pop()?;
+                name = "pop_irq_frame";
+            }
+            Op::CallRel32 => {
+                // Vendor startup uses a signed byte displacement after a 6-byte call.
+                let displacement =
+                    self.operand(code.x, pc + 2)? | (self.operand(code.y, pc + 4)? << 16);
+                self.sr[3] = pc + 6;
+                next = (pc + 6).wrapping_add(displacement);
+                name = "call_rel32";
+            }
+            Op::Rel22 => {
+                let displacement = signed(((h & 63) << 16) | self.operand(code.x, pc + 2)?, 22) * 2;
+                if h & 0xffc0 == 0xea80 {
+                    self.sr[3] = pc + 4;
+                    name = "call_rel22";
+                } else {
+                    name = "goto_rel22";
+                }
+                next = (pc + 4).wrapping_add(displacement as u32);
+            }
+            Op::CallRel9 => {
+                // Vendor assembler's short relative call (signed 9-bit byte offset).
+                let displacement = signed((((h >> 4) & 7) << 6) | (((h >> 8) & 31) << 1), 9);
+                self.sr[3] = pc + 2;
                 next = (pc + 2).wrapping_add(displacement as u32);
+                name = "call_rel9";
             }
-            op = if nonzero {
-                "branch_nonzero"
-            } else {
-                "branch_zero"
-            };
-        } else if h & 0xfff0 == 0x00b0 {
-            let address = self.r[(h & 15) as usize];
-            let old = self.read(address, 1)?;
-            self.bus
-                .write(address, 0xff, 1)
-                .map_err(|fault| Fault::Access { pc, fault })?;
-            // FM-1_982 physical probe: the old byte's low nibble is copied
-            // into the four PSR condition bits, not a comparison result.
-            self.sr[5] = (self.sr[5] & !15) | (old & 15);
-            op = "testset_byte";
-        } else if h == 0x0080 {
-            next = self.sr[3];
-            op = "return";
-        } else if h & 0xfff0 == 0x00c0 {
-            self.sr[3] = pc + 2;
-            next = self.r[(h & 15) as usize];
-            op = "call_reg";
-        } else if h == 0x0081 && self.in_interrupt {
-            next = self.sr[0];
-            self.sr[13] = self.sr[14];
-            self.sr[14] = self.sr[12];
-            self.in_interrupt = false;
-            self.predicate_skip = self.irq_predicate.take();
-            self.repeat = self.irq_repeat.take();
-            self.interrupts_enabled = true;
-            self.sr[11] = (self.sr[11] & !255) | 0x200;
-            self.write(0x1eef1a8 + self.sr[6] * 0x200, self.irq_priority_mask)?;
-            op = "rti";
-        } else if h == 0x0060 {
-            self.interrupts_enabled = false;
-            self.sr[11] &= !0x200;
-            op = "cli";
-        } else if matches!(h, 0x0040 | 0x0041) {
-            // CPU bus ownership latch. With one executing core acquisition
-            // cannot contend; this does not replace the guest's memory locks.
-            self.bus_locked = h == 0x0041;
-            op = if self.bus_locked {
-                "lockset"
-            } else {
-                "lockclr"
-            };
-        } else if h == 0x0061 {
-            self.interrupts_enabled = true;
-            self.sr[11] |= 0x200;
-            op = "sti";
-        } else if h == 0x0020 || h == 0x0000 {
-            op = if h == 0x0020 { "csync" } else { "nop" };
-        } else if let Some((destination, name)) = crate::extended::execute(self, h, pc)? {
-            next = destination;
-            op = name;
-        } else {
-            return Err(Fault::Unsupported { pc, word: h as u16 });
+            Op::GotoRel12 => {
+                let displacement = signed(
+                    ((h & 3) << 10) | (((h >> 4) & 15) << 6) | (((h >> 8) & 31) << 1),
+                    12,
+                );
+                next = (pc + 2).wrapping_add(displacement as u32);
+                name = "goto_rel12";
+            }
+            Op::BranchRegister => {
+                let displacement = signed((((h >> 4) & 7) << 6) | (((h >> 8) & 31) << 1), 9);
+                let nonzero = h & 0x80 != 0;
+                if (self.r[a] != 0) == nonzero {
+                    next = (pc + 2).wrapping_add(displacement as u32);
+                }
+                name = if nonzero {
+                    "branch_nonzero"
+                } else {
+                    "branch_zero"
+                };
+            }
+            Op::TestsetByte => {
+                let address = self.r[(h & 15) as usize];
+                let old = self.read(address, 1)?;
+                self.bus
+                    .write(address, 0xff, 1)
+                    .map_err(|fault| Fault::Access { pc, fault })?;
+                // FM-1_982 physical probe: the old byte's low nibble is copied
+                // into the four PSR condition bits, not a comparison result.
+                self.sr[5] = (self.sr[5] & !15) | (old & 15);
+                name = "testset_byte";
+            }
+            Op::Return => {
+                next = self.sr[3];
+                name = "return";
+            }
+            Op::CallReg => {
+                self.sr[3] = pc + 2;
+                next = self.r[(h & 15) as usize];
+                name = "call_reg";
+            }
+            Op::Rti => {
+                if !self.in_interrupt {
+                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                }
+                next = self.sr[0];
+                self.sr[13] = self.sr[14];
+                self.sr[14] = self.sr[12];
+                self.in_interrupt = false;
+                self.predicate_skip = self.irq_predicate.take();
+                self.repeat = self.irq_repeat.take();
+                self.interrupts_enabled = true;
+                self.sr[11] = (self.sr[11] & !255) | 0x200;
+                self.write(0x1eef1a8 + self.sr[6] * 0x200, self.irq_priority_mask)?;
+                name = "rti";
+            }
+            Op::Cli => {
+                self.interrupts_enabled = false;
+                self.sr[11] &= !0x200;
+                name = "cli";
+            }
+            Op::Lock => {
+                // CPU bus ownership latch. With one executing core acquisition
+                // cannot contend; this does not replace the guest's memory locks.
+                self.bus_locked = h == 0x0041;
+                name = if self.bus_locked {
+                    "lockset"
+                } else {
+                    "lockclr"
+                };
+            }
+            Op::Sti => {
+                self.interrupts_enabled = true;
+                self.sr[11] |= 0x200;
+                name = "sti";
+            }
+            Op::Nop => {
+                name = if h == 0x0020 { "csync" } else { "nop" };
+            }
+            Op::Wide => {
+                // The extension halfword selects the form.
+                let x = self.operand(code.x, pc + 2)?;
+                let operands = Operands {
+                    x: Some(x as u16),
+                    y: code.y,
+                };
+                return self.execute(h, decode_wide(h, x), operands);
+            }
+            Op::Unsupported => return Err(Fault::Unsupported { pc, word: h as u16 }),
+            _ => {
+                let (destination, extended_name) = crate::extended::execute(self, op, h, pc, code)?;
+                next = destination;
+                name = extended_name;
+            }
         }
         self.pc = next;
-        Ok(op)
+        Ok(name)
     }
 
     fn dispatch_interrupt(&mut self) -> Result<(), Fault> {
