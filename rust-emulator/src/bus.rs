@@ -16,6 +16,32 @@ pub struct AccessFault {
 mod dma_tests {
     use super::*;
     #[test]
+    fn uart_dma_completion_uses_the_selected_clock_and_source_20() {
+        let mut b = Bus::new(vec![0; 8]).unwrap();
+        b.write(RAM, 0x007f3c90, 4).unwrap();
+        b.write(0x10010, 1 << 10, 4).unwrap(); // PLL48M
+        b.write(crate::devices::IRQ_CONFIG + 2 * 4, 3 << 16, 4)
+            .unwrap();
+        b.write(0x12100, 0x6d, 2).unwrap();
+        b.write(0x12108, 383, 2).unwrap();
+        b.write(0x12114, RAM, 4).unwrap();
+        b.write(0x12118, 3, 2).unwrap();
+        b.advance_devices(23039);
+        assert_eq!(b.pending_irq(0x100), None);
+        b.advance_devices(1);
+        assert_eq!(b.pending_irq(0x100), Some(20));
+        assert_eq!(b.read(crate::devices::IRQ_PENDING, 4).unwrap(), 1 << 20);
+        b.write(0x12100, 0x206d, 2).unwrap();
+        assert_eq!(b.pending_irq(0x100), None);
+        b.write(0x10010, 0, 4).unwrap(); // OSC24M halves the baud rate.
+        b.write(0x12118, 3, 2).unwrap();
+        b.advance_devices(46079);
+        assert_eq!(b.pending_irq(0x100), None);
+        b.advance_devices(1);
+        assert_eq!(b.pending_irq(0x100), Some(20));
+        assert_eq!(b.read(RAM, 4).unwrap(), 0x007f3c90);
+    }
+    #[test]
     fn packaged_lcd_dma_honors_decryption_mapping_and_xip_enable() {
         let mut plain = vec![0; 0x140];
         plain[0x121..0x129].copy_from_slice(&[0xf8, 0, 7, 0xe0, 0, 0x1f, 0xff, 0xff]);
@@ -267,6 +293,9 @@ impl Bus {
 
     pub fn write(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
         Self::check(address, size, "write")?;
+        if let Some(result) = self.devices.write_uart(address, value, size, &self.ram) {
+            return result.map_err(|reason| Self::fault(address, size, "write", reason));
+        }
         if self.shift_spi.read(address & !3).is_some() {
             if size != 4 {
                 return Err(Self::fault(
@@ -406,6 +435,14 @@ impl Bus {
         let core_hz = self.clock.system_hz(clk_con3);
         self.devices
             .advance_with_clocks(ticks, peripheral_hz, core_hz);
+        // spec_uart.c: CLK_CON2[11:10] selects OSC, PLL48M, or LSB.
+        let uart_hz = match (self.usb.read(0x10010).unwrap() >> 10) & 3 {
+            0 => 24_000_000,
+            1 => 48_000_000,
+            2 => peripheral_hz,
+            _ => 0,
+        };
+        self.devices.advance_uart(ticks, uart_hz);
         if let Some(bytes) = self.shift_spi.advance(ticks, peripheral_hz) {
             self.devices.gpio.shift_spi(&bytes);
         }

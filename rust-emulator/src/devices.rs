@@ -269,6 +269,9 @@ impl Devices {
                     if self.adc.pending_irq() {
                         bits |= 1 << 24;
                     }
+                    if self.uart.pending_irq() {
+                        bits |= 1 << 20;
+                    }
                     for (index, timer) in self.startup_timers.iter().enumerate() {
                         if timer.pending {
                             bits |= 1 << (4 + index);
@@ -303,7 +306,7 @@ impl Devices {
         value: u32,
         size: usize,
     ) -> Option<Result<(), &'static str>> {
-        if let Some(result) = self.uart.write(address, value, size) {
+        if let Some(result) = self.uart.write(address, value, size, None) {
             return Some(result);
         }
         let (core, a) = Self::bank(address);
@@ -360,6 +363,18 @@ impl Devices {
     pub fn advance(&mut self, ticks: u32) {
         self.advance_with_timer_clock(ticks, 60_000_000);
     }
+    pub(crate) fn write_uart(
+        &mut self,
+        address: u32,
+        value: u32,
+        size: usize,
+        ram: &[u8],
+    ) -> Option<Result<(), &'static str>> {
+        self.uart.write(address, value, size, Some(ram))
+    }
+    pub(crate) fn advance_uart(&mut self, ticks: u32, hz: u32) {
+        self.uart.advance(ticks, hz);
+    }
     pub(crate) fn advance_with_timer_clock(&mut self, ticks: u32, peripheral_hz: u32) {
         self.advance_with_clocks(ticks, peripheral_hz, 360_000_000);
     }
@@ -391,6 +406,7 @@ impl Devices {
         [
             (TICK_IRQ, tick.pending),
             (24, self.adc.pending_irq()),
+            (20, self.uart.pending_irq()),
             (44, self.rc_measurement.pending),
             (62, self.timer4.pending),
             (TIMER5_IRQ, self.timer5.pending),

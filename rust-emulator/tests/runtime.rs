@@ -359,7 +359,9 @@ fn stock_uart_midi_receive_setup_stays_empty_without_input() {
     assert_eq!(c.bus.read(0x12120, 4).unwrap(), start);
     assert_eq!(c.bus.read(start, 4).unwrap(), 0x12345678);
     assert!(c.bus.write(0x12118, 1, 2).is_err());
-    assert!(c.bus.write(0x1210c, 0x90, 1).is_err());
+    c.bus.write(0x1210c, 0x90, 1).unwrap();
+    assert_eq!(c.bus.read(0x12100, 2).unwrap(), 0x6d);
+    assert!(c.bus.write(0x1210c, 0x40, 1).is_err()); // TX still busy.
     assert!(c.bus.write(0x12128, 1, 2).is_err());
     assert!(c.bus.read(0x1212c, 4).is_err());
 }
