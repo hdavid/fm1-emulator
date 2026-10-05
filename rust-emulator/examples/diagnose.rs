@@ -170,7 +170,7 @@ fn run() -> Result<(), String> {
         "watchdog: {} feeds; timeout {:?} ticks, {} since the last feed",
         cpu.bus.system.watchdog_feeds,
         cpu.bus.system.watchdog_timeout(),
-        cpu.bus.system.watchdog_ticks
+        cpu.bus.watchdog_ticks()
     );
     eprintln!(
         "audio: {} stereo frames, {} DMA halves; ADC: {} conversions",

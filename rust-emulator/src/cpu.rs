@@ -367,14 +367,33 @@ impl Cpu {
         self.subtick += 1;
         if self.subtick >= self.instructions_per_tick {
             self.subtick = 0;
-            self.advance_devices(pc)?;
+            self.bus.now += 1;
+            if self.bus.now >= self.bus.next_event {
+                self.advance_devices(pc)?;
+            }
         }
         self.dispatch_interrupt()?;
         Ok(op)
     }
 
-    /// One oscillator tick of the clocked devices.
+    /// Oscillator tick `bus.now`, at which a device may have an event: the
+    /// ticks since the last one only counted, so they are applied at once,
+    /// then this tick runs exactly as every tick once did.
     fn advance_devices(&mut self, pc: u32) -> Result<(), Fault> {
+        let now = self.bus.now;
+        self.bus
+            .catch_up(now - 1)
+            .map_err(|fault| Fault::Access { pc, fault })?;
+        self.bus.synced = now;
+        // Should this tick fault, the next one runs exactly too.
+        self.bus.next_event = now + 1;
+        self.advance_tick(pc)?;
+        self.bus.next_event = now + self.bus.ticks_to_event();
+        Ok(())
+    }
+
+    /// One oscillator tick of the clocked devices.
+    fn advance_tick(&mut self, pc: u32) -> Result<(), Fault> {
         self.bus.devices.advance(OSC_TICKS_PER_INSTRUCTION);
         self.bus
             .system

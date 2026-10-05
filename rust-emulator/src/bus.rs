@@ -47,6 +47,13 @@ pub struct Bus {
     pub mmio_stats: std::cell::RefCell<Option<std::collections::BTreeMap<(u32, u32), [u64; 2]>>>,
     /// PC of the instruction being executed (diagnostics only).
     pub pc_hint: std::cell::Cell<u32>,
+    /// Oscillator ticks since reset (the CPU counts them).
+    pub(crate) now: u64,
+    /// Ticks the clocked devices have been advanced by.
+    pub(crate) synced: u64,
+    /// The tick that must run through the exact per-tick device path:
+    /// until then every device only counts (see `catch_up`).
+    pub(crate) next_event: u64,
 }
 
 impl Bus {
@@ -85,6 +92,9 @@ impl Bus {
             nor_generation: 0,
             mmio_stats: Default::default(),
             pc_hint: Default::default(),
+            now: 0,
+            synced: 0,
+            next_event: 0,
         })
     }
 
@@ -278,7 +288,7 @@ impl Bus {
                     ))
                 };
             }
-            if let Some(value) = self.devices.read(address, size) {
+            if let Some(value) = self.devices.read_at(address, size, self.now - self.synced) {
                 return value
                     .map(|value| {
                         if address == crate::devices::IRQ_PENDING && self.audio.pending_irq() {
@@ -380,7 +390,65 @@ impl Bus {
         self.write_slow(address, value, size)
     }
 
+    /// A write outside SRAM. Devices are brought up to the current tick
+    /// first, and since a register write can change what the next tick does
+    /// (start a transfer, enable a timer, reset a controller), that tick runs
+    /// through the exact per-tick path.
     fn write_slow(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
+        self.catch_up(self.now)?;
+        let result = self.write_mmio(address, value, size);
+        self.next_event = self.now + 1;
+        result
+    }
+
+    /// Advance every clocked device to tick `to` in one step. Only valid
+    /// while no device has an event in between (`to < next_event`): each
+    /// device's `advance(n)` then equals n calls of `advance(1)`.
+    pub(crate) fn catch_up(&mut self, to: u64) -> Result<(), AccessFault> {
+        let span = to - self.synced;
+        if span == 0 {
+            return Ok(());
+        }
+        self.synced = to;
+        let ticks = u32::try_from(span).expect("device catch-up spans are bounded");
+        self.devices.advance(ticks);
+        self.system
+            .advance(ticks)
+            .map_err(|reason| Self::fault(0x13e08, 4, "watchdog", reason))?;
+        self.advance_usb(ticks)?;
+        self.advance_audio(ticks)?;
+        self.spi2.advance(ticks);
+        Ok(())
+    }
+
+    /// Ticks from now until the next device event, capped so that a
+    /// catch-up span fits the devices' tick arguments.
+    pub(crate) fn ticks_to_event(&self) -> u64 {
+        [
+            self.devices.ticks_to_event(),
+            self.system.ticks_to_event(),
+            self.usb.ticks_to_event(),
+            self.audio.ticks_to_event(),
+            self.spi2.ticks_to_event(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(u64::MAX)
+        .min(1 << 30)
+    }
+
+    /// Watchdog ticks since the last feed, as of the current tick.
+    pub fn watchdog_ticks(&self) -> u64 {
+        let elapsed = self.now - self.synced;
+        if self.system.watchdog_timeout().is_some() {
+            self.system.watchdog_ticks + elapsed
+        } else {
+            self.system.watchdog_ticks
+        }
+    }
+
+    fn write_mmio(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
         self.count_mmio(address, 1);
         if self.clock.write(address, value).is_some() {
             return Ok(());

@@ -175,6 +175,23 @@ impl Usb {
         }
         Ok(())
     }
+    /// Oscillator ticks until the next tick at which `advance(1)` does more
+    /// than count: a frame boundary, attachment or a host SETUP. Valid when
+    /// the previous tick already ran with the current register state.
+    pub(crate) fn ticks_to_event(&self) -> Option<u64> {
+        if self.regs[0] & 4 == 0 || self.io & 0x40 == 0 {
+            return None;
+        }
+        if !self.attached {
+            return Some(1);
+        }
+        let frame = 24000 - self.ticks % 24000;
+        if self.waiting || self.phase >= 5 {
+            return Some(frame);
+        }
+        Some(frame.min(self.deadline.saturating_sub(self.ticks).max(1)))
+    }
+
     pub fn advance(&mut self, ticks: u32, ram: &mut [u8]) -> Result<(), &'static str> {
         self.ticks += ticks as u64;
         if self.regs[0] & 4 == 0 || self.io & 0x40 == 0 {
