@@ -181,6 +181,12 @@ impl Uart {
         Ok(())
     }
 
+    /// Oscillator ticks at `hz` until a transmission in progress ends.
+    pub(crate) fn ticks_to_event(&self, hz: u32) -> Option<u64> {
+        (!self.transmit.is_empty() && self.registers[0] & 1 != 0 && hz != 0)
+            .then(|| self.remaining.div_ceil(hz as u64).max(1))
+    }
+
     pub(crate) fn advance(&mut self, ticks: u32, hz: u32) {
         if self.transmit.is_empty() || self.registers[0] & 1 == 0 {
             return;

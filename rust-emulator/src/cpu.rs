@@ -162,6 +162,18 @@ pub struct Cpu {
     pub sr: [u32; 16],
     pub pc: u32,
     pub steps: u64,
+    /// Instructions issued by each core (halted slots included); `steps` is
+    /// their sum.
+    pub core_steps: [u64; 2],
+    /// `run_steps` jumps over spans in which every running core is halted
+    /// by `idle` (true, the default); false steps each halted slot. The
+    /// guest-visible state is the same either way.
+    pub idle_skip: bool,
+    /// Instruction slots in which a core was halted by `idle`, stepped or
+    /// skipped, over both cores.
+    pub idle_slots: u64,
+    /// Of `idle_slots`, those jumped over without stepping.
+    pub idle_skipped: u64,
     pub interrupts_enabled: bool,
     pub irq_entries: u64,
     in_interrupt: bool,
@@ -266,6 +278,10 @@ impl Cpu {
             sr: [0; 16],
             pc: entry,
             steps: 0,
+            core_steps: [0; 2],
+            idle_skip: true,
+            idle_slots: 0,
+            idle_skipped: 0,
             interrupts_enabled: false,
             irq_entries: 0,
             in_interrupt: false,
@@ -315,6 +331,128 @@ impl Cpu {
         self.in_interrupt
     }
 
+    /// The secondary core's PC, once started (diagnostics).
+    pub fn secondary_pc(&self) -> Option<u32> {
+        self.secondary.as_ref().map(|core| core.pc)
+    }
+
+    /// Whether the secondary core, once started, is halted in `idle`.
+    pub fn secondary_halted(&self) -> Option<bool> {
+        self.secondary.as_ref().map(|core| core.idle)
+    }
+
+    /// Run at `mhz` instructions per microsecond of guest time instead of
+    /// the firmware's system clock (`Bus::set_instruction_clock`).
+    pub fn set_cpu_mhz(&mut self, mhz: u32) -> Result<(), String> {
+        if !(1..=1000).contains(&mhz) {
+            return Err(format!("CPU clock {mhz} MHz: use 1..1000"));
+        }
+        self.bus.set_instruction_clock(Some(mhz * 1_000_000));
+        Ok(())
+    }
+
+    /// Instructions `run_steps` runs between checks for halted cores.
+    const HALT_CHECK_INTERVAL: u64 = 64;
+
+    /// `count` calls of `step`, stopping at the first fault. Spans in which
+    /// every running core is halted by `idle` and no interrupt can enter
+    /// are jumped over (unless `idle_skip` is off): time, the step counters
+    /// and the devices end up exactly as if each halted slot had stepped.
+    pub fn run_steps(&mut self, count: u64) -> Result<(), Fault> {
+        let mut done = 0;
+        while done < count {
+            if self.idle || self.secondary.as_ref().is_some_and(|core| core.idle) {
+                let skipped = self.skip_idle_calls(count - done);
+                if skipped > 0 {
+                    done += skipped;
+                    continue;
+                }
+            }
+            // Checking for a halt only every few instructions keeps this
+            // loop as tight as a plain one.
+            let batch = (count - done).min(Self::HALT_CHECK_INTERVAL);
+            for _ in 0..batch {
+                self.step()?;
+            }
+            done += batch;
+        }
+        Ok(())
+    }
+
+    /// While every core that would step is halted by `idle` and no
+    /// interrupt can enter, account up to `max_calls` calls of `step` at
+    /// once, stopping before the call that reaches the next device event.
+    /// Returns the calls skipped (0: step normally).
+    pub fn skip_idle_calls(&mut self, max_calls: u64) -> u64 {
+        if !self.idle_skip {
+            return 0;
+        }
+        // Mirror `step`: which cores issue on the next call. A call that
+        // starts or stops the secondary core is stepped normally.
+        let control = self.bus.core_control(1);
+        let secondary = self.secondary.as_ref();
+        if (control & 2 != 0 && secondary.is_some()) || (secondary.is_none() && control & 10 == 8) {
+            return 0;
+        }
+        let secondary_running = control & 0x18 == 8 && secondary.is_some();
+        let secondary_alone = secondary_running
+            && (self.bus.core_control(0) & 16 != 0
+                || secondary.is_some_and(|core| core.bus_locked));
+        let primary_steps = !secondary_alone;
+        let secondary_steps = secondary_alone || (secondary_running && !self.bus_locked);
+        let primary_quiet = self.idle
+            && self.idle_wake_delay == 0
+            && self.predicate_skip.is_none()
+            && self.repeat.is_none();
+        let secondary_quiet = secondary.is_some_and(|core| {
+            core.idle
+                && core.idle_wake_delay == 0
+                && core.predicate_skip.is_none()
+                && core.repeat.is_none()
+        });
+        if (primary_steps && !primary_quiet) || (secondary_steps && !secondary_quiet) {
+            return 0;
+        }
+        // A halted core that can take a pending interrupt wakes next slot.
+        if self.bus.any_irq_pending() {
+            if primary_steps
+                && self.interrupts_enabled
+                && !self.in_interrupt
+                && self
+                    .bus
+                    .pending_irq_for(self.sr[11], self.sr[6] as usize)
+                    .is_some()
+            {
+                return 0;
+            }
+            if secondary_steps
+                && secondary.is_some_and(|core| {
+                    core.interrupts_enabled
+                        && !core.in_interrupt
+                        && self
+                            .bus
+                            .pending_irq_for(core.sr[11], core.sr[6] as usize)
+                            .is_some()
+                })
+            {
+                return 0;
+            }
+        }
+        // Exactly one issuing core carries guest time per call.
+        let calls = self.bus.issues_before_event().min(max_calls);
+        if calls == 0 {
+            return 0;
+        }
+        self.bus.skip_issues(calls);
+        let slots = calls * (u64::from(primary_steps) + u64::from(secondary_steps));
+        self.steps += slots;
+        self.core_steps[0] += if primary_steps { calls } else { 0 };
+        self.core_steps[1] += if secondary_steps { calls } else { 0 };
+        self.idle_slots += slots;
+        self.idle_skipped += slots;
+        calls
+    }
+
     pub fn step(&mut self) -> Result<&'static str, Fault> {
         let control = self.bus.core_control(1);
         if control & 2 != 0 {
@@ -336,6 +474,7 @@ impl Cpu {
             return self.step_secondary(true);
         }
         let op = self.step_core(true)?;
+        self.core_steps[0] += 1;
         if !self.bus_locked && secondary_running {
             self.step_secondary(false)?;
         }
@@ -348,6 +487,7 @@ impl Cpu {
         let result = self.step_core(advance_time);
         secondary.swap(self);
         self.secondary = Some(secondary);
+        self.core_steps[1] += 1;
         result
     }
 
@@ -359,9 +499,13 @@ impl Cpu {
             }
         }
         let pc = self.pc;
+        if self.bus.mmio_counting {
+            self.bus.pc_hint.set(pc);
+        }
         let op = if self.idle {
             // Keep shared hardware time and the other core running while this
             // core waits. IRQ entry resumes at the instruction after IDLE.
+            self.idle_slots += 1;
             "idle_wait"
         } else {
             let h = self
@@ -459,26 +603,8 @@ impl Cpu {
             0
         };
         if ticks != 0 {
-            self.bus.advance_devices(ticks);
-            self.bus.advance_nor(ticks);
-            self.bus.advance_wireless(ticks);
             self.bus
-                .system
-                .advance(ticks)
-                .map_err(|reason| Fault::Access {
-                    pc,
-                    fault: AccessFault {
-                        address: 0x13e08,
-                        size: 4,
-                        operation: "watchdog",
-                        reason,
-                    },
-                })?;
-            self.bus
-                .advance_usb(ticks)
-                .map_err(|fault| Fault::Access { pc, fault })?;
-            self.bus
-                .advance_audio(ticks)
+                .advance_time(ticks)
                 .map_err(|fault| Fault::Access { pc, fault })?;
         }
         self.idle_wake_delay = self.idle_wake_delay.saturating_sub(1);

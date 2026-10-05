@@ -82,10 +82,33 @@ impl Player {
     pub fn run(&mut self, steps: u64) -> Result<(), String> {
         let end = self.cpu.steps + steps;
         while self.cpu.steps < end {
-            if self.cpu.steps.is_multiple_of(PANEL_SCAN_STEPS) {
-                self.scan_panel()?;
+            self.scan_panel()?;
+            // Two instructions per call while the secondary core runs.
+            let cores = 1 + u64::from(self.cpu.secondary_pc().is_some());
+            let calls = (end - self.cpu.steps).div_ceil(cores);
+            self.run_calls(calls.min(PANEL_SCAN_STEPS))?;
+        }
+        Ok(())
+    }
+
+    /// `calls` calls of `Cpu::step`, jumping over halted spans
+    /// (`Cpu::skip_idle_calls`); instructions that issue are stepped one
+    /// by one for the profile and the fault trace.
+    fn run_calls(&mut self, calls: u64) -> Result<(), String> {
+        let mut done = 0;
+        while done < calls {
+            if self.cpu.halted() {
+                let skipped = self.cpu.skip_idle_calls(calls - done);
+                if skipped > 0 {
+                    if let Some(profile) = self.profile.as_mut() {
+                        profile.record_idle(skipped);
+                    }
+                    done += skipped;
+                    continue;
+                }
             }
             self.step()?;
+            done += 1;
         }
         Ok(())
     }
@@ -124,10 +147,11 @@ impl Player {
     pub fn run_seconds(&mut self, seconds: f64) -> Result<(), String> {
         let end = self.cpu.bus.oscillator_ticks() + (seconds * OSCILLATOR_HZ) as u64;
         while self.cpu.bus.oscillator_ticks() < end {
-            if self.cpu.steps.is_multiple_of(PANEL_SCAN_STEPS) {
-                self.scan_panel()?;
-            }
-            self.step()?;
+            self.scan_panel()?;
+            // A call takes at least one 24 MHz tick's share of time; close
+            // to `end`, take fewer calls between checks.
+            let left = end - self.cpu.bus.oscillator_ticks();
+            self.run_calls(left.clamp(1, PANEL_SCAN_STEPS))?;
         }
         Ok(())
     }

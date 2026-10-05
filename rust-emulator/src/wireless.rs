@@ -81,6 +81,17 @@ impl Wireless {
     fn bt_index(address: u32) -> Option<usize> {
         BT_CONFIGURATION.iter().position(|a| *a == address)
     }
+    /// Index of a configuration word known to be in `BT_CONFIGURATION`,
+    /// evaluated at compile time (the interrupt check runs every step).
+    const fn bt_slot(address: u32) -> usize {
+        let mut i = 0;
+        while BT_CONFIGURATION[i] != address {
+            i += 1;
+        }
+        i
+    }
+    const CLOCK_CONTROL: usize = Self::bt_slot(0x20000);
+    const CLOCK_EVENTS: usize = Self::bt_slot(0x2000c);
     pub(crate) fn advance(&mut self, ticks: u32) {
         self.filter_ticks = self.filter_ticks.saturating_sub(ticks);
         // Vendor bredr_frame.c uses full 625 us slots and fine microseconds;
@@ -88,13 +99,11 @@ impl Wireless {
         // not a measured RF clock/power/reset model.
         const SLOT: u64 = 15_000; // 24 MHz * 625 us.
         const WRAP: u64 = SLOT * (1 << 27);
-        if self.bt_configuration[Self::bt_index(0x20000).unwrap()] & 1 != 0 {
+        if self.bt_configuration[Self::CLOCK_CONTROL] & 1 != 0 {
             let old = self.bt_clock_ticks;
             let distance = ((self.bt_alarm as u64).wrapping_sub(old / SLOT)) & ((1 << 27) - 1);
             let until = if distance == 0 { WRAP } else { distance * SLOT } - old % SLOT;
-            if self.bt_configuration[Self::bt_index(0x2000c).unwrap()] & 512 != 0
-                && ticks as u64 >= until
-            {
+            if self.bt_configuration[Self::CLOCK_EVENTS] & 512 != 0 && ticks as u64 >= until {
                 self.bt_clock_pending = true;
             }
             self.bt_clock_ticks = (old + ticks as u64) % WRAP;
@@ -114,8 +123,35 @@ impl Wireless {
             }
         }
     }
+    /// Oscillator ticks until `advance` next changes something readable or
+    /// an interrupt: a requested clock sample, an enabled clock or slot
+    /// alarm. The calibration filter's countdown is only consulted by
+    /// register writes, which bring devices up to date first.
+    pub(crate) fn ticks_to_event(&self) -> Option<u64> {
+        const SLOT: u64 = 15_000;
+        const WRAP: u64 = SLOT * (1 << 27);
+        let mut next = (self.bt_sample_ticks != 0).then_some(self.bt_sample_ticks as u64);
+        if self.bt_configuration[Self::CLOCK_CONTROL] & 1 != 0 {
+            let old = self.bt_clock_ticks;
+            let until = |alarm: u32| {
+                let distance = ((alarm as u64).wrapping_sub(old / SLOT)) & ((1 << 27) - 1);
+                (if distance == 0 { WRAP } else { distance * SLOT } - old % SLOT).max(1)
+            };
+            if self.bt_configuration[Self::CLOCK_EVENTS] & 512 != 0 && !self.bt_clock_pending {
+                next = Some(next.map_or(until(self.bt_alarm), |n| n.min(until(self.bt_alarm))));
+            }
+            for (channel, alarm) in self.slot_alarms.iter().enumerate() {
+                if self.slot_enabled & (1 << channel) != 0
+                    && self.slot_pending & (1 << channel) == 0
+                {
+                    next = Some(next.map_or(until(*alarm), |n| n.min(until(*alarm))));
+                }
+            }
+        }
+        next
+    }
     pub(crate) fn clock_pending_irq(&self) -> bool {
-        self.bt_clock_pending && self.bt_configuration[Self::bt_index(0x2000c).unwrap()] & 512 != 0
+        self.bt_clock_pending && self.bt_configuration[Self::CLOCK_EVENTS] & 512 != 0
     }
     pub(crate) fn slot_pending_irq(&self) -> bool {
         self.slot_pending & self.slot_enabled != 0

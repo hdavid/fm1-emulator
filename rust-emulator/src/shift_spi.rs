@@ -78,6 +78,11 @@ impl ShiftSpi {
         self.registers[4] = 0;
         Some(std::mem::take(&mut self.data))
     }
+    /// Oscillator ticks at `peripheral_hz` until a transfer ends.
+    pub(crate) fn ticks_to_event(&self, peripheral_hz: u32) -> Option<u64> {
+        (!self.data.is_empty() && peripheral_hz != 0)
+            .then(|| self.remaining.div_ceil(peripheral_hz as u64).max(1))
+    }
     pub(crate) fn pending_irq(&self) -> bool {
         self.pending && self.registers[0] & 0x2001 == 0x2001
     }

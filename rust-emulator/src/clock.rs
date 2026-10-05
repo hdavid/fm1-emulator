@@ -51,7 +51,9 @@ impl Clock {
         let sys = self.system_hz(clk_con3);
         sys / (((self.system[1] >> 16) & 3) + 1) / (((self.system[1] >> 8) & 7) + 1)
     }
-    pub(crate) fn instruction_ticks(&mut self, clk_con3: u32) -> u32 {
+    /// The instruction issue rate, rescaling the retained fraction of an
+    /// oscillator tick when it changed.
+    fn issue_hz(&mut self, clk_con3: u32) -> u32 {
         let hz = match (self.issue_override, self.issue_clock) {
             (Some(hz), _) => hz.max(1),
             (None, Some((selector, hz))) if selector == clk_con3 => hz,
@@ -65,6 +67,26 @@ impl Clock {
             self.instruction_phase = self.instruction_phase * hz as u64 / self.phase_hz as u64;
             self.phase_hz = hz;
         }
+        hz
+    }
+    /// Oscillator ticks of `count` instruction issues: the same as `count`
+    /// calls of `instruction_ticks`, summed.
+    pub(crate) fn issue(&mut self, clk_con3: u32, count: u64) -> u64 {
+        let hz = self.issue_hz(clk_con3) as u64;
+        let phase = self.instruction_phase + count * 24_000_000;
+        self.instruction_phase = phase % hz;
+        phase / hz
+    }
+    /// The most instruction issues that take at most `ticks` oscillator
+    /// ticks in total.
+    pub(crate) fn issues_within(&mut self, clk_con3: u32, ticks: u64) -> u64 {
+        let hz = self.issue_hz(clk_con3) as u64;
+        ((ticks + 1) * hz)
+            .checked_sub(self.instruction_phase + 1)
+            .map_or(0, |room| room / 24_000_000)
+    }
+    pub(crate) fn instruction_ticks(&mut self, clk_con3: u32) -> u32 {
+        let hz = self.issue_hz(clk_con3);
         // One nominal CPU issue per step. Latencies/cache stalls are not
         // cycle accurate; an instruction is no longer one full OSC cycle.
         self.instruction_phase += 24_000_000;
