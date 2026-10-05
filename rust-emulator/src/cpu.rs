@@ -399,6 +399,11 @@ impl Cpu {
     }
 
     /// Set the emulated CPU clock in MHz: a multiple of the 24 MHz oscillator.
+    /// Diagnostics: the secondary core's PC, if it has been started.
+    pub fn secondary_pc(&self) -> Option<u32> {
+        self.secondary.as_ref().map(|core| core.pc)
+    }
+
     pub fn set_cpu_mhz(&mut self, mhz: u32) -> Result<(), String> {
         if mhz == 0 || mhz % 24 != 0 {
             return Err(format!("CPU clock {mhz} MHz: use a multiple of 24 (24, 96, 192, 312...)"));

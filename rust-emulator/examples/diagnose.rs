@@ -59,6 +59,10 @@ fn run() -> Result<(), String> {
         .transpose()?
         .unwrap_or(0);
     let mut hot = BTreeMap::<u32, u64>::new();
+    let callers_pc: Option<u32> = env::var("FM1_CALLERS")
+        .ok()
+        .and_then(|pc| u32::from_str_radix(pc.trim_start_matches("0x"), 16).ok());
+    let mut callers = BTreeMap::<u32, u64>::new();
     // Optional: FM1_WATCH=PC[,PC] prints registers whenever CPU 0 reaches PC.
     let watch: Vec<u32> = env::var("FM1_WATCH")
         .map(|list| {
@@ -103,6 +107,10 @@ fn run() -> Result<(), String> {
         }
         if hot_window > 0 && step + hot_window >= limit {
             *hot.entry(pc).or_default() += 1;
+            // Optional: FM1_CALLERS=PC counts rets at PC in the hot window.
+            if callers_pc == Some(pc) {
+                *callers.entry(cpu.sr[3]).or_default() += 1;
+            }
         }
         if mmio_window > 0 && step + mmio_window == limit {
             *cpu.bus.mmio_stats.borrow_mut() = Some(BTreeMap::new());
@@ -146,6 +154,9 @@ fn run() -> Result<(), String> {
     eprintln!("application: {}", args[0]);
     eprintln!("executed: {} instructions", cpu.steps);
     eprintln!("stopped: {}", location(&firmware.symbols, cpu.pc));
+    if let Some(pc) = cpu.secondary_pc() {
+        eprintln!("secondary core: pc {}", location(&firmware.symbols, pc));
+    }
     eprintln!(
         "LCD: {} pixels written; visible={}",
         cpu.bus.lcd.pixels_written,
@@ -202,6 +213,14 @@ fn run() -> Result<(), String> {
         eprintln!("{name}: {} distinct PCs", op_pcs.len());
         for (pc, count) in &op_pcs {
             eprintln!("  {count:>9} {}", location(&firmware.symbols, *pc));
+        }
+    }
+    if !callers.is_empty() {
+        let mut ranked: Vec<_> = callers.into_iter().collect();
+        ranked.sort_by_key(|&(r, count)| (std::cmp::Reverse(count), r));
+        eprintln!("callers (rets) at the FM1_CALLERS PC:");
+        for (rets, count) in ranked.into_iter().take(16) {
+            eprintln!("  {count:>9} 0x{rets:08x}");
         }
     }
     if !hot.is_empty() {
