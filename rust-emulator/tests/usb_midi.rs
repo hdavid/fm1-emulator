@@ -53,7 +53,10 @@ fn malformed_messages_encode_to_nothing() {
     assert!(encode(&[0x40, 1], 0).is_empty());
     assert!(encode(&[0x90, 60], 0).is_empty());
     assert!(encode(&[0xF0, 1, 2], 0).is_empty(), "unterminated SysEx");
-    assert!(encode(&[0xF0, 0x80, 0xF7], 0).is_empty(), "SysEx data is 7 bit");
+    assert!(
+        encode(&[0xF0, 0x80, 0xF7], 0).is_empty(),
+        "SysEx data is 7 bit"
+    );
 }
 
 #[test]
@@ -98,10 +101,10 @@ fn decoder_drops_a_sysex_cut_by_a_channel_message_and_a_lone_end() {
 fn parser_splits_a_raw_stream_into_messages_with_running_status() {
     let mut parser = Parser::default();
     let stream = [
-        0x90, 60, 100, 62, 90, // running status
+        0x90, 60, 100, 62, 90,   // running status
         0xF8, // realtime
         0xF0, 1, 0xF8, 2, 0xF7, // SysEx with realtime inside
-        0xC0, 5, 6, // program change, running status
+        0xC0, 5, 6,    // program change, running status
         0x40, // still running status C0
         0xF6,
     ];

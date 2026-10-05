@@ -51,8 +51,8 @@ pub fn encode(message: &[u8], cable: u8) -> Vec<Packet> {
 
 fn encode_sysex(message: &[u8], cable: u8) -> Vec<Packet> {
     let body = &message[1..];
-    let well_formed = body.last() == Some(&0xF7)
-        && body[..body.len() - 1].iter().all(|b| b & 0x80 == 0);
+    let well_formed =
+        body.last() == Some(&0xF7) && body[..body.len() - 1].iter().all(|b| b & 0x80 == 0);
     if !well_formed {
         return Vec::new();
     }

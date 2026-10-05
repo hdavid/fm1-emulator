@@ -643,7 +643,7 @@ impl Bus {
     }
 
     pub fn advance_usb(&mut self, ticks: u32) -> Result<(), AccessFault> {
-        let setups = self.usb.setups;
+        let (setups, midi_rx) = (self.usb.setups, self.usb.midi_rx_packets());
         self.usb
             .advance(ticks, &mut self.ram)
             .map_err(|reason| Self::fault(0x11800, 4, "USB host", reason))?;
@@ -652,7 +652,22 @@ impl Bus {
             let offset = self.usb.setup_address().wrapping_sub(RAM) as usize;
             self.code.invalidate_ram(offset, 8);
         }
+        if self.usb.midi_rx_packets() != midi_rx {
+            // ...or a bulk OUT packet of USB-MIDI events.
+            let (address, length) = self.usb.midi_last_rx();
+            self.code
+                .invalidate_ram(address.wrapping_sub(RAM) as usize, length);
+        }
         Ok(())
+    }
+
+    /// Queue USB-MIDI packets for the firmware (host to device). They are
+    /// delivered once the MIDI host has configured the device, one bulk
+    /// packet (up to 16 events) whenever its OUT endpoint buffer is free.
+    pub fn usb_midi_send(&mut self, packets: &[crate::usb_midi::Packet]) {
+        self.usb.midi_send(packets);
+        // The host's next event may now be sooner: run the next tick exactly.
+        self.next_event = self.next_event.min(self.now + 1);
     }
 
     pub fn screen_visible(&self) -> bool {
