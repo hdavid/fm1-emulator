@@ -73,6 +73,40 @@ core, so it is larger than the loop limit.
   the use) or an earlier instruction was executed with the wrong
   semantics. Not implemented: no evidence.
 
+### Round 4 investigation (still blocked)
+
+- **Alignment checks out.** The executed lengths are 0x0200de88 e9d4 f014
+  (4 bytes), de8c f80d 001e (4), de90 18df (2), de92 e9d4 f015 (4), de96
+  16a4 (2). The decode cache is not involved: with it disabled the run
+  stops at the same place (main session).
+- **No other occurrence anywhere, anywhere else checked.**
+  - The second FM-1_093 hit (0x0204a564) is inside a data table of
+    4-halfword records (`100b 0001 158c 0560 ...`).
+  - A linear sweep of every SDK ELF function (libVolcEngineRTCLite.a,
+    cpu.a, system.a, codec .a ELF members) finds 0x10xx-0x13xx only inside
+    inline jump tables after 0x0102/0x0103/0x0107 table branches, never
+    as an instruction.
+  - A sweep from every direct call target of stock, Baud Girl, Felucca,
+    SLOOP and Jangada finds none as an instruction either.
+  - Nothing in the Quarkslab pi32 v1 or q32s specs matches.
+- **What the surrounding function shows:**
+  - It is a text writer called through a function pointer. At 0x0200de5a
+    the format loop has ended.
+  - `0x13c0` must set r0. The two branches right after it send r0 == 10 and
+    r0 == 13 to 0x0200decc (the exit). Otherwise the code loads
+    r0 = b[r4] (r4 = buffer 0x01c654e0), tests that for CR/LF too, and if
+    found increments the counter at [sp+0x14] (0x0200dec4).
+  - Registers at the fault: r2 = 0x0a (the last character processed),
+    r12 = 0, r0 = r1 = r5 = r6 = r7 = 0.
+  - "r0 = last character" would fit the C shape. But no field of
+    0x13c0 (`0001 0011 1100 0000`) names r2, and the r12 reading
+    (`13 c 0` as mov-like dest r0, src r12) gives 0, which makes the
+    first test dead code.
+- **What would unblock it:** the vendor objdump for pi32v2 (it decodes all
+  forms), any toolchain-built object containing a 0x10xx-0x13xx
+  instruction, or the stock source of this text writer. Guessing a meaning
+  from the register values above would be a fake.
+
 New diagnose options: `FM1_CALLERS=PC`, `FM1_SPI2_LOG=1`, `FM1_PNG_RAM`,
 a `secondary core:` line and a `UART1 (MIDI out)` line.
 
