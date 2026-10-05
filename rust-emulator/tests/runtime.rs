@@ -8,6 +8,42 @@ fn cpu(words: &[u16]) -> Cpu {
     )
 }
 #[test]
+fn register_pointer_updates_use_the_old_address_and_byte_stride() {
+    // Vendor r3 assembler emits these compact forms with implicit r15.
+    for (load, store, size, value) in [
+        (0x13c0, 0x13c8, 1, 0xef),
+        (0x0fc0, 0x0fc8, 2, 0xcdef),
+        (0x0bc0, 0x0bc8, 4, 0x89abcdef),
+    ] {
+        for delta in [0, 4, u32::MAX - 3] {
+            let mut c = cpu(&[load, store]);
+            c.r[4] = RAM + 32;
+            c.r[15] = delta;
+            c.sr[5] = 15;
+            c.bus.write(RAM + 32, value, size).unwrap();
+            c.step().unwrap();
+            assert_eq!(c.r[0], value);
+            assert_eq!(c.r[4], (RAM + 32).wrapping_add(delta));
+            c.r[0] = 0x12345678;
+            c.step().unwrap();
+            assert_eq!(
+                c.bus.read((RAM + 32).wrapping_add(delta), size).unwrap(),
+                0x12345678 & (u32::MAX >> ((4 - size) * 8))
+            );
+            assert_eq!(c.r[4], (RAM + 32).wrapping_add(delta).wrapping_add(delta));
+            assert_eq!(c.sr[5], 15);
+        }
+    }
+    let mut c = cpu(&[0x13c0]);
+    c.r[4] = RAM - 1;
+    c.r[15] = 1;
+    assert!(c.step().is_err());
+    assert_eq!(c.r[4], RAM - 1);
+    // Keep the unmeasured aliased form unsupported.
+    assert!(cpu(&[0x13f7]).step().is_err());
+}
+
+#[test]
 fn large_stack_frames_preserve_flags_and_return_to_the_caller() {
     // Vendor r3 assembly, including the stock filesystem's 616-byte frame.
     let mut c = cpu(&[
