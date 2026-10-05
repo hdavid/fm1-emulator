@@ -8,6 +8,11 @@ pub struct Nor {
     pub bytes: Vec<u8>,
     cursor: usize,
     decoded: Option<Vec<u8>>,
+    key: u16,
+    write_enabled: bool,
+    /// Completed sector/block erases and page programs (diagnostics).
+    pub erases: u64,
+    pub programs: u64,
 }
 
 impl Default for Nor {
@@ -19,6 +24,10 @@ impl Default for Nor {
             bytes: vec![255; 1024 * 1024],
             cursor: 0,
             decoded: None,
+            key: 0,
+            write_enabled: false,
+            erases: 0,
+            programs: 0,
         }
     }
 }
@@ -29,6 +38,7 @@ impl Nor {
         let mut decoded = self.bytes[0x4000..].to_vec();
         crate::package::sfc(&mut decoded, key);
         self.decoded = Some(decoded);
+        self.key = key;
         self.regs
             .extend([(0x40200, 0x809803b5), (0x40204, 1), (0x40208, 0x8e17)]);
     }
@@ -106,12 +116,76 @@ impl Nor {
         })
     }
     pub fn chip_select(&mut self, selected: bool) {
+        if self.selected && !selected {
+            self.finish();
+        }
         if self.selected != selected {
             self.command.clear();
             self.cursor = 0;
         }
         self.selected = selected;
     }
+    /// Complete a command at chip-select rise, as a P25Q80H-class NOR does.
+    /// Timing is functional: erase/program finish instantly (WIP stays 0).
+    fn finish(&mut self) {
+        let Some(&command) = self.command.first() else {
+            return;
+        };
+        let len = self.command.len();
+        let address = || {
+            ((self.command[1] as usize) << 16)
+                | ((self.command[2] as usize) << 8)
+                | self.command[3] as usize
+        };
+        match command {
+            0x06 if len == 1 => self.write_enabled = true,
+            0x04 if len == 1 => self.write_enabled = false,
+            0x20 | 0x52 | 0xd8 if len == 4 && self.write_enabled => {
+                let size = match command {
+                    0x20 => 0x1000,
+                    0x52 => 0x8000,
+                    _ => 0x10000,
+                };
+                let start = (address() & !(size - 1)) % self.bytes.len();
+                self.bytes[start..start + size].fill(0xff);
+                self.redecode(start, size);
+                self.write_enabled = false;
+                self.erases += 1;
+            }
+            0x02 if len > 4 && self.write_enabled => {
+                let base = address() % self.bytes.len();
+                let page = base & !0xff;
+                for (i, &data) in self.command[4..].iter().enumerate() {
+                    // Program clears bits only; addresses wrap within the page.
+                    self.bytes[page | ((base + i) & 0xff)] &= data;
+                }
+                self.redecode(page, 0x100);
+                self.write_enabled = false;
+                self.programs += 1;
+            }
+            _ => {}
+        }
+    }
+
+    // Keep the decrypted XIP view coherent with SPI writes (32-byte SFC blocks).
+    fn redecode(&mut self, start: usize, length: usize) {
+        let Some(decoded) = self.decoded.as_mut() else {
+            return;
+        };
+        let first = start.max(0x4000);
+        let end = start + length;
+        if end <= first {
+            return;
+        }
+        let block_start = (first - 0x4000) & !31;
+        let block_end = (end - 0x4000).div_ceil(32) * 32;
+        for block in (block_start..block_end.min(decoded.len())).step_by(32) {
+            let stop = (block + 32).min(decoded.len());
+            decoded[block..stop].copy_from_slice(&self.bytes[0x4000 + block..0x4000 + stop]);
+            crate::package::enc(&mut decoded[block..stop], self.key ^ (block / 32 * 8) as u16);
+        }
+    }
+
     pub fn write(&mut self, a: u32, v: u32) -> Option<Result<(), &'static str>> {
         self.read(a)?;
         if (a == 0x40304 && v != 0) || ((a == 0x40310 || a == 0x40314) && v != 0) {
@@ -147,7 +221,13 @@ impl Nor {
                         value = [0x85, 0x60, 0x14].get(len - 2).copied().unwrap_or(255);
                     }
                 }
-                0x05 | 0x35 => value = 0,
+                // Status 1: WIP (bit 0) is never set because erase/program
+                // complete at chip deselect; WEL is bit 1.
+                0x05 => value = u32::from(self.write_enabled) << 1,
+                0x35 => value = 0,
+                // Write enable/disable, sector/block erase and page program
+                // take effect when chip select rises (see finish).
+                0x06 | 0x04 | 0x20 | 0x52 | 0xd8 | 0x02 => {}
                 0x03 | 0x0b | 0x6b => {
                     let start = if self.command[0] == 3 { 4 } else { 5 };
                     if len == 4 {
@@ -221,5 +301,54 @@ mod tests {
             nor.write(0x11c08, 255).unwrap().unwrap();
             assert_eq!(nor.read(0x11c08), Some(expected));
         }
+    }
+
+    fn transaction(nor: &mut Nor, bytes: &[u8]) -> Vec<u32> {
+        nor.chip_select(true);
+        let replies = bytes
+            .iter()
+            .map(|&byte| {
+                nor.write(0x11c08, byte as u32).unwrap().unwrap();
+                nor.read(0x11c08).unwrap()
+            })
+            .collect();
+        nor.chip_select(false);
+        replies
+    }
+
+    #[test]
+    fn erase_and_program_need_write_enable_and_complete_at_deselect() {
+        let mut nor = Nor::default();
+        nor.bytes[0xd9000..0xda000].fill(0x5a);
+        transaction(&mut nor, &[0x20, 0x0d, 0x90, 0x00]); // ignored: WEL clear
+        assert_eq!(nor.bytes[0xd9000], 0x5a);
+        transaction(&mut nor, &[0x06]);
+        assert_eq!(transaction(&mut nor, &[0x05, 0xff])[1], 2);
+        transaction(&mut nor, &[0x20, 0x0d, 0x98, 0x76]);
+        assert!(nor.bytes[0xd9000..0xda000].iter().all(|&b| b == 0xff));
+        assert_eq!(nor.bytes[0xda000], 0xff); // default erased storage
+        assert_eq!(transaction(&mut nor, &[0x05, 0xff])[1], 0);
+        transaction(&mut nor, &[0x06]);
+        transaction(&mut nor, &[0x02, 0x0d, 0x90, 0xfe, 0x0f, 0xf0, 0x12]);
+        assert_eq!(&nor.bytes[0xd90fe..0xd9100], &[0x0f, 0xf0]);
+        assert_eq!(nor.bytes[0xd9000], 0x12); // wrapped within the page
+        transaction(&mut nor, &[0x06]);
+        transaction(&mut nor, &[0x02, 0x0d, 0x90, 0xfe, 0xf1]);
+        assert_eq!(nor.bytes[0xd90fe], 0x01); // programming only clears bits
+        assert_eq!((nor.erases, nor.programs), (1, 2));
+    }
+
+    #[test]
+    fn programmed_bytes_stay_coherent_with_encrypted_xip() {
+        let mut nor = Nor::default();
+        nor.load(&vec![0xff; 0x8000], 0x980f);
+        let address = 0x0200_1000; // physical 0x5000, decrypted window
+        transaction(&mut nor, &[0x06]);
+        transaction(&mut nor, &[0x20, 0x00, 0x50, 0x00]);
+        let mut plain = [0x11u8, 0x22, 0x33, 0x44];
+        crate::package::enc(&mut plain, 0x980f ^ (0x1000 / 32 * 8) as u16);
+        transaction(&mut nor, &[0x06]);
+        transaction(&mut nor, &[0x02, 0x00, 0x50, 0x00, plain[0], plain[1], plain[2], plain[3]]);
+        assert_eq!(nor.xip(address, 4).unwrap().unwrap(), 0x4433_2211);
     }
 }
