@@ -109,7 +109,7 @@ impl Bus {
         }
     }
 
-    #[cold]
+    #[inline]
     /// The core control word at 0x1eee000 + 4 * core, as a 4-byte bus read
     /// returns it. The CPU reads it before every instruction; this skips the
     /// MMIO dispatch chain (it never faults) but still counts the access.
@@ -138,6 +138,18 @@ impl Bus {
         (offset.checked_add(size)? <= length).then_some(offset)
     }
 
+    /// SRAM bytes at `offset` as a little-endian value of `size` (1, 2 or 4)
+    /// bytes; the caller has checked the range.
+    #[inline(always)]
+    fn ram_value(&self, offset: usize, size: usize) -> u32 {
+        match size {
+            4 => u32::from_le_bytes(self.ram[offset..offset + 4].try_into().unwrap()),
+            2 => u16::from_le_bytes(self.ram[offset..offset + 2].try_into().unwrap()) as u32,
+            _ => self.ram[offset] as u32,
+        }
+    }
+
+    #[inline]
     fn read_as(
         &self,
         address: u32,
@@ -145,6 +157,21 @@ impl Bus {
         operation: &'static str,
     ) -> Result<u32, AccessFault> {
         Self::check(address, size, operation)?;
+        // SRAM first: no device or XIP window overlaps it.
+        let ram_offset = address.wrapping_sub(RAM) as usize;
+        if ram_offset < RAM_SIZE {
+            // Aligned accesses of at most 4 bytes never cross the end.
+            return Ok(self.ram_value(ram_offset, size));
+        }
+        self.read_slow(address, size, operation)
+    }
+
+    fn read_slow(
+        &self,
+        address: u32,
+        size: usize,
+        operation: &'static str,
+    ) -> Result<u32, AccessFault> {
         let bytes = if let Some(offset) = Self::offset(address, size, XIP, self.flash.len()) {
             if !self.nor.xip_active() {
                 return Err(Self::fault(
@@ -332,11 +359,29 @@ impl Bus {
         self.read_as(address, 2, "fetch").map(|value| value as u16)
     }
 
+    #[inline]
     pub fn write(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
         Self::check(address, size, "write")?;
-        if Self::offset(address, size, RAM, self.ram.len()).is_none() {
-            self.count_mmio(address, 1);
+        let offset = address.wrapping_sub(RAM) as usize;
+        if offset < RAM_SIZE {
+            // No device claims SRAM addresses, so of the MMIO chain below
+            // only the write-protection check and the store itself apply.
+            self.guards
+                .check_write(address, size)
+                .map_err(|reason| Self::fault(address, size, "write", reason))?;
+            match size {
+                4 => self.ram[offset..offset + 4].copy_from_slice(&value.to_le_bytes()),
+                2 => self.ram[offset..offset + 2].copy_from_slice(&(value as u16).to_le_bytes()),
+                _ => self.ram[offset] = value as u8,
+            }
+            self.code.invalidate_ram(offset, size);
+            return Ok(());
         }
+        self.write_slow(address, value, size)
+    }
+
+    fn write_slow(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
+        self.count_mmio(address, 1);
         if self.clock.write(address, value).is_some() {
             return Ok(());
         }
