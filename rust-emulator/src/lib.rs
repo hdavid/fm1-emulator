@@ -13,8 +13,8 @@ pub mod gpio;
 pub mod lcd;
 mod package;
 mod shift_spi;
-mod wireless;
 mod uart;
+mod wireless;
 
 pub const XIP: u32 = 0x0200_0120;
 pub const XIP_END: u32 = 0x0210_0000;

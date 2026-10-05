@@ -63,7 +63,9 @@ fn software_irq_context_matches_all_eight_measured_priorities() {
         let handler = fm1_emu::RAM + 512;
         c.bus.write(handler, 0x0081, 2).unwrap();
         c.bus.write(0x01c7fe00 + 120 * 4, handler, 4).unwrap();
-        c.bus.write(IRQ_CONFIG + 15 * 4, 1 | priority << 1, 4).unwrap();
+        c.bus
+            .write(IRQ_CONFIG + 15 * 4, 1 | priority << 1, 4)
+            .unwrap();
         c.bus.write(0x1eef1a0, 1, 4).unwrap();
         c.sr[11] = 0x100;
         c.sr[14] = USER_STACK;
