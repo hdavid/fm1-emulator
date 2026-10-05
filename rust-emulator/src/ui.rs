@@ -64,6 +64,14 @@ const DETENT_ANGLE: f32 = std::f32::consts::TAU / 24.;
 fn master_angle(master: u16) -> f32 {
     (master as f32 / 1023. - 0.5) * 1.5 * std::f32::consts::PI
 }
+/// CPU clock choices: 24 MHz runs in real time; the real WL82 runs at
+/// 120-396 MHz, which busy-looping firmwares need (and which runs slower).
+const CPU_CLOCKS: [(u32, &str); 4] = [
+    (24, "24 MHz - real time"),
+    (96, "96 MHz"),
+    (192, "192 MHz - realistic"),
+    (312, "312 MHz - realistic, slowest"),
+];
 const INK: Color32 = Color32::from_rgb(190, 194, 193);
 const ACCENT: Color32 = Color32::from_rgb(231, 193, 91);
 
@@ -87,7 +95,12 @@ struct Emulator {
     knob_accum: [f32; 8],
     /// Where each knob was last drawn (screen points).
     knob_centre: [egui::Pos2; 8],
-    /// Guest speed against real time (24 M instructions/s), sampled each second.
+    /// Emulated CPU clock (a multiple of 24 MHz). 24 keeps every firmware in
+    /// real time; firmwares that burn CPU in busy loops (Baud Girl, stock)
+    /// need a realistic clock (the WL82 runs at 120-396 MHz) at the cost of
+    /// speed.
+    cpu_mhz: u32,
+    /// Guest speed against real time (24 M oscillator ticks/s), sampled each second.
     speed: Option<f64>,
     speed_mark: (Instant, u64),
 }
@@ -111,6 +124,7 @@ impl Emulator {
             knob_centre: [egui::Pos2::ZERO; 8],
             speed: None,
             speed_mark: (Instant::now(), 0),
+            cpu_mhz: 24,
         };
         app.knob_angle[0] = master_angle(app.master);
         app.reset();
@@ -131,6 +145,7 @@ impl Emulator {
         match Firmware::load(&self.path).and_then(|firmware| {
             let mut cpu = Cpu::new(firmware.bus()?, firmware.entry);
             cpu.r[0] = 0x01c7fe08;
+            cpu.set_cpu_mhz(self.cpu_mhz)?;
             Ok(cpu)
         }) {
             Ok(cpu) => {
@@ -165,7 +180,7 @@ impl Emulator {
                 // time. Neither is a cycle-accuracy claim.
                 let deadline = Instant::now() + Duration::from_millis(14);
                 let paced = self.audio.is_some() && cpu.bus.audio.frames > 0;
-                let budget = if paced { u64::MAX } else { 400_000 };
+                let budget = if paced { u64::MAX } else { 400_000 * cpu.instructions_per_tick as u64 };
                 let mut i = 0u64;
                 while i < budget {
                     if i % 1024 == 0 {
@@ -200,7 +215,8 @@ impl Emulator {
                 let (since, steps) = self.speed_mark;
                 let elapsed = since.elapsed().as_secs_f64();
                 if elapsed >= 1.0 {
-                    self.speed = Some((cpu.steps - steps) as f64 / 24e6 / elapsed);
+                    let ticks = (cpu.steps - steps) as f64 / cpu.instructions_per_tick as f64;
+                    self.speed = Some(ticks / 24e6 / elapsed);
                     self.speed_mark = (Instant::now(), cpu.steps);
                 }
             }
@@ -250,7 +266,7 @@ impl Emulator {
         let down = response.is_pointer_button_down_on();
         if down || response.clicked() {
             self.pulse[id] = Instant::now() + Duration::from_millis(100);
-            self.pulse_steps[id] = self.cpu.as_ref().map_or(0, |cpu| cpu.steps + 2_400_000);
+            self.pulse_steps[id] = self.cpu.as_ref().map_or(0, |cpu| cpu.steps + 2_400_000 * cpu.instructions_per_tick as u64);
         }
         let focused = ui.input(|i| i.focused);
         let binding = match id {
@@ -262,7 +278,7 @@ impl Emulator {
         let keyboard = binding.is_some_and(|key| ui.input(|i| i.key_down(key)));
         if binding.is_some_and(|key| ui.input(|i| i.key_pressed(key))) {
             self.pulse[id] = Instant::now() + Duration::from_millis(100);
-            self.pulse_steps[id] = self.cpu.as_ref().map_or(0, |cpu| cpu.steps + 2_400_000);
+            self.pulse_steps[id] = self.cpu.as_ref().map_or(0, |cpu| cpu.steps + 2_400_000 * cpu.instructions_per_tick as u64);
         }
         if !focused {
             self.pulse[id] = Instant::now();
@@ -580,6 +596,19 @@ impl eframe::App for Emulator {
                         if ui.button("Restart").clicked() {
                             self.reset();
                         }
+                        let before = self.cpu_mhz;
+                        egui::ComboBox::from_id_salt("cpu_mhz")
+                            .selected_text(format!("CPU {} MHz", self.cpu_mhz))
+                            .show_ui(ui, |ui| {
+                                for (mhz, label) in CPU_CLOCKS {
+                                    ui.selectable_value(&mut self.cpu_mhz, mhz, label);
+                                }
+                            })
+                            .response
+                            .on_hover_text("Emulated CPU clock. Changing it restarts the firmware.");
+                        if self.cpu_mhz != before {
+                            self.reset();
+                        }
                         if ui
                             .add_enabled(
                                 self.cpu.is_some() && self.fault.is_none(),
@@ -641,9 +670,15 @@ fn main() -> eframe::Result {
         eprintln!("usage: emulator <application.elf|application.bin>");
         std::process::exit(2);
     };
-    if args.next().is_some() {
-        eprintln!("expected one firmware path");
-        std::process::exit(2);
+    let mut cpu_mhz = 24;
+    for arg in args {
+        match arg.to_str().and_then(|a| a.strip_prefix("--cpu-mhz=")).map(str::parse) {
+            Some(Ok(mhz)) if mhz > 0 && mhz % 24 == 0 => cpu_mhz = mhz,
+            _ => {
+                eprintln!("usage: fm1-ui FIRMWARE [--cpu-mhz=N] (N a multiple of 24)");
+                std::process::exit(2);
+            }
+        }
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -658,6 +693,10 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
             let mut app = Emulator::new(PathBuf::from(path));
+            if cpu_mhz != app.cpu_mhz {
+                app.cpu_mhz = cpu_mhz;
+                app.reset();
+            }
             match ui_audio::HostAudio::open() {
                 Ok(audio) => app.audio = Some(audio),
                 Err(error) => app.audio_error = Some(error),

@@ -121,6 +121,12 @@ pub struct Cpu {
     pub sr: [u32; 16],
     pub pc: u32,
     pub steps: u64,
+    /// Instructions per 24 MHz oscillator tick: the emulated CPU clock is
+    /// 24 MHz times this (1 = 24 MHz, the real-time default; the FM-1's
+    /// WL82 runs at 120-396 MHz, typically 320). Timers, audio DMA, USB and
+    /// the watchdog advance once per tick.
+    pub instructions_per_tick: u32,
+    subtick: u32,
     pub interrupts_enabled: bool,
     pub irq_entries: u64,
     in_interrupt: bool,
@@ -190,6 +196,8 @@ impl Cpu {
             sr: [0; 16],
             pc: entry,
             steps: 0,
+            instructions_per_tick: 1,
+            subtick: 0,
             interrupts_enabled: false,
             irq_entries: 0,
             in_interrupt: false,
@@ -356,6 +364,17 @@ impl Cpu {
             }
         }
         self.steps += 1;
+        self.subtick += 1;
+        if self.subtick >= self.instructions_per_tick {
+            self.subtick = 0;
+            self.advance_devices(pc)?;
+        }
+        self.dispatch_interrupt()?;
+        Ok(op)
+    }
+
+    /// One oscillator tick of the clocked devices.
+    fn advance_devices(&mut self, pc: u32) -> Result<(), Fault> {
         self.bus.devices.advance(OSC_TICKS_PER_INSTRUCTION);
         self.bus
             .system
@@ -375,8 +394,22 @@ impl Cpu {
         self.bus
             .advance_audio(OSC_TICKS_PER_INSTRUCTION)
             .map_err(|fault| Fault::Access { pc, fault })?;
-        self.dispatch_interrupt()?;
-        Ok(op)
+        Ok(())
+    }
+
+    /// Set the emulated CPU clock in MHz: a multiple of the 24 MHz oscillator.
+    pub fn set_cpu_mhz(&mut self, mhz: u32) -> Result<(), String> {
+        if mhz == 0 || mhz % 24 != 0 {
+            return Err(format!("CPU clock {mhz} MHz: use a multiple of 24 (24, 96, 192, 312...)"));
+        }
+        self.instructions_per_tick = mhz / 24;
+        self.subtick = 0;
+        Ok(())
+    }
+
+    /// Guest time in oscillator ticks (24 MHz) since reset.
+    pub fn ticks(&self) -> u64 {
+        self.steps / self.instructions_per_tick as u64
     }
 
     pub(crate) fn conditional(&mut self, test: bool, counts: u32) -> Result<u32, Fault> {

@@ -34,6 +34,10 @@ fn run() -> Result<(), String> {
     let firmware = Firmware::load(Path::new(&args[0]))?;
     let mut cpu = Cpu::new(firmware.bus()?, firmware.entry);
     cpu.r[0] = 0x01c7_fe08;
+    // Optional: FM1_CPU_MHZ=N emulates an N MHz CPU (default 24, real time).
+    if let Ok(mhz) = env::var("FM1_CPU_MHZ") {
+        cpu.set_cpu_mhz(mhz.parse().map_err(|_| "invalid FM1_CPU_MHZ")?)?;
+    }
     // Optional: FM1_WATCHDOG_OFF=1 keeps counting watchdog ticks but never
     // resets. Diagnostic experiments only; the output says so.
     let watchdog_off = env::var("FM1_WATCHDOG_OFF").is_ok_and(|v| v == "1");

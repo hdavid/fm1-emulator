@@ -377,3 +377,17 @@ fn register_shift_covers_both_left_forms_and_arithmetic_right() {
     c.step().unwrap();
     assert_eq!(c.r[2], 0xffff_ffff);
 }
+
+#[test]
+fn cpu_clock_sets_instructions_per_oscillator_tick() {
+    let mut c = cpu(&[0x0000; 16]); // nops
+    assert!(c.set_cpu_mhz(25).is_err());
+    assert!(c.set_cpu_mhz(0).is_err());
+    c.set_cpu_mhz(96).unwrap();
+    assert_eq!(c.instructions_per_tick, 4);
+    for _ in 0..8 {
+        c.step().unwrap();
+    }
+    assert_eq!(c.steps, 8);
+    assert_eq!(c.ticks(), 2); // devices saw two 24 MHz ticks
+}
