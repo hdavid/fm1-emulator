@@ -1333,3 +1333,35 @@ fn masked_call_frame_restores_noncontiguous_registers_and_returns() {
     assert_eq!(c.sr[14], RAM + 128);
     assert_eq!(c.pc, XIP + 8);
 }
+
+#[test]
+fn float_min_max_and_comparison_flags_match_the_fm1_986_capture() {
+    // Physical finite, negative, equal, and signed-zero results, 2026-10-05.
+    for (x, a, b, expected, flags) in [
+        (0x3215, 0x3fc00000, 0x40100000, 0x3fc00000, 8),
+        (0x3215, 0x3f800001, 0x3f7ffffe, 0x3f7ffffe, 2),
+        (0x3216, 0x3fc00000, 0x40100000, 0x40100000, 8),
+        (0x3216, 0x3f800001, 0x3f7ffffe, 0x3f800001, 2),
+        (0x3215, 0xbfc00000, 0xc0100000, 0xc0100000, 2),
+        (0x3215, 0x80000000, 0x00000000, 0x80000000, 6),
+        (0x3215, 0x00000000, 0x80000000, 0x80000000, 6),
+        (0x3215, 0x3fc00000, 0xc0100000, 0xc0100000, 2),
+        (0x3215, 0x3fc00000, 0x3fc00000, 0x3fc00000, 6),
+        (0x3216, 0xbfc00000, 0xc0100000, 0xbfc00000, 2),
+        (0x3216, 0x80000000, 0x00000000, 0x00000000, 6),
+        (0x3216, 0x00000000, 0x80000000, 0x00000000, 6),
+        (0x3216, 0x3fc00000, 0xc0100000, 0x3fc00000, 2),
+        (0x3216, 0x3fc00000, 0x3fc00000, 0x3fc00000, 6),
+    ] {
+        let mut c = cpu(&[0xe53f, x]);
+        c.r[1] = a;
+        c.r[2] = b;
+        c.sr[5] = 0xabc0000f;
+        c.step().unwrap();
+        assert_eq!(
+            c.r[3], expected,
+            "FP encoding {x:04x}, inputs {a:08x}/{b:08x}"
+        );
+        assert_eq!(c.sr[5], 0xabc00000 | flags);
+    }
+}

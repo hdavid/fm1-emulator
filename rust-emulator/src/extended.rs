@@ -154,7 +154,10 @@ pub(crate) fn execute(
             let Some(value) = value else {
                 return Ok(None);
             };
-            cpu.r[d] = value;
+            cpu.r[d] = value.value;
+            if let Some(flags) = value.flags {
+                cpu.sr[5] = (cpu.sr[5] & !15) | flags;
+            }
             op = "float_register";
         } else if matches!(h & 0xff00, 0xfa00 | 0xfb00) {
             let test = (cpu.r[n] & cpu.r[((h >> 4) & 15) as usize] != 0) == (h & 0x100 != 0);
