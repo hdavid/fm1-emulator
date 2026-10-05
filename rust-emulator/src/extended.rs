@@ -468,6 +468,11 @@ pub(crate) fn execute(
             let addr = cpu.r[s].wrapping_add(cpu.r[c]);
             mem = Some((d, s, addr, 1, x & 1 != 0, x & 2 != 0, Some(addr)));
             op = "byte_preincrement";
+        } else if h == 0xe1c4 && x & 0x0e00 == 0 {
+            // Vendor r3 compiles (v >> 1) | (v << 31) to "v <> 1".
+            // A zero count field represents 32, also an identity rotation.
+            cpu.r[d] = cpu.r[s].rotate_right(((x >> 8) & 1) * 16 + (x & 15));
+            op = "rotate_right_immediate";
         } else if h == 0xe1c0 && (x >> 10) & 3 != 1 {
             let shift = ((x >> 8) & 3) * 16 + (x & 15);
             let mode = (x >> 10) & 3;

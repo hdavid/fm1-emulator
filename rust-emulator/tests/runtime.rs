@@ -1419,6 +1419,26 @@ fn stock_formatter_sign_extends_bytes_at_negative_offsets() {
 }
 
 #[test]
+fn stock_formatter_rotates_bits_before_classifying_format_characters() {
+    // Compiler-generated (v>>1)|(v<<31) and assembler count 31/32.
+    for (word, source, destination, value, expected) in [
+        (0x0001, 0, 0, 4, 2),
+        (0x0001, 0, 0, 11, 0x80000005),
+        (0x315f, 5, 3, 0x80000001, 3),
+        (0x0010, 1, 0, 0x89abcdef, 0x89abcdef),
+    ] {
+        let mut c = cpu(&[0xe1c4, word]);
+        c.r[source] = value;
+        c.sr[5] = 15;
+        c.step().unwrap();
+        assert_eq!(c.r[destination], expected);
+        assert_eq!(c.sr[5], 15);
+        assert_eq!(c.pc, XIP + 4);
+    }
+    assert!(cpu(&[0xe1c4, 0x0201]).step().is_err());
+}
+
+#[test]
 fn signed_minimum_clips_audio_with_signed_comparison() {
     for (left, right, expected) in [(-10, 32767, -10), (40000, 32767, 32767), (-10, -20, -20)] {
         let mut c = cpu(&[0xe435, 0x0031]); // r0 = smin(r3, r0)
