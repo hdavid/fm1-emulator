@@ -239,6 +239,37 @@ fn special_register_pop_with_only_the_rets_bit_restores_rets() {
 }
 
 #[test]
+fn register_list_store_puts_the_lowest_register_at_the_lowest_address() {
+    // FM-1_093 list_add_tail at 0x02003338: eb20 0006 = [r0] = {r2, r1} with
+    // r1 = head (new->next, offset 0) and r2 = old tail (new->prev,
+    // offset 4). Storing r2 first linked the second entry to the first in a
+    // loop that lost the head; list removal then spun until the watchdog.
+    let mut c = cpu(&[0xeb20, 0x0006]);
+    c.r[0] = RAM + 0x20;
+    c.r[1] = 0x01c0_92c8;
+    c.r[2] = 0x01c2_4b20;
+    c.step().unwrap();
+    assert_eq!(c.bus.read(RAM + 0x20, 4).unwrap(), 0x01c0_92c8);
+    assert_eq!(c.bus.read(RAM + 0x24, 4).unwrap(), 0x01c2_4b20);
+    assert_eq!(c.r[0], RAM + 0x20);
+}
+
+#[test]
+fn register_list_load_fills_the_lowest_register_from_the_lowest_address() {
+    // Vendor-compiled Felucca fm1_fault_c (fm1_irq.h) at 0x020006f2:
+    // eb04 0022 = {r5, r1} = [r4+] reads fm1_crash.magic into r1 (compared
+    // with "CRSH") and fm1_crash.count into r5 (incremented).
+    let mut c = cpu(&[0xeb04, 0x0022]);
+    c.r[4] = RAM + 0x40;
+    c.bus.write(RAM + 0x40, 0x4352_5348, 4).unwrap();
+    c.bus.write(RAM + 0x44, 7, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.r[1], 0x4352_5348);
+    assert_eq!(c.r[5], 7);
+    assert_eq!(c.r[4], RAM + 0x40);
+}
+
+#[test]
 fn register_repeat_with_a_zero_count_skips_its_block() {
     let mut c = cpu(&[0x0312, 0x0712, 0x07b2, 0x0000]);
     c.r[1] = RAM;

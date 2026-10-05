@@ -537,8 +537,10 @@ fn execute_wide(
             name = "logic_three";
         }
         Op::StoreRegisterList => {
+            // Lowest register at the lowest address (Felucca fm1_fault_c's
+            // {r5, r1} = [r4+] reads magic into r1; stock list_add_tail).
             let mut address = cpu.r[n];
-            for register in (0..16).rev() {
+            for register in 0..16 {
                 if x & (1 << register) != 0 {
                     cpu.write(address, cpu.r[register])?;
                     address = address.wrapping_add(4);
@@ -548,7 +550,7 @@ fn execute_wide(
         }
         Op::LoadRegisterList => {
             let mut address = cpu.r[n];
-            for register in (0..16).rev() {
+            for register in 0..16 {
                 if x & (1 << register) != 0 {
                     cpu.r[register] = cpu.read(address, 4)?;
                     address = address.wrapping_add(4);

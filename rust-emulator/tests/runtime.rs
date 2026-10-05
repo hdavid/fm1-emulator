@@ -69,13 +69,14 @@ fn register_list_stores_linked_list_fields_without_advancing_the_base() {
     c.r[1] = RAM + 64;
     c.r[2] = RAM + 128;
     c.r[8] = 0x12345678;
+    // Lowest register at the lowest address (see stock_isa.rs register_list_*).
     c.step().unwrap();
-    assert_eq!(c.bus.read(RAM, 4).unwrap(), RAM + 128);
-    assert_eq!(c.bus.read(RAM + 4, 4).unwrap(), RAM + 64);
+    assert_eq!(c.bus.read(RAM, 4).unwrap(), RAM + 64);
+    assert_eq!(c.bus.read(RAM + 4, 4).unwrap(), RAM + 128);
     assert_eq!(c.r[0], RAM);
     c.step().unwrap();
-    assert_eq!(c.bus.read(RAM + 64, 4).unwrap(), 0x12345678);
-    assert_eq!(c.bus.read(RAM + 68, 4).unwrap(), RAM);
+    assert_eq!(c.bus.read(RAM + 64, 4).unwrap(), RAM);
+    assert_eq!(c.bus.read(RAM + 68, 4).unwrap(), 0x12345678);
     assert_eq!(c.r[1], RAM + 64);
 }
 
@@ -418,16 +419,17 @@ fn unsigned_immediate_conditional_selects_storage_header_region() {
 }
 
 #[test]
-fn register_list_loads_descend_without_changing_the_base() {
-    // Vendor form: 04 eb 04 01 => {r8, r2} = [r4+].
+fn register_list_loads_ascend_without_changing_the_base() {
+    // Vendor form: 04 eb 04 01 => {r8, r2} = [r4+]; r2 comes from [r4]
+    // (Felucca fm1_fault_c reads fm1_crash.magic into r1 of {r5, r1}).
     for upper in [4, 8, 15] {
         let mut c = cpu(&[0xeb04, (1 << upper) | (1 << 2)]);
         c.r[4] = RAM;
         c.bus.write(RAM, 0x11223344, 4).unwrap();
         c.bus.write(RAM + 4, 0xaabbccdd, 4).unwrap();
         c.step().unwrap();
-        assert_eq!(c.r[upper], 0x11223344);
-        assert_eq!(c.r[2], 0xaabbccdd);
+        assert_eq!(c.r[2], 0x11223344);
+        assert_eq!(c.r[upper], 0xaabbccdd);
         if upper != 4 {
             assert_eq!(c.r[4], RAM);
         }
