@@ -10,13 +10,15 @@
 //         usb   USB-MIDI note-on, channel 10 (the drum track), note 36
 //         trs   the same note-on as 3 bytes on the TRS MIDI IN (UART1, 31250 baud);
 //               the time runs from the end of the last byte (when it is received)
-//   Firmware with MIDI clock (SLOOP clock_sync.c; GLO > SYSTEM SYNC, global 13): a hat on every
-//   16th of the drum pattern, the transport run by
-//         ext-usb / ext-trs  an external clock (F8 at --bpm, +- --jitter ms uniform; 2 beats of
-//               pre-roll, FA, --trials beats; with --ramp B2 the tempo goes to B2 over the 2nd
-//               half): the onset of each hit - the arrival of the F8 of its step
-//         out   SYNC OUT, PLAY pressed: the F8 the firmware sends (USB endpoint write) - the
-//               onset of the hit of its step
+//   Firmware with MIDI clock (SLOOP clock_sync.c; GLO > SYSTEM SYNC, global 13, set to --sync):
+//   a closed hat on every beat (every 2nd above 150 BPM), the transport run by
+//         ext-usb / ext-trs  an external clock: F8 at --bpm (+- --jitter ms uniform), 2 beats of
+//               pre-roll, FA (--fa ms before the downbeat F8; default: just after the F8 before it,
+//               a tick ahead, as hosts send it), --trials beats; --to B2 over --ramp beats from the
+//               downbeat (--ramp 0: a jump); --drop K: F8 K lost; --spike K --spike-ms M: F8 K late.
+//               Onset of each hit - the F8 of its beat (ideal time, and as it arrived)
+//         transport  START a tick ahead, STOP after a bar, SPP 16th 136 + CONTINUE a tick ahead
+//   NEST=0: interrupts do not nest (the emulator's default; the firmware assumes they do).
 //
 // The DAC itself (codec digital filter, analog path) is not modelled: these
 // are times to the I2S/DMA transfer.
@@ -30,6 +32,7 @@ const QUIET: u32 = 441; // 10 ms below threshold / 8 before an onset counts
 pub struct Rig {
     pub cpu: Cpu,
     seed: u64,
+    pub sym: std::collections::BTreeMap<String, u32>,
 }
 
 impl Rig {
@@ -43,6 +46,10 @@ impl Rig {
         let mut rig = Rig {
             cpu,
             seed: 0x9e3779b97f4a7c15,
+            sym: match env::var("SYMS") {
+                Ok(elf) => Firmware::load(Path::new(&elf)).unwrap().symbols,
+                Err(_) => firmware.symbols.clone(),
+            },
         };
         rig.run_ms(2500.0);
         assert!(rig.cpu.bus.usb.midi_ready(), "USB MIDI not enumerated");
@@ -130,7 +137,9 @@ fn main() {
     let (mhz, trials) = (opt("--cpu", 96), opt("--trials", 100));
     let mode = args[2].as_str();
     let mut rig = Rig::boot(&args[1], mhz);
-    if mode.starts_with("ext") || mode == "out" {
+    // interrupts nest (TIMER5 above ALNK0), as the firmware is written for; NEST=0: they wait
+    rig.cpu.nested_irqs = env::var("NEST").map(|v| v != "0").unwrap_or(true);
+    if mode.starts_with("ext") || mode == "transport" {
         let f = |name: &str, def: f64| {
             args.iter()
                 .position(|a| a == name)
@@ -138,14 +147,24 @@ fn main() {
                 .map(|v| v.parse().unwrap())
                 .unwrap_or(def)
         };
-        clock(
-            &mut rig,
-            mode,
-            trials,
-            f("--bpm", 120.0),
-            f("--ramp", 0.0),
-            f("--jitter", 0.0),
-        );
+        let c = Clock {
+            usb: mode != "ext-trs",
+            sync: f("--sync", 2.0) as i32,
+            beats: trials,
+            bpm: f("--bpm", 120.0),
+            to: f("--to", 0.0),
+            ramp: f("--ramp", 0.0),
+            jitter: f("--jitter", 0.0),
+            fa: f("--fa", -1.0),
+            drop: f("--drop", 0.0) as usize,
+            spike: f("--spike", 0.0) as usize,
+            spike_ms: f("--spike-ms", 3.0),
+        };
+        if mode == "transport" {
+            transport(&mut rig, &c);
+        } else {
+            clock(&mut rig, &c);
+        }
         return;
     }
     rig.set_global(26, 0); // G_DRREV: no reverb tail between trials
@@ -206,139 +225,160 @@ fn main() {
     );
 }
 
-/// Drum steps 0..15: a closed hat (lane 6) on each; no drum reverb.
-fn hats(rig: &mut Rig) {
+pub struct Clock {
+    usb: bool,
+    sync: i32,
+    beats: u32,
+    bpm: f64,
+    to: f64,
+    ramp: f64,
+    jitter: f64,
+    fa: f64,
+    drop: usize,
+    spike: usize,
+    spike_ms: f64,
+}
+
+/// A closed hat (lane 4) on steps 0, 4, 8, 12 (`every` 2: on 0 and 8), no reverb.
+fn hats(rig: &mut Rig, every: u8) {
     rig.set_global(26, 0);
     for i in 0..16u8 {
         // ED_DRUM_STEP (33): index, on (3 x 7 bits), lvl (5), rat (5)
-        let mut m = vec![0xF0, 0x7D, 0x46, 0x4C, 33, i, 1 << 6, 0, 0];
+        let on = if i % (4 * every) == 0 { 1 << 4 } else { 0 };
+        let mut m = vec![0xF0, 0x7D, 0x46, 0x4C, 33, i, on, 0, 0];
         m.extend([0u8; 10]);
         m.push(0xF7);
         rig.sysex(&m);
     }
 }
 
-fn clock(rig: &mut Rig, mode: &str, beats: u32, bpm: f64, ramp: f64, jitter: f64) {
-    let mhz = rig.cpu.instructions_per_tick * 24;
-    hats(rig);
-    rig.arm();
-    let mut seed = 12345u64;
-    let mut jit = |ms: f64| {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        ((seed % 2_000_001) as f64 / 1e6 - 1.0) * ms * TICKS_PER_MS
-    };
-    if mode == "out" {
-        rig.set_global(13, 1); // SYNC OUT
-        rig.run_ms(200.0);
-        rig.cpu.bus.usb.midi_received.clear();
-        rig.cpu.bus.usb.midi_received_ticks.clear();
-        let stop = rig.onsets().len();
-        rig.cpu.bus.devices.gpio.press(10, 2, true).unwrap(); // PLAY (matrix id 12, SLOOP panel default)
-        rig.run_ms(60.0);
-        rig.cpu.bus.devices.gpio.press(10, 2, false).unwrap();
-        rig.run_ms(beats as f64 * 667.0); // the firmware tempo: 90 BPM, a beat is 667 ms
-        let ticks: Vec<(u64, u8)> = rig
-            .cpu
-            .bus
-            .usb
-            .midi_received
-            .iter()
-            .zip(rig.cpu.bus.usb.midi_received_ticks.iter())
-            .map(|(p, t)| (*t, p[1]))
-            .collect();
-        let fa = ticks
-            .iter()
-            .position(|(_, b)| *b == 0xFA)
-            .expect("no FA sent");
-        let f8: Vec<u64> = ticks[fa..]
-            .iter()
-            .filter(|(_, b)| *b == 0xF8)
-            .map(|(t, _)| *t)
-            .collect();
-        let on: Vec<u64> = rig.onsets()[stop..].iter().map(|(_, t)| *t).collect();
-        let mut e = vec![];
-        for t in f8.iter().step_by(6) {
-            if let Some(o) = on
-                .iter()
-                .min_by_key(|o| (**o as i64 - *t as i64).unsigned_abs())
-            {
-                let d = (*t as f64 - *o as f64) / TICKS_PER_MS;
-                if d.abs() < 20.0 {
-                    e.push(d);
-                }
-            }
-        }
-        println!(
-            "out at {mhz} MHz, firmware tempo (90 BPM unless set): {} F8 after FA, {} onsets",
-            f8.len(),
-            on.len()
-        );
-        if f8.len() > 24 {
-            let iv: Vec<f64> = f8
-                .windows(2)
-                .map(|w| (w[1] - w[0]) as f64 / TICKS_PER_MS)
-                .collect();
-            println!("{}", Stats { v: iv.clone() }.line("F8 interval"));
-            if env::var("DUMP").is_ok() {
-                println!("{:?}", &iv[..60]);
-                let oi: Vec<f64> = on
-                    .windows(2)
-                    .map(|w| (w[1] - w[0]) as f64 / TICKS_PER_MS)
-                    .collect();
-                println!("onset intervals {:?}", oi);
-                let rel: Vec<f64> = f8
-                    .iter()
-                    .map(|t| {
-                        (*t as f64 - f8[0] as f64) / TICKS_PER_MS
-                            - 27.777777
-                                * ((*t as f64 - f8[0] as f64) / TICKS_PER_MS / 27.777777).round()
-                    })
-                    .collect();
-                println!("F8 phase vs grid {:?}", &rel[..60]);
-            }
-        }
-        println!("{}", Stats { v: e }.line("F8 sent - onset of its step"));
-        return;
+fn line(name: &str, v: &[f64]) -> String {
+    if v.is_empty() {
+        return format!("{name:<26} (none)");
     }
-    rig.set_global(13, if mode == "ext-usb" { 2 } else { 3 });
+    let n = v.len() as f64;
+    let mean = v.iter().sum::<f64>() / n;
+    let mut a: Vec<f64> = v.iter().map(|x| x.abs()).collect();
+    a.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    let p95 = a[(a.len() * 95 / 100).min(a.len() - 1)];
+    let min = v.iter().cloned().fold(f64::MAX, f64::min);
+    let max = v.iter().cloned().fold(f64::MIN, f64::max);
+    format!(
+        "{name:<26} n={:<4} mean {mean:+7.3}  p95 {p95:6.3}  min {min:+7.3}  max {max:+7.3} ms",
+        v.len()
+    )
+}
+
+struct Feed {
+    seed: u64,
+}
+impl Feed {
+    fn jit(&mut self, ms: f64) -> f64 {
+        self.seed ^= self.seed << 13;
+        self.seed ^= self.seed >> 7;
+        self.seed ^= self.seed << 17;
+        ((self.seed % 2_000_001) as f64 / 1e6 - 1.0) * ms * TICKS_PER_MS
+    }
+}
+fn send(rig: &mut Rig, usb: bool, b: &[u8]) {
+    if usb {
+        rig.cpu.bus.usb_midi_send(&encode(b, 0));
+    } else {
+        rig.cpu.bus.uart_midi_send(b);
+    }
+}
+
+fn clock(rig: &mut Rig, c: &Clock) {
+    let mhz = rig.cpu.instructions_per_tick * 24;
+    let every = if c.bpm > 150.0 { 2usize } else { 1 };
+    hats(rig, every as u8);
+    rig.set_global(13, c.sync);
+    rig.cpu.bus.audio.probe.arm(2048, 220); // the hits: |x| >= 2048 (Q15 16) after 5 ms below 256
     rig.run_ms(100.0);
-    let usb = mode == "ext-usb";
-    let send = |rig: &mut Rig, b: &[u8]| {
-        if usb {
-            rig.cpu.bus.usb_midi_send(&encode(b, 0));
-        } else {
-            rig.cpu.bus.uart_midi_send(b);
-        }
-    };
-    // tick times (ideal), arrival = ideal + jitter (+ the byte time on TRS)
-    let n = 48 + beats as usize * 24;
-    let mut ideal = vec![];
+    let mut feed = Feed { seed: 12345 };
+    let byte = fm1_emu::uart1::BYTE_TICKS as f64;
+    let down = 48usize;
+    let n = down + c.beats as usize * 24;
+    let (mut ideal, mut arrival) = (vec![], vec![]);
     let mut t = rig.now() as f64 + 10.0 * TICKS_PER_MS;
     for k in 0..n {
         ideal.push(t);
-        let b = if ramp > 0.0 && k >= 48 + beats as usize * 12 {
-            let f = ((k - 48 - beats as usize * 12) as f64 / (beats as f64 * 12.0)).min(1.0);
-            bpm + (ramp - bpm) * f
+        let b = if c.to > 0.0 && k >= down {
+            let f = if c.ramp <= 0.0 {
+                1.0
+            } else {
+                ((k - down) as f64 / (c.ramp * 24.0)).min(1.0)
+            };
+            c.bpm + (c.to - c.bpm) * f
         } else {
-            bpm
+            c.bpm
         };
         t += 60.0 / (24.0 * b) * 24e6;
     }
-    let byte = fm1_emu::uart1::BYTE_TICKS as f64;
-    let mut arrival = vec![];
     let start = rig.onsets().len();
-    for (k, ideal_t) in ideal.iter().enumerate() {
-        let at = ideal_t + jit(jitter);
-        if k == 48 {
-            // FA just before the downbeat F8
-            rig.run_until((at - if usb { 0.1 * TICKS_PER_MS } else { byte }) as u64 - 1);
-            send(rig, &[0xFA]);
+    for k in 0..n {
+        let mut at = ideal[k] + feed.jit(c.jitter);
+        if k > 0 && k == c.spike {
+            at += c.spike_ms * TICKS_PER_MS;
+        }
+        if k == down {
+            let fa = if c.fa < 0.0 {
+                arrival[k - 1] + 0.1 * TICKS_PER_MS
+            } else {
+                at - c.fa * TICKS_PER_MS
+            };
+            // (TRS: the FA byte must end before the F8 starts)
+            let fa = if c.usb { fa } else { fa.min(at - 2.0 * byte) };
+            rig.run_until(fa as u64);
+            send(rig, c.usb, &[0xFA]);
+        }
+        if env::var("DBGSY").is_ok() && k + 2 >= down && k <= down + 1 {
+            let f = |rig: &Rig, i: u32, size: usize| {
+                rig.sym
+                    .get(&format!("sy.{i}"))
+                    .map(|a| rig.cpu.bus.read(*a, size).unwrap() as i64)
+                    .unwrap_or(-1)
+            };
+            println!(
+                "k {k} t {:.2} ms: n {} n0 {} pos {} have {} arm {} src {} stop {}",
+                rig.now() as f64 / TICKS_PER_MS,
+                f(rig, 5, 4),
+                f(rig, 6, 4),
+                f(rig, 7, 4),
+                f(rig, 12, 1),
+                f(rig, 17, 1),
+                f(rig, 20, 1),
+                f(rig, 18, 1)
+            );
+        }
+        if env::var("DBGSY").is_ok() && k >= down && k <= down + 2 {
+            while rig.now() + 24_000 < at as u64 {
+                let g = |rig: &Rig, n: &str, sz: usize| {
+                    rig.sym
+                        .get(n)
+                        .map(|a| rig.cpu.bus.read(*a, sz).unwrap() as i64)
+                        .unwrap_or(-1)
+                };
+                println!(
+                    "  t {:+.2} ms: beat {} pos {} out_t {:+.2} n {} n0 {} arm {} have {}",
+                    (rig.now() as f64 - ideal[down]) / TICKS_PER_MS,
+                    g(rig, "clk_beat", 4),
+                    g(rig, "clk_pos", 4),
+                    (g(rig, "sync_out_t", 4) as f64 - (ideal[down] as u64 as u32) as f64)
+                        / TICKS_PER_MS,
+                    g(rig, "sy.5", 4),
+                    g(rig, "sy.6", 4),
+                    g(rig, "sy.17", 1),
+                    g(rig, "sy.12", 1)
+                );
+                rig.run_ms(1.0);
+            }
         }
         rig.run_until(at as u64);
-        send(rig, &[0xF8]);
-        arrival.push(if usb {
+        if k == 0 || k != c.drop {
+            send(rig, c.usb, &[0xF8]);
+        }
+        arrival.push(if c.usb {
             rig.now() as f64
         } else {
             rig.now() as f64 + byte
@@ -346,34 +386,138 @@ fn clock(rig: &mut Rig, mode: &str, beats: u32, bpm: f64, ramp: f64, jitter: f64
     }
     rig.run_ms(30.0);
     let on: Vec<u64> = rig.onsets()[start..].iter().map(|(_, t)| *t).collect();
-    let mut e_arr = vec![];
-    let mut e_ideal = vec![];
-    let mut first = None;
-    for (j, k) in (48..n).step_by(6).enumerate() {
+    if env::var("DUMP").is_ok() {
+        let all: Vec<String> = rig
+            .onsets()
+            .iter()
+            .rev()
+            .take(12)
+            .rev()
+            .map(|(_, o)| format!("{:.2}", (*o as f64 - ideal[down]) / TICKS_PER_MS))
+            .collect();
+        println!("last onsets overall: {}", all.join(" "));
+        let rel: Vec<String> = on
+            .iter()
+            .take(8)
+            .map(|o| format!("{:.2}", (*o as f64 - ideal[down]) / TICKS_PER_MS))
+            .collect();
+        println!("onsets from the downbeat F8 (ms): {}", rel.join(" "));
+    }
+    let (mut e_ideal, mut e_arr, mut first) = (vec![], vec![], None);
+    let mut worst_after_bar: f64 = 0.0;
+    for (j, k) in (down..n).step_by(24 * every).enumerate() {
+        let target = ideal[k] + if c.usb { 0.0 } else { byte };
         let near = on
             .iter()
-            .min_by_key(|o| (**o as i64 - arrival[k] as i64).unsigned_abs());
-        if let Some(o) = near {
-            let d = (*o as f64 - arrival[k]) / TICKS_PER_MS;
-            if d.abs() > 20.0 {
-                continue;
-            }
-            if j == 0 {
-                first = Some(d);
-                continue;
-            }
-            e_arr.push(d);
-            e_ideal.push((*o as f64 - ideal[k] - if usb { 0.0 } else { byte }) / TICKS_PER_MS);
+            .min_by_key(|o| (**o as i64 - target as i64).unsigned_abs());
+        let Some(o) = near else { continue };
+        let d = (*o as f64 - target) / TICKS_PER_MS;
+        if d.abs() > 30.0 {
+            continue;
+        }
+        if j == 0 {
+            first = Some(d);
+            continue;
+        }
+        e_ideal.push(d);
+        e_arr.push((*o as f64 - arrival[k]) / TICKS_PER_MS);
+        if j * every >= 4 {
+            worst_after_bar = worst_after_bar.max(d.abs());
         }
     }
+    let tempo = if c.to > 0.0 {
+        format!(
+            " -> {} ({})",
+            c.to,
+            if c.ramp > 0.0 {
+                format!("over {} beats", c.ramp)
+            } else {
+                "jump".into()
+            }
+        )
+    } else {
+        String::new()
+    };
     println!(
-        "{mode} at {mhz} MHz, {bpm} BPM{}{}: {} steps, {} onsets, the first hit {:+.3} ms after its F8",
-        if ramp > 0.0 { format!(" -> {ramp}") } else { String::new() },
-        if jitter > 0.0 { format!(" +-{jitter} ms") } else { String::new() },
-        (n - 48) / 6,
+        "{} at {mhz} MHz{}, {} BPM{tempo}{}{}: {} beats, {} onsets, the first hit {:+.3} ms from its F8, worst after bar 1 {:.3} ms",
+        if c.usb { "USB" } else { "TRS" },
+        if rig.cpu.nested_irqs { "" } else { " (no nesting)" },
+        c.bpm,
+        if c.jitter > 0.0 { format!(" +-{} ms", c.jitter) } else { String::new() },
+        if c.fa >= 0.0 { format!(", FA {} ms ahead", c.fa) } else { String::new() },
+        c.beats,
         on.len(),
-        first.unwrap_or(f64::NAN)
+        first.unwrap_or(f64::NAN),
+        worst_after_bar
     );
-    println!("{}", Stats { v: e_arr }.line("onset - F8 arrival"));
-    println!("{}", Stats { v: e_ideal }.line("onset - F8 ideal time"));
+    println!("{}", line("onset - F8 ideal time", &e_ideal));
+    println!("{}", line("onset - F8 arrival", &e_arr));
+}
+
+/// START a tick ahead, STOP after a bar, song position 16th 136 + CONTINUE a tick ahead (USB, 120 BPM)
+fn transport(rig: &mut Rig, c: &Clock) {
+    hats(rig, 1);
+    rig.set_global(13, c.sync);
+    rig.cpu.bus.audio.probe.arm(2048, 220); // the hits: |x| >= 2048 (Q15 16) after 5 ms below 256
+    rig.run_ms(100.0);
+    let p = 60.0 / (24.0 * c.bpm) * 24e6;
+    let mut t = rig.now() as f64 + 10.0 * TICKS_PER_MS;
+    let (k_fa, k_fc, k_fb) = (48usize, 48 + 96, 48 + 96 + 72);
+    let start = rig.onsets().len();
+    let (mut t_down, mut t_cont, mut t_stop) = (0.0, 0.0, 0.0);
+    let mut after_stop = 0;
+    for k in 0..(k_fb + 24 * 8) {
+        if k == k_fa || k == k_fb {
+            rig.run_until((t - p + 0.1 * TICKS_PER_MS) as u64);
+            if k == k_fb {
+                send(rig, c.usb, &[0xF2, 136 & 127, 1]);
+            }
+            send(rig, c.usb, &[if k == k_fa { 0xFA } else { 0xFB }]);
+        }
+        if k == k_fc {
+            rig.run_until((t - 0.1 * TICKS_PER_MS) as u64);
+            send(rig, c.usb, &[0xFC]);
+            t_stop = t;
+        }
+        rig.run_until(t as u64);
+        send(rig, c.usb, &[0xF8]);
+        if k == k_fa {
+            t_down = rig.now() as f64;
+        }
+        if k == k_fb {
+            t_cont = rig.now() as f64;
+        }
+        if k == k_fc + 24 {
+            after_stop = rig.onsets().len();
+        }
+        t += p;
+    }
+    rig.run_ms(30.0);
+    let on: Vec<f64> = rig.onsets()[start..]
+        .iter()
+        .map(|(_, t)| *t as f64)
+        .collect();
+    let near = |x: f64| {
+        on.iter()
+            .map(|o| (o - x) / TICKS_PER_MS)
+            .min_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap())
+            .unwrap_or(f64::NAN)
+    };
+    println!(
+        "transport ({}), {} BPM:",
+        if c.usb { "USB" } else { "TRS" },
+        c.bpm
+    );
+    println!(
+        "  START a tick ahead: the downbeat hit {:+.3} ms from its F8",
+        near(t_down)
+    );
+    println!(
+        "  STOP: {} hits after it (want 0)",
+        rig.onsets()[start..].len().min(after_stop) as i64
+            - on.iter()
+                .filter(|o| **o < t_stop + 30.0 * TICKS_PER_MS)
+                .count() as i64
+    );
+    println!("  SPP 136 + CONTINUE a tick ahead: the first hit {:+.3} ms, the next {:+.3} ms from their F8", near(t_cont), near(t_cont + 24.0 * p));
 }

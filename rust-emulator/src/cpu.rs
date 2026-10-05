@@ -164,8 +164,25 @@ pub struct Cpu {
     bus_locked: bool,
     secondary: Option<Core>,
     irq_priority_mask: u32,
+    /// Off by default (every baseline): an interrupt never preempts another.
+    /// On: one of a strictly higher priority than the running handler's
+    /// (the level written to the priority register at entry) preempts it,
+    /// unless the handler disabled interrupts (cli). Felucca-family firmware
+    /// is written for it (TIMER5 above ALNK0); the hardware's exact nesting
+    /// rules are not measured. `irq_stack` holds the preempted handlers.
+    pub nested_irqs: bool,
+    irq_stack: Vec<Preempted>,
     /// Name of the last executed instruction form (what `step` returns).
     pub(crate) name: &'static str,
+}
+
+/// A handler preempted by a nested interrupt (`Cpu::nested_irqs`).
+struct Preempted {
+    reti: u32,
+    icfg: u32,
+    predicate: Option<(u32, u32)>,
+    repeat: Option<(u32, u32, u32)>,
+    priority_mask: u32,
 }
 
 // Per-core context. Memory and devices remain on the one shared bus.
@@ -237,6 +254,8 @@ impl Cpu {
             bus_locked: false,
             secondary: None,
             irq_priority_mask: 0,
+            nested_irqs: false,
+            irq_stack: Vec::new(),
             name: "",
         }
     }
@@ -941,14 +960,23 @@ impl Cpu {
                     return Err(Fault::Unsupported { pc, word: h as u16 }.into());
                 }
                 next = self.sr[0];
-                self.sr[13] = self.sr[14];
-                self.sr[14] = self.sr[12];
-                self.in_interrupt = false;
                 self.predicate_skip = self.irq_predicate.take();
                 self.repeat = self.irq_repeat.take();
                 self.interrupts_enabled = true;
-                self.sr[11] = (self.sr[11] & !255) | 0x200;
                 self.write(0x1eef1a8 + self.sr[6] * 0x200, self.irq_priority_mask)?;
+                if let Some(outer) = self.irq_stack.pop() {
+                    // back into the preempted handler (still in interrupt)
+                    self.sr[0] = outer.reti;
+                    self.sr[11] = outer.icfg;
+                    self.irq_predicate = outer.predicate;
+                    self.irq_repeat = outer.repeat;
+                    self.irq_priority_mask = outer.priority_mask;
+                } else {
+                    self.sr[13] = self.sr[14];
+                    self.sr[14] = self.sr[12];
+                    self.in_interrupt = false;
+                    self.sr[11] = (self.sr[11] & !255) | 0x200;
+                }
                 name = "rti";
             }
             Op::Cli => {
@@ -1018,9 +1046,10 @@ impl Cpu {
         // interrupt that switches tasks; restoring it on rti leaked one
         // task's repeat into another (FM-1_093: a nested rep at 0x01c05026).
         if !self.interrupts_enabled
-            || self.in_interrupt
+            || (self.in_interrupt && !self.nested_irqs)
             || !self.bus.any_irq_pending()
             || self.inside_block()
+            || self.secondary.is_some() && self.in_interrupt
         {
             return Ok(());
         }
@@ -1037,21 +1066,36 @@ impl Cpu {
                 .devices
                 .irq_priority_for(source, self.sr[11], self.sr[6] as usize)
                 .unwrap();
-            self.irq_priority_mask = self.read(mask_register, 4)?;
+            let level = self.read(mask_register, 4)?;
+            if self.in_interrupt {
+                if priority <= level {
+                    return Ok(());
+                }
+                self.irq_stack.push(Preempted {
+                    reti: self.sr[0],
+                    icfg: self.sr[11],
+                    predicate: self.irq_predicate.take(),
+                    repeat: self.irq_repeat.take(),
+                    priority_mask: self.irq_priority_mask,
+                });
+            }
+            self.irq_priority_mask = level;
             self.write(mask_register, priority)?;
             let handler = self.read(0x01c7_fe00 + source as u32 * 4, 4)?;
             self.bus
                 .fetch(handler)
                 .map_err(|fault| Fault::Access { pc: self.pc, fault })?;
             self.sr[0] = self.pc;
-            self.sr[12] = self.sr[14];
-            self.sr[14] = self.sr[13];
+            if !self.in_interrupt {
+                self.sr[12] = self.sr[14];
+                self.sr[14] = self.sr[13];
+            }
             self.pc = handler;
             self.sr[11] = (self.sr[11] & !0x2ff) | source as u32;
             self.in_interrupt = true;
             self.irq_predicate = self.predicate_skip.take();
             self.irq_repeat = self.repeat.take();
-            self.interrupts_enabled = false;
+            self.interrupts_enabled = self.nested_irqs;
             self.irq_entries += 1;
         }
         Ok(())
