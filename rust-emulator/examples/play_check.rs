@@ -20,6 +20,7 @@
 // registers (PLAY_TRACE=N for the last N, default 40).
 use fm1_emu::{
     firmware::{elf_symbols, Symbol},
+    flash_state::{Persistence, Store},
     player::{knob, Player, OSCILLATOR_HZ},
     png,
     profile::{function_of, Profile},
@@ -147,16 +148,70 @@ fn record(player: &mut Player, seconds: f64, path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `[--state PATH [--fresh]]` before the firmware: the flash state to start
+/// from and save to at the end (fm1-ui's `--state`). Without it a run starts
+/// from the package alone and writes nothing, so measurements repeat.
+fn state_options(args: &mut Vec<String>) -> Result<Option<(String, bool)>, String> {
+    let mut state = None;
+    let mut fresh = false;
+    while let Some(first) = args.first().cloned() {
+        match first.as_str() {
+            "--state" if args.len() > 1 => {
+                state = Some(args[1].clone());
+                args.drain(..2);
+            }
+            "--fresh" => {
+                fresh = true;
+                args.remove(0);
+            }
+            _ => break,
+        }
+    }
+    match (state, fresh) {
+        (None, true) => Err("--fresh needs --state PATH".into()),
+        (state, fresh) => Ok(state.map(|state| (state, fresh))),
+    }
+}
+
 fn main() -> Result<(), String> {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    let state = state_options(&mut args)?;
     let (firmware, steps) = args
         .split_first()
-        .ok_or("usage: play_check FIRMWARE STEP...")?;
+        .ok_or("usage: play_check [--state PATH [--fresh]] FIRMWARE STEP...")?;
     let trace = env::var("PLAY_TRACE")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(40);
     let mut player = Player::boot(Path::new(firmware), trace)?;
+    let mut persistence = state.map(|(state, fresh)| {
+        let store = Store::for_firmware(Some(Path::new(&state)), Path::new(firmware));
+        let (persistence, message) = Persistence::attach(
+            store,
+            &mut player.cpu.bus,
+            Path::new(firmware),
+            player.code_end,
+            fresh,
+        );
+        println!("{message}");
+        persistence
+    });
+    let result = play(&mut player, firmware, steps);
+    if let Some(persistence) = &mut persistence {
+        match persistence.flush(&player.cpu.bus) {
+            Some(Ok(())) => println!(
+                "flash state: saved {} sectors to {}",
+                player.cpu.bus.nor_tracked_sectors().len(),
+                persistence.store.image.display()
+            ),
+            Some(Err(error)) => eprintln!("flash state: not saved: {error}"),
+            None => println!("flash state: no flash writes, nothing to save"),
+        }
+    }
+    result
+}
+
+fn play(player: &mut Player, firmware: &str, steps: &[String]) -> Result<(), String> {
     player.cpu.nested_irqs = env::var("FM1_NESTED_IRQ").is_ok_and(|v| v == "1");
     player.cpu.idle_skip = env::var("FM1_IDLE_SKIP").map_or(true, |v| v != "0");
     player.cpu.spin_skip = env::var("FM1_SPIN_SKIP").map_or(true, |v| v != "0");
@@ -211,7 +266,7 @@ fn main() -> Result<(), String> {
                 player.held = [false; 41];
                 Ok(())
             }
-            ["wav", s, path] => record(&mut player, seconds(step, s)?, path),
+            ["wav", s, path] => record(player, seconds(step, s)?, path),
             ["click", name, clicks] => {
                 // One detent at a time, each settled (as preset_sweep): a
                 // multi-detent turn can skip or add steps in the firmware.

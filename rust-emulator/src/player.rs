@@ -32,6 +32,8 @@ pub struct Player {
     pub profile: Option<Profile>,
     recent: VecDeque<(u32, &'static str, [u32; 16])>,
     trace: usize,
+    /// End of the package's code area in the NOR (`Firmware::code_end`).
+    pub code_end: usize,
 }
 
 /// Audio level of the guest's output since the last `Level::take`.
@@ -74,6 +76,7 @@ impl Player {
             profile: None,
             recent: VecDeque::new(),
             trace,
+            code_end: firmware.code_end(),
         })
     }
 
