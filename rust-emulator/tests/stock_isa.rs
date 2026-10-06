@@ -1015,3 +1015,34 @@ fn unsigned_conditional_immediates_are_not_sign_extended() {
         assert_eq!(conditional_target(0xea33, 0x0ba5, 3, value), expected);
     }
 }
+
+#[test]
+fn long_compare_branch_sign_extends_the_immediate_except_for_unsigned_kinds() {
+    // JieLi objdump, x = 0x0fff: ff00 `if (r0 == -1)`, ff01 `!= -1`, ff0a-ff0d
+    // `ifs (r0 >= / < / > / <= -1)`, but ff02/ff03/ff08/ff09 compare with 4095
+    // (unsigned). Stock FM-1_015's preset list wraps its index with
+    // ff0d 0fff (0x020247a0, `ifs (r0 <= -1)`): read as 4095, one detent of
+    // PRESETS went from 001 to 130.
+    let taken = |h: u16, r0: u32| {
+        let mut c = cpu(&[h, 0x0fff, 0x0010]);
+        c.r[0] = r0;
+        c.step().unwrap();
+        c.pc == XIP + 6 + 32
+    };
+    assert!(!taken(0xff0d, 1));
+    assert!(taken(0xff0d, u32::MAX));
+    assert!(taken(0xff0b, (-2i32) as u32));
+    assert!(!taken(0xff0b, 0));
+    assert!(taken(0xff0c, 0));
+    assert!(taken(0xff0a, (-1i32) as u32));
+    assert!(taken(0xff00, u32::MAX));
+    assert!(!taken(0xff00, 4095));
+    assert!(taken(0xff01, 4095));
+    // Unsigned kinds keep 4095.
+    assert!(taken(0xff02, 4095));
+    assert!(!taken(0xff02, 4094));
+    assert!(taken(0xff03, 4094));
+    assert!(taken(0xff08, 4096));
+    assert!(taken(0xff09, 4095));
+    assert!(!taken(0xff09, u32::MAX));
+}

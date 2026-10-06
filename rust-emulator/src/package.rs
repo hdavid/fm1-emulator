@@ -81,14 +81,12 @@ fn plausible_voices(data: &[u8]) -> bool {
 /// payload whose plaintext CRC verifies and whose first voice is plausible
 /// is returned, with the position it verified at.
 fn relocated_resource(raw: &[u8], key: u16, expected: u16) -> Option<(usize, Vec<u8>)> {
-    (0..0x40000)
-        .step_by(0x400)
-        .find_map(|offset| {
-            resource(raw, key, offset, expected)
-                .ok()
-                .filter(|data| plausible_voices(data))
-                .map(|data| (offset, data))
-        })
+    (0..0x40000).step_by(0x400).find_map(|offset| {
+        resource(raw, key, offset, expected)
+            .ok()
+            .filter(|data| plausible_voices(data))
+            .map(|data| (offset, data))
+    })
 }
 
 #[cfg(test)]
