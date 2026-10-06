@@ -11,6 +11,7 @@ pub mod encoders;
 pub mod firmware;
 mod float;
 pub mod gpio;
+pub mod host_thread;
 pub mod lcd;
 pub mod leds;
 mod package;
