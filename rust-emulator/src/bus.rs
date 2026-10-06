@@ -475,7 +475,31 @@ impl Bus {
         self.read_as(address, 2, "fetch").map(|value| value as u16)
     }
 
+    /// SRAM stores inline (most data); everything else in `write_slow`.
+    #[inline(always)]
     pub fn write(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
+        if matches!(size, 1 | 2 | 4) && address.is_multiple_of(size as u32) {
+            // Aligned accesses of at most 4 bytes never cross the end.
+            let offset = address.wrapping_sub(RAM) as usize;
+            if offset < RAM_SIZE {
+                self.guards
+                    .check_write(address, size)
+                    .map_err(|reason| Self::fault(address, size, "write", reason))?;
+                match size {
+                    4 => self.ram[offset..offset + 4].copy_from_slice(&value.to_le_bytes()),
+                    2 => {
+                        self.ram[offset..offset + 2].copy_from_slice(&(value as u16).to_le_bytes())
+                    }
+                    _ => self.ram[offset] = value as u8,
+                }
+                return Ok(());
+            }
+        }
+        self.write_slow(address, value, size)
+    }
+
+    #[inline(never)]
+    fn write_slow(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
         Self::check(address, size, "write")?;
         if let Some(offset) = Self::offset(address, size, RAM, self.ram.len()) {
             self.guards
