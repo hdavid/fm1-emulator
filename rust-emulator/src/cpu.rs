@@ -141,6 +141,10 @@ impl fmt::Display for Fault {
     }
 }
 
+/// Internal result: the fault is boxed so that results stay register-sized
+/// on the per-instruction path; `step` unboxes it.
+pub(crate) type Step<T> = Result<T, Box<Fault>>;
+
 pub fn signed(value: u32, bits: u32) -> i32 {
     ((value << (32 - bits)) as i32) >> (32 - bits)
 }
@@ -327,26 +331,26 @@ impl Cpu {
         }
     }
 
-    pub(crate) fn read(&self, address: u32, size: usize) -> Result<u32, Fault> {
+    pub(crate) fn read(&self, address: u32, size: usize) -> Step<u32> {
         self.bus
             .read(address, size)
-            .map_err(|fault| Fault::Access { pc: self.pc, fault })
+            .map_err(|fault| Box::new(Fault::Access { pc: self.pc, fault }))
     }
 
-    pub(crate) fn write(&mut self, address: u32, value: u32) -> Result<(), Fault> {
+    pub(crate) fn write(&mut self, address: u32, value: u32) -> Step<()> {
         self.bus
             .write(address, value, 4)
-            .map_err(|fault| Fault::Access { pc: self.pc, fault })
+            .map_err(|fault| Box::new(Fault::Access { pc: self.pc, fault }))
     }
 
-    pub(crate) fn push(&mut self, value: u32) -> Result<(), Fault> {
+    pub(crate) fn push(&mut self, value: u32) -> Step<()> {
         let address = self.sr[14].wrapping_sub(4);
         self.write(address, value)?;
         self.sr[14] = address;
         Ok(())
     }
 
-    pub(crate) fn pop(&mut self) -> Result<u32, Fault> {
+    pub(crate) fn pop(&mut self) -> Step<u32> {
         let value = self.read(self.sr[14], 4)?;
         self.sr[14] = self.sr[14].wrapping_add(4);
         Ok(value)
@@ -413,7 +417,7 @@ impl Cpu {
             // loop as tight as a plain one.
             let batch = (count - done).min(Self::HALT_CHECK_INTERVAL);
             for _ in 0..batch {
-                self.step()?;
+                self.step_cores().map_err(|fault| *fault)?;
             }
             done += batch;
         }
@@ -495,6 +499,11 @@ impl Cpu {
     }
 
     pub fn step(&mut self) -> Result<&'static str, Fault> {
+        self.step_cores().map_err(|fault| *fault)
+    }
+
+    #[inline(always)]
+    fn step_cores(&mut self) -> Step<&'static str> {
         let control = self.bus.core_control(1);
         if control & 2 != 0 {
             self.secondary = None;
@@ -522,7 +531,7 @@ impl Cpu {
         Ok(op)
     }
 
-    fn step_secondary(&mut self, advance_time: bool) -> Result<&'static str, Fault> {
+    fn step_secondary(&mut self, advance_time: bool) -> Step<&'static str> {
         let mut secondary = self.secondary.take().unwrap();
         secondary.swap(self);
         let result = self.step_core(advance_time);
@@ -532,7 +541,7 @@ impl Cpu {
         result
     }
 
-    fn step_core(&mut self, advance_time: bool) -> Result<&'static str, Fault> {
+    fn step_core(&mut self, advance_time: bool) -> Step<&'static str> {
         if let Some((_, at, end)) = self.predicate_skip {
             if self.pc == at {
                 self.pc = end;
@@ -664,7 +673,7 @@ impl Cpu {
         Ok(op)
     }
 
-    pub(crate) fn conditional(&mut self, test: bool, counts: u32) -> Result<u32, Fault> {
+    pub(crate) fn conditional(&mut self, test: bool, counts: u32) -> Step<u32> {
         use crate::decode::skip_length;
         let mut cursor = self.pc + 4;
         let mut then_end = cursor;
@@ -693,7 +702,7 @@ impl Cpu {
         self.decode.wide(h, x)
     }
 
-    fn execute(&mut self, h: u32) -> Result<&'static str, Fault> {
+    fn execute(&mut self, h: u32) -> Step<&'static str> {
         let pc = self.pc;
         let a = (h & 7) as usize;
         let b = ((h >> 4) & 7) as usize;
@@ -710,13 +719,13 @@ impl Cpu {
                     self.sr[n] = value;
                     op = "stack_imm32";
                 } else {
-                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                    return Err(Fault::Unsupported { pc, word: h as u16 }.into());
                 }
                 next = pc + 6;
             }
             First::RepeatRegister => {
                 if self.repeat.is_some() {
-                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                    return Err(Fault::Unsupported { pc, word: h as u16 }.into());
                 }
                 let register = (h & 15) as usize;
                 let length = (((h >> 4) & 15) + 1) * 2;
@@ -739,7 +748,7 @@ impl Cpu {
             }
             First::RepeatImmediate => {
                 if self.repeat.is_some() {
-                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                    return Err(Fault::Unsupported { pc, word: h as u16 }.into());
                 }
                 let length = (((h >> 4) & 15) + 1) * 2;
                 let count = ((h >> 8) & 31) + 1;
@@ -757,7 +766,7 @@ impl Cpu {
                 let special = ((extra >> 8) & 15) as usize;
                 // Deliberately exclude PC writes and unrecognized reserved encodings.
                 if special == 15 || !matches!(extra & 255, 0 | 128) {
-                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                    return Err(Fault::Unsupported { pc, word: h as u16 }.into());
                 }
                 if extra & 255 == 128 {
                     self.sr[special] = self.r[reg];
@@ -774,7 +783,7 @@ impl Cpu {
                 let extra = self.read(pc + 2, 2)?;
                 let mode = (extra >> 10) & 3;
                 if mode == 0 && extra & 0x0f00 > 0x0300 {
-                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                    return Err(Fault::Unsupported { pc, word: h as u16 }.into());
                 }
                 self.r[((extra >> 12) & 15) as usize] = crate::extended::packed(extra);
                 next = pc + 4;
@@ -1084,11 +1093,11 @@ impl Cpu {
             First::SyncOrNop => {
                 op = if h == 0x0020 { "csync" } else { "nop" };
             }
-            First::Rti => return Err(Fault::Unsupported { pc, word: h as u16 }),
+            First::Rti => return Err(Fault::Unsupported { pc, word: h as u16 }.into()),
             First::Extended(extended) => {
                 let Some((destination, name)) = crate::extended::execute(self, h, pc, extended)?
                 else {
-                    return Err(Fault::Unsupported { pc, word: h as u16 });
+                    return Err(Fault::Unsupported { pc, word: h as u16 }.into());
                 };
                 next = destination;
                 op = name;
@@ -1102,7 +1111,7 @@ impl Cpu {
     /// debug_init sets BIT(2); emu_msg bit 2 is "div0_err") it latches
     /// EMU_MSG bit 2 and returns true: the instruction leaves its
     /// destination unwritten and vector 1 is entered after it.
-    pub(crate) fn divide_by_zero(&mut self, pc: u32) -> Result<bool, Fault> {
+    pub(crate) fn divide_by_zero(&mut self, pc: u32) -> Step<bool> {
         let core = self.sr[6] as usize;
         if self.bus.emu_con(core) & 4 == 0 {
             return Ok(false);
@@ -1120,11 +1129,11 @@ impl Cpu {
     /// SDK's exception report prints as the crash address; whether the
     /// hardware stores it or the next PC is unmeasured. ICFG takes the
     /// FM-1_989 interrupt-entry layout.
-    fn enter_exception(&mut self, at: u32) -> Result<(), Fault> {
+    fn enter_exception(&mut self, at: u32) -> Step<()> {
         const SOURCE: usize = 1;
         let core = self.sr[6] as usize;
         let Some(priority) = self.bus.devices.irq_priority_for(SOURCE, self.sr[11], core) else {
-            return Err(Fault::Access {
+            return Err(Box::new(Fault::Access {
                 pc: at,
                 fault: AccessFault {
                     address: at,
@@ -1132,7 +1141,7 @@ impl Cpu {
                     operation: "divide-by-zero exception",
                     reason: "exception vector 1 is not enabled; undelivered entry is unmeasured",
                 },
-            });
+            }));
         };
         let handler = self.read(0x01c7_fe00 + SOURCE as u32 * 4, 4)?;
         self.bus
@@ -1162,7 +1171,7 @@ impl Cpu {
         self.last_exception
     }
 
-    fn dispatch_interrupt(&mut self) -> Result<(), Fault> {
+    fn dispatch_interrupt(&mut self) -> Step<()> {
         if !self.interrupts_enabled
             || (self.in_interrupt && !self.nested_irqs)
             || self.repeat.is_some()
@@ -1268,7 +1277,9 @@ impl Cpu {
         }
         let mut values = [0; 12];
         for (i, value) in values.iter_mut().enumerate() {
-            *value = self.read(RESULT + i as u32 * 4, 4)?;
+            *value = self
+                .read(RESULT + i as u32 * 4, 4)
+                .map_err(|fault| *fault)?;
         }
         Ok(values)
     }
