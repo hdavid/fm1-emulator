@@ -48,6 +48,8 @@ fn run() -> Result<(), String> {
     cpu.idle_skip = env::var("FM1_IDLE_SKIP").map_or(true, |v| v != "0");
     cpu.nested_irqs = env::var("FM1_NESTED_IRQ").is_ok_and(|v| v == "1");
     cpu.set_block_cache(env::var("FM1_BLOCK_CACHE").is_ok_and(|v| v == "1"));
+    cpu.spin_skip = env::var("FM1_SPIN_SKIP").map_or(true, |v| v != "0");
+    cpu.spin_log = env::var("FM1_SPIN_LOG").is_ok_and(|v| v == "1");
     let mut hash = FNV_OFFSET;
     let mut fault = None;
     let start = Instant::now();
@@ -80,10 +82,11 @@ fn run() -> Result<(), String> {
     );
     let guest = cpu.bus.oscillator_ticks() as f64 / 24e6;
     println!(
-        "guest time {guest:.3} s: {:.3}x real time; {} slots halted in idle ({} jumped over)",
+        "guest time {guest:.3} s: {:.3}x real time; {} slots halted in idle ({} jumped over); spin loops jumped over {:?}",
         guest / seconds,
         cpu.idle_slots,
-        cpu.idle_skipped
+        cpu.idle_skipped,
+        cpu.spin_skipped
     );
     if hashing || batched {
         let ram_hash = (0..fm1_emu::RAM_SIZE as u32)

@@ -41,3 +41,20 @@ pending words stay zero. CPU 1 remained in reset and its registers returned
 zero, so that capture does not validate cross-core visibility. A later probe
 attempting to start CPU 1 reset before returning results and was discarded;
 the USB updater recovered and FM-1_981 display firmware was restored.
+
+## Spin loops
+
+Stock FM-1 rarely lets the idle skip engage: while CPU0 sleeps, CPU1 polls
+its job mailbox (0x01c0247e.., with a call to 0x01c01c22 that resets TIMER5's
+counter and reads it back). `src/spin.rs` records such a loop (the core's
+state before every instruction and its data accesses) and accepts it only as
+a fixed point: a pass returns to the head state, reads and stores the same
+memory values, and touches no device other than TIMER4/5 counter writes and
+reads. `Cpu::skip_idle_calls` then also jumps spans in which every issuing
+core is halted or in such a loop: the timer accesses are replayed at the
+oscillator tick each would run at (the fractional instruction clock), a
+value no recorded pass read or a timer reaching its period ends the span,
+and the core is left in the recorded state it reaches. `spin_skip = false`
+(`FM1_SPIN_SKIP=0` in bench, diagnose and play_check) turns it off;
+`FM1_SPIN_LOG=1` lists the loops found and rejected. Final state, SRAM,
+audio and LCD hashes are identical either way.

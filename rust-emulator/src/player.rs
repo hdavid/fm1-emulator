@@ -99,7 +99,7 @@ impl Player {
         self.cpu.bus.devices_changed();
         let mut done = 0;
         while done < calls {
-            if self.cpu.halted() {
+            if self.cpu.may_skip() {
                 let skipped = self.cpu.skip_idle_calls(calls - done);
                 if skipped > 0 {
                     if let Some(profile) = self.profile.as_mut() {

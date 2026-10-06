@@ -92,6 +92,11 @@ impl Clock {
             .checked_sub(self.instruction_phase + 1)
             .map_or(0, |room| room / 24_000_000)
     }
+    /// Oscillator ticks of `count` more instruction issues at the issue rate
+    /// last computed (`issue` without changing anything).
+    pub(crate) fn ticks_after(&self, count: u64) -> u64 {
+        (self.instruction_phase + count * 24_000_000) / self.phase_hz as u64
+    }
     pub(crate) fn instruction_ticks(&mut self, clk_con3: u32) -> u32 {
         self.cycles += 1;
         let hz = self.issue_hz(clk_con3);
