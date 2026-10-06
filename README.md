@@ -64,7 +64,8 @@ and Baud Girl results.
 - [ ] Execute native blocks in batches, then broaden JIT coverage; see the [performance plan](rust-emulator/PERFORMANCE.md).
 - [ ] Remaining CPU instructions, peripherals and firmware UI paths.
 - [ ] Host audio playback, rotary controls and USB MIDI.
-- [ ] Flash persistence, plus fuller encryption, interrupt and timing behavior.
+- [x] Flash persistence between runs (`state/`, `--fresh`; see the [emulator README](rust-emulator/README.md#flash-kept-between-runs)).
+- [ ] Fuller encryption, interrupt and timing behavior.
 
 GPL-3.0-only; see [LICENSE](LICENSE). Based on research and components from
 [Felucca](https://github.com/hugelton/Felucca), the
