@@ -970,9 +970,10 @@ impl Bus {
     }
 
     pub fn advance_audio(&mut self, ticks: u32) -> Result<(), AccessFault> {
+        // A frame transfers only on a device event, whose tick is `synced`.
         self.irq_quiet = false;
         self.audio
-            .advance(ticks, &self.ram)
+            .advance(ticks, &self.ram, self.synced)
             .map_err(|reason| Self::fault(0x12e1c, 4, "audio DMA", reason))
     }
 
