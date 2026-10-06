@@ -44,6 +44,36 @@ fn state_hash(cpu: &Cpu, hash: u64) -> u64 {
     fold(hash, cpu.irq_entries as u32)
 }
 
+/// CPU time of this thread in seconds: on a loaded host, less disturbed
+/// than wall time by the waits for a core. None where not available.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn thread_cpu_seconds() -> Option<f64> {
+    #[repr(C)]
+    struct Timespec {
+        seconds: i64,
+        nanoseconds: i64,
+    }
+    extern "C" {
+        fn clock_gettime(clock: i32, time: *mut Timespec) -> i32;
+    }
+    #[cfg(target_os = "macos")]
+    const CLOCK_THREAD_CPUTIME_ID: i32 = 16;
+    #[cfg(target_os = "linux")]
+    const CLOCK_THREAD_CPUTIME_ID: i32 = 3;
+    let mut time = Timespec {
+        seconds: 0,
+        nanoseconds: 0,
+    };
+    // SAFETY: clock_gettime writes one timespec through a valid pointer.
+    let status = unsafe { clock_gettime(CLOCK_THREAD_CPUTIME_ID, &mut time) };
+    (status == 0).then_some(time.seconds as f64 + time.nanoseconds as f64 * 1e-9)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn thread_cpu_seconds() -> Option<f64> {
+    None
+}
+
 #[derive(PartialEq)]
 enum Mode {
     Step,
@@ -155,6 +185,7 @@ fn run() -> Result<(), String> {
     let mut fault = None;
     let mut drained = None;
     let start = Instant::now();
+    let start_cpu = thread_cpu_seconds();
     match mode {
         Mode::Hash => {
             let cpu = &mut player.cpu;
@@ -186,6 +217,7 @@ fn run() -> Result<(), String> {
         }
     }
     let seconds = start.elapsed().as_secs_f64();
+    let cpu_seconds = start_cpu.zip(thread_cpu_seconds()).map(|(a, b)| b - a);
     let cpu = &player.cpu;
     let calls = cpu.core_steps[0].max(cpu.core_steps[1]);
     let steps = cpu.steps - before.0;
@@ -201,6 +233,12 @@ fn run() -> Result<(), String> {
         cpu.idle_skipped - before.2,
         cpu.spin_skipped
     );
+    if let Some(cpu_seconds) = cpu_seconds {
+        println!(
+            "host CPU time {cpu_seconds:.3} s: {:.3}x real time per CPU second",
+            guest / cpu_seconds
+        );
+    }
     if mode != Mode::Step {
         let ram_hash = (0..fm1_emu::RAM_SIZE as u32)
             .step_by(4)
