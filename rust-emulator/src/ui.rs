@@ -99,6 +99,8 @@ const MASTER_DEFAULT: u16 = 512;
 fn master_angle(master: u16) -> f32 {
     (master as f32 / 1023. - 0.5) * 1.5 * std::f32::consts::PI
 }
+/// Longest wait for the flash state to be saved when quitting.
+const QUIT_SAVE_WAIT: Duration = Duration::from_secs(5);
 const INK: Color32 = Color32::from_rgb(190, 194, 193);
 const ACCENT: Color32 = Color32::from_rgb(231, 193, 91);
 
@@ -135,6 +137,12 @@ struct Emulator {
     leds: ui_leds::LedView,
     /// The panel's colours (an index into `ui_theme::THEMES`).
     theme: usize,
+    /// The flash is kept between runs (`--state`; off in tests).
+    keeps_flash: bool,
+    /// The flash state's last event, for the status line.
+    state_status: Option<String>,
+    /// "Reset flash state" asked; waiting for the confirmation.
+    confirm_reset: bool,
 }
 impl Emulator {
     fn new(path: PathBuf) -> Self {
@@ -162,12 +170,20 @@ impl Emulator {
             web: web_editor::WebEditor::disabled("No web editor"),
             leds: ui_leds::LedView::new(),
             theme: 0,
+            keeps_flash: false,
+            state_status: None,
+            confirm_reset: false,
         };
         app.knob_angle[0] = master_angle(app.master);
         app.reset();
         app
     }
     fn reset(&mut self) {
+        self.clear();
+        self.worker.restart(self.generation, self.path.clone());
+    }
+    /// The view of a machine about to start (a new generation).
+    fn clear(&mut self) {
         self.pressed.fill(false);
         self.pulse.fill(Instant::now());
         self.pulse_steps.fill(0);
@@ -178,7 +194,51 @@ impl Emulator {
         self.loaded = false;
         self.steps = 0;
         self.fault = None;
-        self.worker.restart(self.generation, self.path.clone());
+    }
+    /// Forget what the firmware saved to flash and start from the package
+    /// alone, as a device fresh from an update with its data erased.
+    fn reset_flash(&mut self) {
+        self.clear();
+        self.state_status = None;
+        self.worker.reset_state(self.generation);
+    }
+    /// The flash menu and its confirmation window.
+    fn flash_menu(&mut self, ui: &mut egui::Ui) {
+        ui.add_enabled_ui(self.keeps_flash, |ui| {
+            ui.menu_button("Flash", |ui| {
+                if ui.button("Reset flash state…").clicked() {
+                    self.confirm_reset = true;
+                    ui.close_menu();
+                }
+            })
+            .response
+            .on_hover_text("What the firmware wrote to flash (projects, presets, settings) is kept between runs (--state; --fresh starts clean)")
+            .on_disabled_hover_text("The flash is not kept between runs");
+        });
+        if !self.confirm_reset {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Reset flash state")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, vec2(0., 0.))
+            .open(&mut open)
+            .show(ui.ctx(), |ui| {
+                ui.label("Erase everything this firmware saved to flash (projects, autosave, presets, settings) and restart from the package alone?");
+                ui.horizontal(|ui| {
+                    if ui.button("Reset and restart").clicked() {
+                        self.confirm_reset = false;
+                        self.reset_flash();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_reset = false;
+                    }
+                });
+            });
+        if !open {
+            self.confirm_reset = false;
+        }
     }
     fn refresh(&mut self, ctx: &egui::Context) {
         self.worker.input(self.pressed);
@@ -191,6 +251,9 @@ impl Emulator {
         }
         self.loaded = snapshot.loaded;
         self.steps = snapshot.steps;
+        if snapshot.state.is_some() {
+            self.state_status = snapshot.state;
+        }
         let (since, frames) = self.speed_mark;
         let elapsed = since.elapsed().as_secs_f64();
         if snapshot.frames < frames || self.paused {
@@ -578,6 +641,9 @@ impl Canvas {
 }
 
 impl eframe::App for Emulator {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.worker.flusher().flush(QUIT_SAVE_WAIT);
+    }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("toolbar")
             .frame(
@@ -600,6 +666,7 @@ impl eframe::App for Emulator {
                         if ui.button("Restart").clicked() {
                             self.reset();
                         }
+                        self.flash_menu(ui);
                         let editor =
                             ui.add_enabled(self.web.active(), egui::Button::new("Open editor"));
                         let editor = match (self.web.url(), self.web.unavailable()) {
@@ -693,6 +760,9 @@ impl eframe::App for Emulator {
                         ui.colored_label(lit, "●").on_hover_text("MIDI traffic");
                     }
                     ui.weak(self.web.status());
+                    if let Some(state) = &self.state_status {
+                        ui.weak(format!("· {state}"));
+                    }
                 });
             }
         });
@@ -724,22 +794,35 @@ struct Args {
     ui: Option<PathBuf>,
     /// Panel colours (an index into `ui_theme::THEMES`); None: FM1_THEME or Classic.
     theme: Option<usize>,
+    /// Flash state file or folder (`--state`); None: `flash_state::default_dir`.
+    state: Option<PathBuf>,
+    /// `--fresh`: start from the package alone and replace the flash state.
+    fresh: bool,
 }
-const USAGE: &str = "usage: emulator [--cpu-mhz N] [--ui DIR] [--theme NAME] <firmware>";
+const USAGE: &str =
+    "usage: emulator [--cpu-mhz N] [--ui DIR] [--theme NAME] [--state PATH] [--fresh] <firmware>";
 /// The theme called `name`, or an error listing them.
 fn theme_named(name: &str) -> Result<usize, String> {
     ui_theme::find(name)
         .ok_or_else(|| format!("unknown theme {name:?}; themes: {}", ui_theme::names()))
 }
-/// `[--cpu-mhz N] [--ui DIR] [--theme NAME] FIRMWARE`.
+/// `[--cpu-mhz N] [--ui DIR] [--theme NAME] [--state PATH] [--fresh] FIRMWARE`.
 fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Args, String> {
     let mut path = None;
     let mut clock = None;
     let mut ui = None;
     let mut theme = None;
+    let mut state = None;
+    let mut fresh = false;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
-        if arg == "--ui" {
+        if arg == "--state" {
+            state = Some(PathBuf::from(
+                args.next().ok_or("--state needs a file or folder")?,
+            ));
+        } else if arg == "--fresh" {
+            fresh = true;
+        } else if arg == "--ui" {
             ui = Some(PathBuf::from(args.next().ok_or("--ui needs a directory")?));
         } else if arg == "--theme" {
             let name = args.next().ok_or("--theme needs a name")?;
@@ -765,6 +848,8 @@ fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Args
         clock_mhz: clock,
         ui,
         theme,
+        state,
+        fresh,
     })
 }
 fn main() -> eframe::Result {
@@ -807,6 +892,22 @@ fn main() -> eframe::Result {
                     app.audio = Some(audio);
                 }
                 Err(error) => app.audio_error = Some(error),
+            }
+            // What the firmware writes to flash stays, as on the device;
+            // Ctrl+C and SIGTERM save it before quitting, as closing does.
+            app.keeps_flash = true;
+            app.worker.keep_flash(worker::StateConfig {
+                path: args.state.clone(),
+                fresh: args.fresh,
+            });
+            let flusher = app.worker.flusher();
+            if let Err(error) = ctrlc::set_handler(move || {
+                flusher.flush(QUIT_SAVE_WAIT);
+                std::process::exit(130);
+            }) {
+                eprintln!(
+                    "no Ctrl+C handler ({error}): only closing the window saves the flash state"
+                );
             }
             app.reset(); // Apply the clock, audio and editor from the first instruction.
             app.worker.read_stdin();
@@ -1025,6 +1126,8 @@ mod tests {
             clock_mhz,
             ui: ui.map(PathBuf::from),
             theme: None,
+            state: None,
+            fresh: false,
         };
         assert_eq!(parse(&["a.fwsc"]), Ok(args(None, None)));
         assert_eq!(
@@ -1040,6 +1143,12 @@ mod tests {
         assert_eq!(parse(&["--cpu-mhz=96", "a.fwsc"]), Ok(args(Some(96), None)));
         assert!(parse(&["a.fwsc", "b.fwsc"]).is_err());
         assert!(parse(&[]).is_err());
+        let state = parse(&["--state", "st/", "--fresh", "a.fwsc"]).unwrap();
+        assert_eq!(
+            (state.state, state.fresh),
+            (Some(PathBuf::from("st/")), true)
+        );
+        assert!(parse(&["a.fwsc", "--state"]).is_err());
     }
     #[test]
     fn the_command_line_picks_a_theme_by_name() {
