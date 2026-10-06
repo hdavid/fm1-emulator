@@ -9,7 +9,8 @@
 // cores (instructions per core), click:KNOB:N (N settled detents), align (to
 // the next audio DMA half: pins a following hold or release to the same
 // audio block at any render cost), master:VALUE (the MASTER potentiometer,
-// 0..1023 as the SARADC reads it).
+// 0..1023 as the SARADC reads it), leds:SECONDS (run and print the panel LED
+// brightness over that time: 1 = lit whenever its column is scanned).
 // FM1_CPU_MHZ=N sets the instruction clock (default: the firmware's);
 // FM1_NESTED_IRQ=1 lets interrupts nest (USB audio builds); FM1_IDLE_SKIP=0
 // steps every halted slot instead of skipping to the next device event.
@@ -20,6 +21,7 @@
 // registers (PLAY_TRACE=N for the last N, default 40).
 use fm1_emu::{
     firmware::{elf_symbols, Symbol},
+    leds,
     player::{knob, Player, OSCILLATOR_HZ},
     png,
     profile::{function_of, Profile},
@@ -101,6 +103,39 @@ fn report(profile: &Profile, symbols: &[Symbol], top: usize) {
             );
         }
     }
+}
+
+/// Panel names of the matrix key ids (buttons 0..13, then the note keys).
+const BUTTONS: [&str; 14] = [
+    "OCT-", "OCT+", "FX", "SEL", "ENV", "LFO", "EDIT", "GLO", "HOME", "SAVE", "ARP", "SEQ", "PLAY",
+    "REC",
+];
+
+/// The LED brightness array (`[column][line]`, line = row bit PA5..PA8),
+/// then the lit LEDs by key.
+fn print_leds(brightness: &leds::Brightness) {
+    println!("  leds [column][PA5 PA6 PA7 PA8]:");
+    for (column, levels) in brightness.iter().enumerate() {
+        let levels: Vec<_> = levels.iter().map(|l| format!("{l:.3}")).collect();
+        println!("    {column:2}: {}", levels.join(" "));
+    }
+    let lit: Vec<_> = leds::by_key(brightness)
+        .iter()
+        .enumerate()
+        .filter(|(_, &level)| level > 0.)
+        .map(|(id, level)| match BUTTONS.get(id) {
+            Some(name) => format!("{name}={level:.3}"),
+            None => format!("key{}={level:.3}", id - 14),
+        })
+        .collect();
+    println!(
+        "  lit: {}",
+        if lit.is_empty() {
+            "none".into()
+        } else {
+            lit.join(" ")
+        }
+    );
 }
 
 fn seconds(step: &str, text: &str) -> Result<f64, String> {
@@ -344,6 +379,12 @@ fn main() -> Result<(), String> {
             ["png", path] => {
                 let bytes = png::encode_rgb(240, 240, &player.cpu.bus.lcd.pixels)?;
                 std::fs::write(path, bytes).map_err(|error| format!("{path}: {error}"))
+            }
+            ["leds", s] => {
+                player.cpu.bus.devices.gpio.leds.take();
+                player.run_seconds(seconds(step, s)?)?;
+                print_leds(&player.cpu.bus.devices.gpio.leds.take());
+                Ok(())
             }
             _ => return Err(format!("unknown step {step}")),
         };
