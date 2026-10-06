@@ -16,7 +16,9 @@
 // interrupts nest; FM1_BLOCK_CACHE=1 executes through the block cache and JIT.
 // FM1_SCENARIO=FILE first plays the panel steps in FILE (whitespace
 // separated, as play_check: run:SECONDS, hold:ID,ID.., release,
-// turn:KNOB:DETENTS) without timing them, e.g. to measure a busy song.
+// turn:KNOB:DETENTS) without timing them, e.g. to measure a busy song:
+// examples/scenarios/busy.steps (made by busy_song.py there) drives an
+// Optimist build into three synth tracks, drums and FX.
 // Everything runs on a spawned thread at fm1-ui's worker class
 // (host_thread); FM1_QOS=default leaves the class a spawned thread gets.
 use fm1_emu::{
