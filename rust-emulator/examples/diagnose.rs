@@ -216,6 +216,14 @@ fn run() -> Result<(), String> {
         "interrupts: {}; USB: {} host setups, {} packets, {} CDC bytes",
         cpu.irq_entries, cpu.bus.usb.setups, cpu.bus.usb.packets, serial_bytes
     );
+    if cpu.exception_entries > 0 {
+        let (core, at) = cpu.last_exception();
+        eprintln!(
+            "CPU exceptions (vector 1): {}; last on core {core} at {}",
+            cpu.exception_entries,
+            location(&firmware.symbols, at)
+        );
+    }
     eprintln!(
         "watchdog: {} feeds; timeout {:?} ticks, {} since the last feed",
         cpu.bus.system.watchdog_feeds,

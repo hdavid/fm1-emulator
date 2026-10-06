@@ -32,6 +32,10 @@ pub struct Player {
     pub profile: Option<Profile>,
     recent: VecDeque<(u32, &'static str, [u32; 16])>,
     trace: usize,
+    /// Report a CPU exception (vector 1, e.g. a trapped divide by zero) as a
+    /// fault instead of letting the firmware's crash handler run. On by
+    /// default; FM1_EXCEPTION_CONTINUE=1 turns it off.
+    pub stop_on_exception: bool,
 }
 
 /// Audio level of the guest's output since the last `Level::take`.
@@ -74,6 +78,7 @@ impl Player {
             profile: None,
             recent: VecDeque::new(),
             trace,
+            stop_on_exception: std::env::var_os("FM1_EXCEPTION_CONTINUE").is_none(),
         })
     }
 
@@ -122,24 +127,37 @@ impl Player {
                 profile.record(pc, self.cpu.in_interrupt());
             }
         }
+        let exceptions = self.cpu.exception_entries;
         match self.cpu.step() {
             Ok(op) => {
                 if self.recent.len() >= self.trace {
                     self.recent.pop_front();
                 }
                 self.recent.push_back((pc, op, self.cpu.r));
+                if self.stop_on_exception && self.cpu.exception_entries != exceptions {
+                    let (core, at) = self.cpu.last_exception();
+                    let emu_msg = 0x01ee_f0d4 + 0x200 * core as u32;
+                    let message = format!(
+                        "CPU exception (vector 1) on core {core} at PC 0x{at:08x}, \
+                         EMU_MSG 0x{:08x} (bit 2: divide by zero)",
+                        self.cpu.bus.read(emu_msg, 4).unwrap_or(0)
+                    );
+                    return Err(self.report(&message));
+                }
                 Ok(())
             }
-            Err(fault) => {
-                let mut report = String::new();
-                for (pc, op, r) in &self.recent {
-                    let regs: Vec<_> = r.iter().map(|v| format!("{v:x}")).collect();
-                    report += &format!("  0x{pc:08x} {op:<24} [{}]\n", regs.join(" "));
-                }
-                report += &format!("fault after {} instructions: {fault}", self.cpu.steps);
-                Err(report)
-            }
+            Err(fault) => Err(self.report(&fault.to_string())),
         }
+    }
+
+    /// The last instructions (PC, form, registers after it), then `what`.
+    fn report(&self, what: &str) -> String {
+        let mut report = String::new();
+        for (pc, op, r) in &self.recent {
+            let regs: Vec<_> = r.iter().map(|v| format!("{v:x}")).collect();
+            report += &format!("  0x{pc:08x} {op:<24} [{}]\n", regs.join(" "));
+        }
+        report + &format!("fault after {} instructions: {what}", self.cpu.steps)
     }
 
     /// Run `seconds` of guest time: oscillator ticks, whatever the

@@ -180,6 +180,8 @@ pub struct Cpu {
     pub exception_entries: u64,
     /// The PC of an instruction that raised a CPU exception in this step.
     exception: Option<u32>,
+    /// Core and PC of the last CPU exception entered (diagnostics).
+    last_exception: (usize, u32),
     in_interrupt: bool,
     predicate_skip: Option<(u32, u32)>,
     irq_predicate: Option<(u32, u32)>,
@@ -310,6 +312,7 @@ impl Cpu {
             irq_entries: 0,
             exception_entries: 0,
             exception: None,
+            last_exception: (0, 0),
             in_interrupt: false,
             predicate_skip: None,
             irq_predicate: None,
@@ -1132,7 +1135,13 @@ impl Cpu {
         self.irq_predicate = self.predicate_skip.take();
         self.irq_repeat = self.repeat.take();
         self.exception_entries += 1;
+        self.last_exception = (core, at);
         Ok(())
+    }
+
+    /// Core and PC of the instruction that raised the last CPU exception.
+    pub fn last_exception(&self) -> (usize, u32) {
+        self.last_exception
     }
 
     fn dispatch_interrupt(&mut self) -> Result<(), Fault> {
