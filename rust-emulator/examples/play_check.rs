@@ -159,6 +159,8 @@ fn main() -> Result<(), String> {
     let mut player = Player::boot(Path::new(firmware), trace)?;
     player.cpu.nested_irqs = env::var("FM1_NESTED_IRQ").is_ok_and(|v| v == "1");
     player.cpu.idle_skip = env::var("FM1_IDLE_SKIP").map_or(true, |v| v != "0");
+    player.cpu.spin_skip = env::var("FM1_SPIN_SKIP").map_or(true, |v| v != "0");
+    player.cpu.spin_log = env::var("FM1_SPIN_LOG").is_ok_and(|v| v == "1");
     // Optional: FM1_CPU_MHZ=N issues one instruction per N MHz of guest time.
     if let Ok(mhz) = env::var("FM1_CPU_MHZ") {
         let mhz: u32 = mhz.parse().map_err(|_| "invalid FM1_CPU_MHZ")?;

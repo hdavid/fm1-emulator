@@ -8,6 +8,8 @@ use crate::{
 };
 use std::{fmt, io::Write};
 
+mod spin_skip;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Fault {
     Access { pc: u32, fault: AccessFault },
@@ -149,8 +151,8 @@ pub fn signed(value: u32, bits: u32) -> i32 {
     ((value << (32 - bits)) as i32) >> (32 - bits)
 }
 
-#[derive(Clone, Copy)]
-struct Repeat {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Repeat {
     start: u32,
     end: u32,
     iterations: u32,
@@ -204,6 +206,22 @@ pub struct Cpu {
     pub nested_irqs: bool,
     /// Preempted handlers, innermost last (`nested_irqs`).
     irq_nest: Vec<IrqFrame>,
+    /// With `idle_skip`, also jump over spans in which a core busy-waits in
+    /// a recorded spin loop (spin.rs). The guest-visible state is the same
+    /// either way.
+    pub spin_skip: bool,
+    /// Instruction slots of each core in spin loops jumped over (also
+    /// counted in `core_steps`).
+    pub spin_skipped: [u64; 2],
+    /// Print the loops accepted and rejected (diagnostics).
+    pub spin_log: bool,
+    spin: [spin_skip::SpinCore; 2],
+    /// Calls of `step` until the next look for spin loops.
+    spin_countdown: u32,
+    /// While set, the executing instruction's data accesses are appended to
+    /// `access_log` (the spin-loop recorder).
+    logging: bool,
+    access_log: std::cell::RefCell<Vec<crate::spin::Access>>,
 }
 
 /// What a nested interrupt entry keeps of the handler it preempts: its
@@ -328,6 +346,13 @@ impl Cpu {
             secondary: None,
             nested_irqs: false,
             irq_nest: Vec::new(),
+            spin_skip: true,
+            spin_skipped: [0; 2],
+            spin_log: false,
+            spin: Default::default(),
+            spin_countdown: spin_skip::POLL_STEPS,
+            logging: false,
+            access_log: Default::default(),
         }
     }
 
@@ -336,6 +361,9 @@ impl Cpu {
     // bus result is kept on the stack of the instruction functions.
     #[inline(always)]
     pub(crate) fn read(&self, address: u32, size: usize) -> Step<u32> {
+        if self.logging {
+            return self.read_logged(address, size);
+        }
         match self.bus.read_fast(address, size) {
             Some(value) => Ok(value),
             None => self.read_slow(address, size),
@@ -347,6 +375,14 @@ impl Cpu {
         self.bus
             .read(address, size)
             .map_err(|fault| Box::new(Fault::Access { pc: self.pc, fault }))
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn read_logged(&self, address: u32, size: usize) -> Step<u32> {
+        let value = self.read_slow(address, size)?;
+        self.log_access(address, size, false, value);
+        Ok(value)
     }
 
     #[inline(always)]
@@ -372,6 +408,9 @@ impl Cpu {
 
     #[inline(always)]
     pub(crate) fn write_sized(&mut self, address: u32, value: u32, size: usize) -> Step<()> {
+        if self.logging {
+            self.log_access(address, size, true, value);
+        }
         if self.bus.write_fast(address, value, size) {
             return Ok(());
         }
@@ -452,7 +491,7 @@ impl Cpu {
         self.bus.devices_changed();
         let mut done = 0;
         while done < count {
-            if self.idle || self.secondary.as_ref().is_some_and(|core| core.idle) {
+            if self.may_skip() || self.secondary.as_ref().is_some_and(|core| core.idle) {
                 let skipped = self.skip_idle_calls(count - done);
                 if skipped > 0 {
                     done += skipped;
@@ -470,10 +509,11 @@ impl Cpu {
         Ok(())
     }
 
-    /// While every core that would step is halted by `idle` and no
-    /// interrupt can enter, account up to `max_calls` calls of `step` at
-    /// once, stopping before the call that reaches the next device event.
-    /// Returns the calls skipped (0: step normally).
+    /// While every core that would step is halted by `idle`, or busy-waits
+    /// in a recorded spin loop (spin.rs, `spin_skip`), and no interrupt can
+    /// enter, account up to `max_calls` calls of `step` at once, stopping
+    /// before the call that reaches the next device event. Returns the
+    /// calls skipped (0: step normally).
     pub fn skip_idle_calls(&mut self, max_calls: u64) -> u64 {
         if !self.idle_skip {
             return 0;
@@ -501,14 +541,23 @@ impl Cpu {
                 && core.predicate_skip.is_none()
                 && core.repeat.is_none()
         });
-        if (primary_steps && !primary_quiet) || (secondary_steps && !secondary_quiet) {
+        // A core that is not halted may be in a spin loop (checked below).
+        let primary_spins = primary_steps && !primary_quiet && self.spin_hint(0);
+        let secondary_spins = secondary_steps && !secondary_quiet && self.spin_hint(1);
+        if (primary_steps && !primary_quiet && !primary_spins)
+            || (secondary_steps && !secondary_quiet && !secondary_spins)
+        {
             return 0;
         }
-        // A halted core that can take a pending interrupt wakes next slot.
+        let spins = primary_spins || secondary_spins;
+        if spins && self.bus.mmio_counting {
+            return 0;
+        }
+        // A halted core that can take a pending interrupt wakes next slot; a
+        // spinning one is not skipped while any source is pending for it.
         if self.bus.any_irq_pending() {
             if primary_steps
-                && self.interrupts_enabled
-                && !self.in_interrupt
+                && (primary_spins || (self.interrupts_enabled && !self.in_interrupt))
                 && self
                     .bus
                     .pending_irq_for(self.sr[11], self.sr[6] as usize)
@@ -518,8 +567,7 @@ impl Cpu {
             }
             if secondary_steps
                 && secondary.is_some_and(|core| {
-                    core.interrupts_enabled
-                        && !core.in_interrupt
+                    (secondary_spins || (core.interrupts_enabled && !core.in_interrupt))
                         && self
                             .bus
                             .pending_irq_for(core.sr[11], core.sr[6] as usize)
@@ -529,18 +577,40 @@ impl Cpu {
                 return 0;
             }
         }
+        // A spin loop that writes a timer leaves the next tick exact, only
+        // to recompute the device event times: do that now.
+        if spins && self.bus.reschedule().is_err() {
+            return 0;
+        }
         // Exactly one issuing core carries guest time per call.
         let calls = self.bus.issues_before_event().min(max_calls);
         if calls == 0 {
             return 0;
         }
+        // Where each spinning core is, and what the span does to it.
+        let outcomes = if spins {
+            let Some(outcomes) =
+                self.spin_outcomes(primary_spins, secondary_spins, secondary_alone, calls)
+            else {
+                return 0;
+            };
+            Some(outcomes)
+        } else {
+            None
+        };
         self.bus.skip_issues(calls);
+        let primary_halted = primary_steps && !primary_spins;
+        let secondary_halted = secondary_steps && !secondary_spins;
         let slots = calls * (u64::from(primary_steps) + u64::from(secondary_steps));
+        let halted_slots = calls * (u64::from(primary_halted) + u64::from(secondary_halted));
         self.steps += slots;
         self.core_steps[0] += if primary_steps { calls } else { 0 };
         self.core_steps[1] += if secondary_steps { calls } else { 0 };
-        self.idle_slots += slots;
-        self.idle_skipped += slots;
+        self.idle_slots += halted_slots;
+        self.idle_skipped += halted_slots;
+        if let Some(outcomes) = outcomes {
+            self.spin_apply(outcomes, calls);
+        }
         calls
     }
 
@@ -559,6 +629,24 @@ impl Cpu {
 
     #[inline(always)]
     fn step_cores(&mut self) -> Step<&'static str> {
+        self.spin_countdown -= 1;
+        if self.spin_countdown == 0 {
+            return self.step_cores_polling();
+        }
+        self.step_cores_with::<false>()
+    }
+
+    /// A call of `step` that looks for spin loops first, and records a
+    /// core's instructions while `spin_poll` has it recording.
+    #[cold]
+    #[inline(never)]
+    fn step_cores_polling(&mut self) -> Step<&'static str> {
+        self.spin_poll();
+        self.step_cores_with::<true>()
+    }
+
+    #[inline(always)]
+    fn step_cores_with<const RECORD: bool>(&mut self) -> Step<&'static str> {
         let control = self.bus.core_control(1);
         if control & 2 != 0 {
             self.secondary = None;
@@ -576,20 +664,28 @@ impl Cpu {
             && (self.bus.core_control(0) & 16 != 0
                 || self.secondary.as_ref().is_some_and(|core| core.bus_locked))
         {
-            return self.step_secondary(true);
+            return self.step_secondary::<RECORD>(true);
         }
-        let op = self.step_core(true)?;
+        let op = if RECORD && self.spin_recording(0) {
+            self.step_core_recording(0, true)?
+        } else {
+            self.step_core(true)?
+        };
         self.core_steps[0] += 1;
         if !self.bus_locked && secondary_running {
-            self.step_secondary(false)?;
+            self.step_secondary::<RECORD>(false)?;
         }
         Ok(op)
     }
 
-    fn step_secondary(&mut self, advance_time: bool) -> Step<&'static str> {
+    fn step_secondary<const RECORD: bool>(&mut self, advance_time: bool) -> Step<&'static str> {
         let mut secondary = self.secondary.take().unwrap();
         secondary.swap(self);
-        let result = self.step_core(advance_time);
+        let result = if RECORD && self.spin_recording(1) {
+            self.step_core_recording(1, advance_time)
+        } else {
+            self.step_core(advance_time)
+        };
         secondary.swap(self);
         self.secondary = Some(secondary);
         self.core_steps[1] += 1;

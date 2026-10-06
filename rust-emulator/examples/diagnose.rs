@@ -100,6 +100,11 @@ fn run() -> Result<(), String> {
     // Optional: FM1_IDLE_SKIP=0 steps every slot of a core halted in `idle`
     // instead of jumping to the next device event (same guest state).
     cpu.idle_skip = env::var("FM1_IDLE_SKIP").map_or(true, |v| v != "0");
+    // Optional: FM1_SPIN_SKIP=0 also steps every instruction of a core
+    // busy-waiting in a recorded spin loop (same guest state);
+    // FM1_SPIN_LOG=1 prints the loops found and rejected.
+    cpu.spin_skip = env::var("FM1_SPIN_SKIP").map_or(true, |v| v != "0");
+    cpu.spin_log = env::var("FM1_SPIN_LOG").is_ok_and(|v| v == "1");
     // Halted spans are skipped only where no per-instruction diagnostic
     // looks, and never across the start of the FM1_HOT / FM1_MMIO windows.
     let hot_start = limit - hot_window.min(limit);
@@ -109,7 +114,7 @@ fn run() -> Result<(), String> {
     while next < limit {
         let step = next;
         next += 1;
-        if skip_allowed && step < hot_start && cpu.halted() {
+        if skip_allowed && step < hot_start && cpu.may_skip() {
             let bound = [hot_start, mmio_start, limit]
                 .into_iter()
                 .filter(|&b| b >= step)

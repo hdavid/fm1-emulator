@@ -833,6 +833,49 @@ impl Bus {
         self.clock.issues_within(clk_con3, room)
     }
 
+    /// The oscillator tick after `count` more instruction issues; valid right
+    /// after `issues_before_event` (which brings the issue clock up to date).
+    pub(crate) fn tick_after_issues(&self, count: u64) -> u64 {
+        self.oscillator_ticks + self.clock.ticks_after(count)
+    }
+
+    /// The tick the clocked devices have been advanced to.
+    pub(crate) fn synced(&self) -> u64 {
+        self.synced
+    }
+
+    /// The peripheral (LSB) clock the guest selected, which TIMER4/5 count.
+    pub(crate) fn peripheral_hz(&self) -> u32 {
+        self.clocks.0
+    }
+
+    /// A register write makes the next tick exact only to recompute the
+    /// device event times (`write`): recompute them now instead. They are
+    /// the same times, since no device has an event before `next_event`.
+    pub(crate) fn reschedule(&mut self) -> Result<(), AccessFault> {
+        if self.next_event == self.oscillator_ticks + 1 {
+            self.sync()?;
+            self.next_event = self.oscillator_ticks + self.ticks_to_event().max(1);
+        }
+        Ok(())
+    }
+
+    /// Bring the clocked devices up to tick `to` (at most the current tick,
+    /// with no device event in between).
+    pub(crate) fn sync_to(&mut self, to: u64) {
+        self.catch_up(to)
+            .expect("no device has an event before next_event");
+    }
+
+    /// What a device register write leaves behind (`write`), for registers
+    /// written other than through it: clocks and event times recomputed.
+    pub(crate) fn registers_written(&mut self) {
+        self.clocks = self.select_clocks();
+        self.next_event = self.oscillator_ticks + 1;
+        self.irq_quiet = false;
+        self.refresh_xip_view();
+    }
+
     /// Account `count` instructions in which nothing but time passes, all
     /// before the next device event (`issues_before_event`).
     pub(crate) fn skip_issues(&mut self, count: u64) {

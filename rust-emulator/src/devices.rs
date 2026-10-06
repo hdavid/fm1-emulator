@@ -169,7 +169,7 @@ pub struct Timer {
 }
 
 impl Timer {
-    fn read(&self, offset: u32) -> Option<u32> {
+    pub(crate) fn read(&self, offset: u32) -> Option<u32> {
         match offset {
             0 => Some(self.control | if self.pending { 1 << 15 } else { 0 }),
             4 => Some(self.counter),
@@ -178,7 +178,7 @@ impl Timer {
         }
     }
 
-    fn write(&mut self, offset: u32, value: u32) -> Option<Result<(), &'static str>> {
+    pub(crate) fn write(&mut self, offset: u32, value: u32) -> Option<Result<(), &'static str>> {
         match offset {
             0 => {
                 // Count mode, with LSB (0) or OSC (2) source. Edge capture
@@ -243,7 +243,7 @@ impl Timer {
         )
     }
 
-    fn advance_with_clock(&mut self, oscillator_ticks: u32, peripheral_hz: u32) {
+    pub(crate) fn advance_with_clock(&mut self, oscillator_ticks: u32, peripheral_hz: u32) {
         if self.control & 3 != 1 {
             return;
         }
@@ -293,6 +293,22 @@ pub struct Devices {
 }
 
 impl Devices {
+    /// TIMER4 or TIMER5, by the address of its CON register.
+    pub(crate) fn timer(&self, base: u32) -> Option<&Timer> {
+        match base {
+            TIMER4 => Some(&self.timer4),
+            TIMER5 => Some(&self.timer5),
+            _ => None,
+        }
+    }
+    /// TIMER4 or TIMER5, by the address of its CON register.
+    pub(crate) fn timer_mut(&mut self, base: u32) -> Option<&mut Timer> {
+        match base {
+            TIMER4 => Some(&mut self.timer4),
+            TIMER5 => Some(&mut self.timer5),
+            _ => None,
+        }
+    }
     fn bank(address: u32) -> (usize, u32) {
         if (0x1eef200..0x1eef400).contains(&address) {
             (1, address - 0x200)

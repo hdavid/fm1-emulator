@@ -19,6 +19,7 @@ pub mod png;
 pub mod profile;
 mod shift_spi;
 mod simd;
+mod spin;
 mod uart;
 mod wireless;
 
