@@ -17,6 +17,8 @@ pub struct Gpio {
     /// Port A input reads while each matrix column was selected: how many
     /// times the guest has sampled that column's contacts (encoder pacing).
     scans: [std::cell::Cell<u32>; 11],
+    /// The panel LEDs these pins light (an observer: the guest never sees it).
+    pub leds: crate::leds::Leds,
 }
 
 impl Default for Gpio {
@@ -32,6 +34,7 @@ impl Default for Gpio {
             latched: u16::MAX,
             previous_driven_a: 0,
             scans: Default::default(),
+            leds: Default::default(),
         }
     }
 }
@@ -65,6 +68,21 @@ impl Gpio {
                     rows
                 }
             })
+    }
+
+    /// The LED lines and the latched columns, after a write that may move them.
+    #[inline]
+    fn observe_leds(&mut self) {
+        let lines =
+            crate::leds::LINE_PINS
+                .iter()
+                .enumerate()
+                .fold(0, |lines, (line, &(port, pin))| {
+                    let p = &self.ports[port];
+                    let driven = p[OUT as usize / 4] & !p[DIR as usize / 4];
+                    lines | (((driven >> pin) & 1) as u8) << line
+                });
+        self.leds.update(self.latched, lines);
     }
 
     /// Times the guest has read the rows while `column` was selected.
@@ -132,6 +150,64 @@ impl Gpio {
             }
             self.previous_driven_a = driven;
         }
+        if port == 0 || port == 7 {
+            self.observe_leds(); // The latch and the LED lines are on PA and PH.
+        }
         Some(Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::leds::{by_key, KEYMAP};
+
+    const PA: u32 = GPIO;
+    const PH: u32 = GPIO + 7 * 0x40;
+
+    fn set(gpio: &mut Gpio, address: u32, value: u32) {
+        gpio.write(address, value).unwrap().unwrap();
+    }
+
+    /// Shift `word` into the 595 chain on PA4/PA3 and latch it with PA1.
+    fn latch(gpio: &mut Gpio, word: u16) {
+        for bit in (0..16).rev() {
+            let serial = if word & (1 << bit) != 0 { 16 } else { 0 };
+            set(gpio, PA + OUT, serial);
+            set(gpio, PA + OUT, serial | 8);
+        }
+        set(gpio, PA + OUT, 2);
+        set(gpio, PA + OUT, 0);
+    }
+
+    #[test]
+    fn an_led_line_lights_the_led_of_the_latched_column() {
+        let mut gpio = Gpio::default();
+        set(&mut gpio, PA + DIR, !0x1a); // PA1, PA3, PA4 drive the 595s.
+        set(&mut gpio, PH + DIR, !0x240); // PH6 and PH9 drive LED lines.
+                                          // Four scan frames: PH6 (row PA7) is driven high on column 3 only,
+                                          // for the second half of that column's time.
+        for _ in 0..4 {
+            for column in 0..11 {
+                set(&mut gpio, PH + OUT, 0);
+                latch(&mut gpio, !(1 << column));
+                gpio.leds.advance(100);
+                set(&mut gpio, PH + OUT, if column == 3 { 0x40 } else { 0 });
+                gpio.leds.advance(100);
+            }
+        }
+        set(&mut gpio, PH + OUT, 0);
+        let keys = by_key(&gpio.leds.take());
+        let lit = KEYMAP[2][3] as usize;
+        assert_eq!(keys[lit], 0.5);
+        assert!(keys
+            .iter()
+            .enumerate()
+            .all(|(id, &level)| id == lit || level == 0.));
+        // An input pin with its output latch high lights nothing.
+        set(&mut gpio, PH + DIR, u32::MAX);
+        set(&mut gpio, PH + OUT, 0x40);
+        gpio.leds.advance(1000);
+        assert!(gpio.leds.take().iter().flatten().all(|&level| level == 0.));
     }
 }

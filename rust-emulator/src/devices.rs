@@ -554,6 +554,7 @@ impl Devices {
         self.tick_secondary.advance(ticks, core_hz);
         self.rc_measurement.advance(ticks);
         self.random.advance(ticks);
+        self.gpio.leds.advance(ticks);
     }
     fn software_enabled(&self, core: usize) -> u32 {
         let config = self.irq_config[core][15];
