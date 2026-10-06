@@ -331,27 +331,59 @@ impl Cpu {
         }
     }
 
+    // Guest accesses by the instruction at `self.pc`: SRAM and the XIP view
+    // inline, the rest (devices, faults) out of line, so that no large
+    // bus result is kept on the stack of the instruction functions.
     #[inline(always)]
     pub(crate) fn read(&self, address: u32, size: usize) -> Step<u32> {
-        match self.bus.read(address, size) {
-            Ok(value) => Ok(value),
-            Err(fault) => Err(self.access_fault(fault)),
+        match self.bus.read_fast(address, size) {
+            Some(value) => Ok(value),
+            None => self.read_slow(address, size),
         }
+    }
+
+    #[inline(never)]
+    fn read_slow(&self, address: u32, size: usize) -> Step<u32> {
+        self.bus
+            .read(address, size)
+            .map_err(|fault| Box::new(Fault::Access { pc: self.pc, fault }))
+    }
+
+    #[inline(always)]
+    pub(crate) fn fetch(&self, address: u32) -> Step<u32> {
+        match self.bus.read_fast(address, 2) {
+            Some(value) => Ok(value),
+            None => self.fetch_slow(address),
+        }
+    }
+
+    #[inline(never)]
+    fn fetch_slow(&self, address: u32) -> Step<u32> {
+        self.bus
+            .fetch(address)
+            .map(u32::from)
+            .map_err(|fault| Box::new(Fault::Access { pc: self.pc, fault }))
     }
 
     #[inline(always)]
     pub(crate) fn write(&mut self, address: u32, value: u32) -> Step<()> {
-        match self.bus.write(address, value, 4) {
-            Ok(()) => Ok(()),
-            Err(fault) => Err(self.access_fault(fault)),
-        }
+        self.write_sized(address, value, 4)
     }
 
-    /// A faulting access by the instruction at `pc`.
-    #[cold]
+    #[inline(always)]
+    pub(crate) fn write_sized(&mut self, address: u32, value: u32, size: usize) -> Step<()> {
+        if self.bus.write_fast(address, value, size) {
+            return Ok(());
+        }
+        self.write_slow(address, value, size)
+    }
+
     #[inline(never)]
-    fn access_fault(&self, fault: AccessFault) -> Box<Fault> {
-        Box::new(Fault::Access { pc: self.pc, fault })
+    fn write_slow(&mut self, address: u32, value: u32, size: usize) -> Step<()> {
+        let pc = self.pc;
+        self.bus
+            .write(address, value, size)
+            .map_err(|fault| Box::new(Fault::Access { pc, fault }))
     }
 
     #[inline(always)]
@@ -581,67 +613,13 @@ impl Cpu {
             self.idle_slots += 1;
             "idle_wait"
         } else {
-            let h = self
-                .bus
-                .fetch(pc)
-                .map_err(|fault| Fault::Access { pc, fault })? as u32;
-            let parallel = h >> 13 == 6 || h & 0xf800 == 0xf000;
-            if parallel {
-                let length = if h >> 13 == 6 { 2 } else { 4 };
-                let normalized = if length == 2 { h & 0x1fff } else { h & !0x1000 };
-                self.pc = pc + length;
-                let following = self.read(self.pc, 2)?;
-                let before = self.r;
-                let specials_before = self.sr;
-                self.execute(following)?;
-                let following_registers = self.r;
-                let following_specials = self.sr;
-                let continuation = self.pc;
-                self.r = before;
-                self.sr = specials_before;
-                self.pc = pc;
-                let op = self.execute(normalized)?;
-                // Both slots read the incoming registers. Compiler bundles have
-                // distinct destinations; retain writes from the following slot
-                // where the primary slot did not change that register.
-                for i in 0..16 {
-                    if self.r[i] == before[i] {
-                        self.r[i] = following_registers[i];
-                    }
-                    if self.sr[i] == specials_before[i] {
-                        self.sr[i] = following_specials[i];
-                    }
-                }
-                self.pc = continuation;
-                op
+            let h = self.fetch(pc)?;
+            if h >> 13 == 6 || h & 0xf800 == 0xf000 {
+                self.execute_bundle(pc, h)?
+            } else if self.blocks.enabled {
+                self.execute_prepared(pc, h)?
             } else {
-                let prepared = if self.blocks.enabled
-                    && self
-                        .blocks
-                        .can_execute(&self.decode, self.block_cursor, pc, h as u16)
-                {
-                    self.blocks.instruction(
-                        &self.bus,
-                        &mut self.decode,
-                        &mut self.block_cursor,
-                        pc,
-                        h as u16,
-                    )
-                } else {
-                    None
-                };
-                if let Some(prepared) = prepared {
-                    let instruction = prepared.instruction;
-                    if let Some(native) = prepared.native {
-                        native.run(&mut self.r, &mut self.sr);
-                        self.pc = pc.wrapping_add(instruction.length as u32);
-                        instruction.name
-                    } else {
-                        instruction.execute(self)?
-                    }
-                } else {
-                    self.execute(h)?
-                }
+                self.execute(h)?
             }
         };
         if let Some(at) = self.exception.take() {
@@ -696,6 +674,70 @@ impl Cpu {
         Ok(op)
     }
 
+    /// A parallel bundle at `pc` (first word `h`): the following slot,
+    /// then the primary slot, both reading the incoming registers.
+    #[inline(never)]
+    fn execute_bundle(&mut self, pc: u32, h: u32) -> Step<&'static str> {
+        let length = if h >> 13 == 6 { 2 } else { 4 };
+        let normalized = if length == 2 { h & 0x1fff } else { h & !0x1000 };
+        self.pc = pc + length;
+        let following = self.read(self.pc, 2)?;
+        let before = self.r;
+        let specials_before = self.sr;
+        self.execute(following)?;
+        let following_registers = self.r;
+        let following_specials = self.sr;
+        let continuation = self.pc;
+        self.r = before;
+        self.sr = specials_before;
+        self.pc = pc;
+        let op = self.execute(normalized)?;
+        // Both slots read the incoming registers. Compiler bundles have
+        // distinct destinations; retain writes from the following slot
+        // where the primary slot did not change that register.
+        for i in 0..16 {
+            if self.r[i] == before[i] {
+                self.r[i] = following_registers[i];
+            }
+            if self.sr[i] == specials_before[i] {
+                self.sr[i] = following_specials[i];
+            }
+        }
+        self.pc = continuation;
+        Ok(op)
+    }
+
+    /// The instruction at `pc` through the block cache and JIT
+    /// (`set_block_cache`), or the interpreter where they do not apply.
+    #[inline(never)]
+    fn execute_prepared(&mut self, pc: u32, h: u32) -> Step<&'static str> {
+        let prepared = if self
+            .blocks
+            .can_execute(&self.decode, self.block_cursor, pc, h as u16)
+        {
+            self.blocks.instruction(
+                &self.bus,
+                &mut self.decode,
+                &mut self.block_cursor,
+                pc,
+                h as u16,
+            )
+        } else {
+            None
+        };
+        let Some(prepared) = prepared else {
+            return self.execute(h);
+        };
+        let instruction = prepared.instruction;
+        if let Some(native) = prepared.native {
+            native.run(&mut self.r, &mut self.sr);
+            self.pc = pc.wrapping_add(instruction.length as u32);
+            Ok(instruction.name)
+        } else {
+            instruction.execute(self)
+        }
+    }
+
     pub(crate) fn conditional(&mut self, test: bool, counts: u32) -> Step<u32> {
         use crate::decode::skip_length;
         let mut cursor = self.pc + 4;
@@ -725,13 +767,30 @@ impl Cpu {
         self.decode.wide(h, x)
     }
 
+    /// Execute the instruction word `h` at `self.pc`. The extended forms (most
+    /// of the compiler's code) go straight to `extended::execute`.
+    #[inline(always)]
     fn execute(&mut self, h: u32) -> Step<&'static str> {
+        let kind = self.decode.first(h);
+        if let First::Extended(extended) = kind {
+            let pc = self.pc;
+            let Some((destination, name)) = crate::extended::execute(self, h, pc, extended)? else {
+                return Err(Fault::Unsupported { pc, word: h as u16 }.into());
+            };
+            self.pc = destination;
+            return Ok(name);
+        }
+        self.execute_base(h, kind)
+    }
+
+    #[inline(never)]
+    fn execute_base(&mut self, h: u32, kind: First) -> Step<&'static str> {
         let pc = self.pc;
         let a = (h & 7) as usize;
         let b = ((h >> 4) & 7) as usize;
         let mut next = pc.wrapping_add(2);
         let op;
-        match self.decode.first(h) {
+        match kind {
             First::MoveImmediate32 => {
                 let value = self.read(pc + 2, 2)? | (self.read(pc + 4, 2)? << 16);
                 let n = (h & 15) as usize;
@@ -1048,9 +1107,7 @@ impl Cpu {
             First::TestsetByte => {
                 let address = self.r[(h & 15) as usize];
                 let old = self.read(address, 1)?;
-                self.bus
-                    .write(address, 0xff, 1)
-                    .map_err(|fault| Fault::Access { pc, fault })?;
+                self.write_sized(address, 0xff, 1)?;
                 // FM-1_982 physical probe: the old byte's low nibble is copied
                 // into the four PSR condition bits, not a comparison result.
                 self.sr[5] = (self.sr[5] & !15) | (old & 15);

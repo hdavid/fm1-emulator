@@ -299,8 +299,27 @@ impl Bus {
         }
     }
 
-    /// SRAM and the application XIP view inline (instruction fetches and
-    /// most data); everything else in `read_slow`.
+    /// An aligned read of SRAM or the application XIP view (instruction
+    /// fetches and most data), inline; `None`: take the full path.
+    #[inline(always)]
+    pub(crate) fn read_fast(&self, address: u32, size: usize) -> Option<u32> {
+        if matches!(size, 1 | 2 | 4) && address.is_multiple_of(size as u32) {
+            // Aligned accesses of at most 4 bytes never cross either end.
+            let ram_offset = address.wrapping_sub(RAM) as usize;
+            if ram_offset < RAM_SIZE {
+                return Some(Self::value_at(&self.ram, ram_offset, size));
+            }
+            if let Some(view) = &self.xip_view {
+                let offset = address.wrapping_sub(XIP) as usize;
+                if offset + size <= view.len() {
+                    return Some(Self::value_at(view, offset, size));
+                }
+            }
+        }
+        None
+    }
+
+    /// `read_fast`, everything else in `read_slow`.
     #[inline(always)]
     fn read_as(
         &self,
@@ -308,20 +327,10 @@ impl Bus {
         size: usize,
         operation: &'static str,
     ) -> Result<u32, AccessFault> {
-        if matches!(size, 1 | 2 | 4) && address.is_multiple_of(size as u32) {
-            // Aligned accesses of at most 4 bytes never cross either end.
-            let ram_offset = address.wrapping_sub(RAM) as usize;
-            if ram_offset < RAM_SIZE {
-                return Ok(Self::value_at(&self.ram, ram_offset, size));
-            }
-            if let Some(view) = &self.xip_view {
-                let offset = address.wrapping_sub(XIP) as usize;
-                if offset + size <= view.len() {
-                    return Ok(Self::value_at(view, offset, size));
-                }
-            }
+        match self.read_fast(address, size) {
+            Some(value) => Ok(value),
+            None => self.read_slow(address, size, operation),
         }
-        self.read_slow(address, size, operation)
     }
 
     #[inline(never)]
@@ -475,16 +484,14 @@ impl Bus {
         self.read_as(address, 2, "fetch").map(|value| value as u16)
     }
 
-    /// SRAM stores inline (most data); everything else in `write_slow`.
+    /// An aligned SRAM store that write protection allows (most data),
+    /// inline; false: nothing was written, take the full path.
     #[inline(always)]
-    pub fn write(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
+    pub(crate) fn write_fast(&mut self, address: u32, value: u32, size: usize) -> bool {
         if matches!(size, 1 | 2 | 4) && address.is_multiple_of(size as u32) {
             // Aligned accesses of at most 4 bytes never cross the end.
             let offset = address.wrapping_sub(RAM) as usize;
-            if offset < RAM_SIZE {
-                self.guards
-                    .check_write(address, size)
-                    .map_err(|reason| Self::fault(address, size, "write", reason))?;
+            if offset < RAM_SIZE && self.guards.check_write(address, size).is_ok() {
                 match size {
                     4 => self.ram[offset..offset + 4].copy_from_slice(&value.to_le_bytes()),
                     2 => {
@@ -492,8 +499,17 @@ impl Bus {
                     }
                     _ => self.ram[offset] = value as u8,
                 }
-                return Ok(());
+                return true;
             }
+        }
+        false
+    }
+
+    /// `write_fast`, everything else (and a protection fault) in `write_slow`.
+    #[inline(always)]
+    pub fn write(&mut self, address: u32, value: u32, size: usize) -> Result<(), AccessFault> {
+        if self.write_fast(address, value, size) {
+            return Ok(());
         }
         self.write_slow(address, value, size)
     }
