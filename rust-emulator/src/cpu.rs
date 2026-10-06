@@ -165,8 +165,8 @@ pub struct Cpu {
     pub interrupts_enabled: bool,
     pub irq_entries: u64,
     in_interrupt: bool,
-    predicate_skip: Option<(u32, u32)>,
-    irq_predicate: Option<(u32, u32)>,
+    predicate_skip: Option<(u32, u32, u32)>,
+    irq_predicate: Option<(u32, u32, u32)>,
     repeat: Option<Repeat>,
     irq_repeat: Option<Repeat>,
     bus_locked: bool,
@@ -183,8 +183,8 @@ struct Core {
     pc: u32,
     interrupts_enabled: bool,
     in_interrupt: bool,
-    predicate_skip: Option<(u32, u32)>,
-    irq_predicate: Option<(u32, u32)>,
+    predicate_skip: Option<(u32, u32, u32)>,
+    irq_predicate: Option<(u32, u32, u32)>,
     repeat: Option<Repeat>,
     irq_repeat: Option<Repeat>,
     bus_locked: bool,
@@ -342,7 +342,7 @@ impl Cpu {
     }
 
     fn step_core(&mut self, advance_time: bool) -> Result<&'static str, Fault> {
-        if let Some((at, end)) = self.predicate_skip {
+        if let Some((_, at, end)) = self.predicate_skip {
             if self.pc == at {
                 self.pc = end;
                 self.predicate_skip = None;
@@ -419,9 +419,17 @@ impl Cpu {
         };
         // FM-1_988: conditional bundles finish and skip their unselected
         // arm before a pending interrupt can enter.
-        if let Some((at, end)) = self.predicate_skip {
+        if let Some((start, at, end)) = self.predicate_skip {
             if self.pc == at {
                 self.pc = end;
+                self.predicate_skip = None;
+            } else if (start..at).contains(&pc)
+                && !(start..=at).contains(&self.pc)
+                && !op.starts_with("call")
+            {
+                // The arm left its block (`if (c) { ...; rts }`, a goto
+                // out): it never reaches its end, so nothing is skipped
+                // and interrupts must not stay deferred.
                 self.predicate_skip = None;
             }
         }
@@ -507,7 +515,7 @@ impl Cpu {
             }
         }
         if test {
-            self.predicate_skip = Some((then_end, cursor));
+            self.predicate_skip = Some((self.pc + 4, then_end, cursor));
             Ok(self.pc + 4)
         } else {
             Ok(then_end)
