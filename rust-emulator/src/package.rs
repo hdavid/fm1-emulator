@@ -6,6 +6,9 @@ pub(crate) struct Package {
     pub flash: Vec<u8>,
     pub key: u16,
     pub header: Vec<u8>,
+    /// End of the boot area and the application area (header, keys, code):
+    /// the flash the package owns. A USR resource and data live above it.
+    pub code_end: usize,
 }
 
 fn slice(data: &[u8], offset: usize, size: usize) -> Result<&[u8], String> {
@@ -435,7 +438,16 @@ impl Package {
                 flash[target..target + data.len()].copy_from_slice(&data);
             }
         }
-        Ok((Self { flash, key, header }, image))
+        let code_end = 0x4000 + u32_at(area_entry, 8)? as usize;
+        Ok((
+            Self {
+                flash,
+                key,
+                header,
+                code_end,
+            },
+            image,
+        ))
     }
 
     pub fn initialize(&self, bus: &mut Bus) -> Result<(), String> {
