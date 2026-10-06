@@ -22,6 +22,19 @@ measurements. Diagnostic output matched between each pair. The existing full
 boot regressions passed for local Felucca, published Felucca and official
 firmware, with unchanged execution and peripheral counts.
 
+The block cache and JIT are now off by default (`Cpu::set_block_cache`,
+`FM1_BLOCK_CACHE=1` in `examples/bench`). `bench FIRMWARE 200000000 batch`
+at `FM1_CPU_MHZ=96`, median of three runs, guest seconds per host second:
+
+| Firmware | Block cache + JIT | Off |
+| --- | ---: | ---: |
+| Felucca 0.9-beta | 0.465 | 0.500 |
+| SLOOP drum kit build | 1.195 | 1.236 |
+| Official firmware | 0.188 | 0.200 |
+
+`bench ... batch` and `bench ... hash` print the same state, SRAM, audio and
+LCD hashes either way.
+
 ## Next steps, in order
 
 - [ ] Batch multiple native guest instructions through the existing bounded

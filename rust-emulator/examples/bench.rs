@@ -9,7 +9,7 @@
 // samples and the LCD pixels: two builds that execute alike print the same.
 // FM1_CPU_MHZ=N sets the instruction clock as in diagnose; FM1_IDLE_SKIP=0
 // steps halted idle slots one by one in batch mode; FM1_NESTED_IRQ=1 lets
-// interrupts nest.
+// interrupts nest; FM1_BLOCK_CACHE=1 executes through the block cache and JIT.
 use fm1_emu::{cpu::Cpu, firmware::Firmware};
 use std::{env, path::Path, process::ExitCode, time::Instant};
 
@@ -47,6 +47,7 @@ fn run() -> Result<(), String> {
     }
     cpu.idle_skip = env::var("FM1_IDLE_SKIP").map_or(true, |v| v != "0");
     cpu.nested_irqs = env::var("FM1_NESTED_IRQ").is_ok_and(|v| v == "1");
+    cpu.set_block_cache(env::var("FM1_BLOCK_CACHE").is_ok_and(|v| v == "1"));
     let mut hash = FNV_OFFSET;
     let mut fault = None;
     let start = Instant::now();
