@@ -688,8 +688,12 @@ fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Args
     while let Some(arg) = args.next() {
         if arg == "--ui" {
             ui = Some(PathBuf::from(args.next().ok_or("--ui needs a directory")?));
-        } else if arg == "--cpu-mhz" {
-            let value = args.next().ok_or("--cpu-mhz needs a value")?;
+        } else if arg == "--cpu-mhz" || arg.to_str().is_some_and(|a| a.starts_with("--cpu-mhz=")) {
+            // `--cpu-mhz N`, or `--cpu-mhz=N` as the fork's launcher passes it.
+            let value = match arg.to_str().and_then(|a| a.strip_prefix("--cpu-mhz=")) {
+                Some(value) => value.into(),
+                None => args.next().ok_or("--cpu-mhz needs a value")?,
+            };
             let mhz = value
                 .to_str()
                 .and_then(|value| value.parse::<u32>().ok())
@@ -968,6 +972,7 @@ mod tests {
         );
         assert!(parse(&["a.fwsc", "--ui"]).is_err());
         assert!(parse(&["--cpu-mhz", "0", "a.fwsc"]).is_err());
+        assert_eq!(parse(&["--cpu-mhz=96", "a.fwsc"]), Ok(args(Some(96), None)));
         assert!(parse(&["a.fwsc", "b.fwsc"]).is_err());
         assert!(parse(&[]).is_err());
     }
