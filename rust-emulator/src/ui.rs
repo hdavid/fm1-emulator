@@ -4,6 +4,7 @@ use fm1_emu::encoders::knob;
 #[cfg(test)]
 use fm1_emu::{bus::Bus, cpu::Cpu, firmware::Firmware};
 mod host_audio;
+mod ui_theme;
 mod web_editor;
 mod worker;
 use std::{
@@ -129,6 +130,8 @@ struct Emulator {
     speed_mark: (Instant, u64),
     /// The firmware's web editor and its MIDI bridge (off without one).
     web: web_editor::WebEditor,
+    /// The panel's colours (an index into `ui_theme::THEMES`).
+    theme: usize,
 }
 impl Emulator {
     fn new(path: PathBuf) -> Self {
@@ -154,6 +157,7 @@ impl Emulator {
             speed: None,
             speed_mark: (Instant::now(), 0),
             web: web_editor::WebEditor::disabled("No web editor"),
+            theme: 0,
         };
         app.knob_angle[0] = master_angle(app.master);
         app.reset();
@@ -255,31 +259,37 @@ impl Emulator {
         let pressed =
             focused && (down || keyboard || Instant::now() < self.pulse[id] || guest_pulse);
         self.pressed[id] = pressed;
+        let theme = canvas.theme;
         let fill = if pressed {
-            Color32::from_rgb(75, 65, 42)
+            theme.key_pressed
         } else if response.hovered() {
-            Color32::from_gray(53)
+            theme.key_hover
         } else {
-            Color32::from_gray(38)
+            theme.key
+        };
+        let ink = if pressed {
+            theme.pressed
+        } else {
+            theme.key_label
         };
         let radius = if note { 21. } else { 7. } * canvas.scale;
         canvas.painter.rect_filled(
             rect.translate(vec2(0., 3.) * canvas.scale),
             radius,
-            Color32::BLACK,
+            theme.key_shadow,
         );
         canvas.painter.rect(
             rect,
             radius,
             fill,
-            Stroke::new(canvas.scale, Color32::from_gray(86)),
+            Stroke::new(canvas.scale, theme.key_edge),
             StrokeKind::Inside,
         );
         let inset = rect.shrink(4. * canvas.scale);
         canvas.painter.rect_stroke(
             inset,
             radius,
-            Stroke::new(canvas.scale, Color32::from_gray(24)),
+            Stroke::new(canvas.scale, theme.key_inset),
             StrokeKind::Inside,
         );
         if note {
@@ -291,7 +301,7 @@ impl Emulator {
             canvas.painter.rect_filled(
                 Rect::from_center_size(pos2(rect.center().x, y), vec2(6., 31.) * canvas.scale),
                 3.,
-                if pressed { ACCENT } else { INK },
+                if pressed { theme.pressed } else { theme.slot },
             );
             if !label.is_empty() {
                 canvas.painter.text(
@@ -299,7 +309,7 @@ impl Emulator {
                     Align2::CENTER_CENTER,
                     label,
                     FontId::proportional(11. * canvas.scale),
-                    INK,
+                    theme.key_label,
                 );
             }
         } else {
@@ -308,7 +318,7 @@ impl Emulator {
                 Align2::CENTER_CENTER,
                 label,
                 FontId::proportional(12. * canvas.scale),
-                if pressed { ACCENT } else { INK },
+                ink,
             );
         }
         response.on_hover_text(if note {
@@ -359,16 +369,18 @@ impl Emulator {
                 area.top() + 12. * scale,
             ),
             scale,
+            theme: &ui_theme::THEMES[self.theme],
         };
         let c = &canvas;
-        c.box_at([8., 14., 1120., 662.], 65., Color32::from_black_alpha(90));
-        c.box_at([0., 0., 1120., 660.], 65., Color32::from_gray(85));
-        c.box_at([3., 3., 1114., 651.], 62., Color32::from_gray(23));
-        c.box_at([7., 6., 1106., 640.], 58., Color32::from_gray(34));
+        let theme = c.theme;
+        c.box_at([8., 14., 1120., 662.], 65., theme.shadow);
+        c.box_at([0., 0., 1120., 660.], 65., theme.rim);
+        c.box_at([3., 3., 1114., 651.], 62., theme.edge);
+        c.box_at([7., 6., 1106., 640.], 58., theme.body);
         c.painter.rect_stroke(
             c.rect([11., 10., 1098., 631.]),
             53. * scale,
-            Stroke::new(scale, Color32::from_gray(48)),
+            Stroke::new(scale, theme.body_line),
             StrokeKind::Inside,
         );
         for (index, (x, y, name, encoder, keys)) in KNOBS.iter().enumerate() {
@@ -406,8 +418,8 @@ impl Emulator {
             });
             self.turn_knob(index, *encoder, amount);
         }
-        c.box_at([290., 52., 270., 272.], 34., Color32::from_gray(8));
-        c.box_at([310., 72., 230., 230.], 3., Color32::BLACK);
+        c.box_at([290., 52., 270., 272.], 34., theme.bezel);
+        c.box_at([310., 72., 230., 230.], 3., theme.glass);
         if let Some(texture) = &self.texture {
             c.painter.image(
                 texture.id(),
@@ -416,7 +428,7 @@ impl Emulator {
                 Color32::WHITE,
             );
         }
-        c.box_at([65., 286., 181., 56.], 12., Color32::from_gray(17));
+        c.box_at([65., 286., 181., 56.], 12., theme.oct_recess);
         for (id, label) in [(0, "OCT−"), (1, "OCT+")] {
             self.key(
                 ui,
@@ -427,7 +439,7 @@ impl Emulator {
                 false,
             );
         }
-        c.box_at([598., 186., 448., 157.], 23., Color32::from_gray(16));
+        c.box_at([598., 186., 448., 157.], 23., theme.button_recess);
         for (index, label) in [
             "FX",
             "SEL",
@@ -459,8 +471,8 @@ impl Emulator {
                 false,
             );
         }
-        c.box_at([40., 384., 1040., 238.], 40., Color32::from_gray(12));
-        c.box_at([43., 387., 1034., 232.], 38., Color32::from_gray(40));
+        c.box_at([40., 384., 1040., 238.], 40., theme.keybed_rim);
+        c.box_at([43., 387., 1034., 232.], 38., theme.keybed);
         let mut white_index = 0;
         let mut black_index = 0;
         let labels = [
@@ -487,6 +499,7 @@ struct Canvas {
     painter: egui::Painter,
     origin: egui::Pos2,
     scale: f32,
+    theme: &'static ui_theme::Theme,
 }
 impl Canvas {
     fn rect(&self, [x, y, w, h]: [f32; 4]) -> Rect {
@@ -514,31 +527,31 @@ impl Canvas {
             Align2::CENTER_CENTER,
             name,
             FontId::proportional(14. * self.scale),
-            INK,
+            self.theme.label,
         );
         self.painter.circle_filled(
             p + vec2(2., 4.) * self.scale,
             28. * self.scale,
-            Color32::from_gray(12),
+            self.theme.knob_shadow,
         );
         self.painter
-            .circle_filled(p, 26. * self.scale, Color32::from_gray(66));
+            .circle_filled(p, 26. * self.scale, self.theme.knob_rim);
         self.painter
-            .circle_filled(p, 22. * self.scale, Color32::from_gray(18));
+            .circle_filled(p, 22. * self.scale, self.theme.knob_skirt);
         for i in 0..24 {
             let angle = i as f32 * std::f32::consts::TAU / 24.;
             let d = vec2(angle.sin(), angle.cos()) * self.scale;
             self.painter.line_segment(
                 [p + d * 22., p + d * 25.],
-                Stroke::new(self.scale, Color32::from_gray(135)),
+                Stroke::new(self.scale, self.theme.knob_tick),
             );
         }
         self.painter
-            .circle_filled(p, 19. * self.scale, Color32::from_gray(35));
+            .circle_filled(p, 19. * self.scale, self.theme.knob_cap);
         let pointer = vec2(angle.sin(), -angle.cos()) * self.scale;
         self.painter.line_segment(
             [p + pointer * 11., p + pointer * 18.],
-            Stroke::new(3. * self.scale, INK),
+            Stroke::new(3. * self.scale, self.theme.knob_pointer),
         );
         ui.interact(
             Rect::from_center_size(p, vec2(56., 56.) * self.scale),
