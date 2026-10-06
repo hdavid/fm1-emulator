@@ -17,6 +17,8 @@
 // FM1_SCENARIO=FILE first plays the panel steps in FILE (whitespace
 // separated, as play_check: run:SECONDS, hold:ID,ID.., release,
 // turn:KNOB:DETENTS) without timing them, e.g. to measure a busy song.
+// Everything runs on a spawned thread at fm1-ui's worker class
+// (host_thread); FM1_QOS=default leaves the class a spawned thread gets.
 use fm1_emu::{
     cpu::Cpu,
     player::{knob, Player},
@@ -291,7 +293,18 @@ fn run() -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
-    match run() {
+    // On a spawned thread with the class fm1-ui's worker takes
+    // (FM1_QOS=default: the class a spawned thread starts with).
+    let worker = std::thread::spawn(|| {
+        if env::var("FM1_QOS").map_or(true, |v| v != "default") {
+            fm1_emu::host_thread::favour_performance_cores();
+        }
+        run()
+    });
+    match worker
+        .join()
+        .unwrap_or_else(|_| Err("bench thread panicked".into()))
+    {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("bench: {error}");
