@@ -40,7 +40,7 @@ fn run() -> Result<(), String> {
     let mut fault = None;
     for _ in 0..limit {
         let pc = cpu.pc;
-        match cpu.step() {
+        match cpu.step_next() {
             Ok(op) => {
                 if recent.len() == 12 {
                     recent.pop_front();

@@ -413,6 +413,7 @@ impl Cpu {
     /// are jumped over (unless `idle_skip` is off): time, the step counters
     /// and the devices end up exactly as if each halted slot had stepped.
     pub fn run_steps(&mut self, count: u64) -> Result<(), Fault> {
+        self.bus.devices_changed();
         let mut done = 0;
         while done < count {
             if self.idle || self.secondary.as_ref().is_some_and(|core| core.idle) {
@@ -508,6 +509,15 @@ impl Cpu {
     }
 
     pub fn step(&mut self) -> Result<&'static str, Fault> {
+        self.bus.devices_changed();
+        self.step_cores().map_err(|fault| *fault)
+    }
+
+    /// `step` for a caller that has not changed device state through the
+    /// bus's public fields (`devices`, `lcd`, `audio`, ...) since its last
+    /// call of `step`, `step_next` or `run_steps`: the interrupt check then
+    /// need not look at every source again while none is pending.
+    pub fn step_next(&mut self) -> Result<&'static str, Fault> {
         self.step_cores().map_err(|fault| *fault)
     }
 
@@ -1184,6 +1194,10 @@ impl Cpu {
             || self.repeat.is_some()
             || self.predicate_skip.is_some()
         {
+            return Ok(());
+        }
+        // Nothing to deliver while no source is pending (the common case).
+        if !self.bus.irq_possible() {
             return Ok(());
         }
         if let Some(source) = self.bus.pending_irq_for(self.sr[11], self.sr[6] as usize) {

@@ -127,6 +127,11 @@ pub struct Bus {
     pub(crate) mmio_counting: bool,
     /// PC of the instruction executing, kept while counting MMIO accesses.
     pub(crate) pc_hint: std::cell::Cell<u32>,
+    /// No interrupt source was pending at the last `irq_possible` and no
+    /// device state has changed since: the bus clears it whenever its own
+    /// methods change a device, the CPU at each public entry (callers may
+    /// have changed devices through the public fields in between).
+    irq_quiet: bool,
 }
 
 /// MMIO reads and writes per (address, PC of the accessing instruction).
@@ -207,6 +212,7 @@ impl Bus {
             mmio_stats: Default::default(),
             mmio_counting: false,
             pc_hint: Default::default(),
+            irq_quiet: false,
         };
         bus.clocks = bus.select_clocks();
         Ok(bus)
@@ -482,6 +488,7 @@ impl Bus {
         let result = self.write_mmio(address, value, size);
         self.clocks = self.select_clocks();
         self.next_event = self.oscillator_ticks + 1;
+        self.irq_quiet = false;
         self.refresh_xip_view();
         result
     }
@@ -660,6 +667,7 @@ impl Bus {
 
     /// Advance every clocked device by `ticks` oscillator ticks.
     fn advance_clocked(&mut self, ticks: u32) -> Result<(), AccessFault> {
+        self.irq_quiet = false;
         self.advance_devices(ticks);
         self.nor.advance(ticks);
         self.refresh_xip_view();
@@ -736,6 +744,7 @@ impl Bus {
     /// Queue terminal bytes for the guest's CDC OUT endpoint (see
     /// `Usb::receive_serial`); the next tick delivers them.
     pub fn receive_serial(&mut self, bytes: &[u8]) -> bool {
+        self.irq_quiet = false;
         self.next_event = self.next_event.min(self.oscillator_ticks + 1);
         self.usb.receive_serial(bytes)
     }
@@ -774,6 +783,26 @@ impl Bus {
         debug_assert!(self.oscillator_ticks < self.next_event);
     }
 
+    /// Device state may have changed other than through the bus's methods
+    /// (the public device fields): `irq_possible` checks again.
+    pub(crate) fn devices_changed(&mut self) {
+        self.irq_quiet = false;
+    }
+
+    /// `any_irq_pending`, without checking again while no device state
+    /// changed since a check found nothing pending.
+    #[inline(always)]
+    pub(crate) fn irq_possible(&mut self) -> bool {
+        !self.irq_quiet && self.irq_check()
+    }
+
+    #[inline(never)]
+    fn irq_check(&mut self) -> bool {
+        let pending = self.any_irq_pending();
+        self.irq_quiet = !pending;
+        pending
+    }
+
     /// Whether any interrupt source is pending for either core.
     #[inline]
     pub(crate) fn any_irq_pending(&self) -> bool {
@@ -795,6 +824,7 @@ impl Bus {
     /// delivered once the MIDI host has configured the device, one bulk
     /// packet (up to 16 events) whenever its OUT endpoint buffer is free.
     pub fn usb_midi_send(&mut self, packets: &[crate::usb_midi::Packet]) {
+        self.irq_quiet = false;
         self.next_event = self.next_event.min(self.oscillator_ticks + 1);
         self.usb.midi_send(packets);
     }
@@ -802,6 +832,7 @@ impl Bus {
     /// Put MIDI bytes on the UART1 RX line (the FM-1's DIN/TRS MIDI IN):
     /// they arrive back to back at 31250 baud.
     pub fn uart_midi_send(&mut self, bytes: &[u8]) {
+        self.irq_quiet = false;
         self.next_event = self.next_event.min(self.oscillator_ticks + 1);
         self.devices.uart_mut().receive(bytes);
     }
@@ -817,6 +848,7 @@ impl Bus {
     }
 
     pub fn advance_usb(&mut self, ticks: u32) -> Result<(), AccessFault> {
+        self.irq_quiet = false;
         self.usb
             .advance(ticks, &mut self.ram)
             .map_err(|reason| Self::fault(0x11800, 4, "USB host", reason))
@@ -830,6 +862,7 @@ impl Bus {
     }
 
     pub fn advance_audio(&mut self, ticks: u32) -> Result<(), AccessFault> {
+        self.irq_quiet = false;
         self.audio
             .advance(ticks, &self.ram)
             .map_err(|reason| Self::fault(0x12e1c, 4, "audio DMA", reason))
