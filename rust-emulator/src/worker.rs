@@ -255,7 +255,7 @@ impl Worker {
                     }
                     if pending_serial
                         .as_ref()
-                        .is_some_and(|bytes| cpu.bus.usb.receive_serial(bytes))
+                        .is_some_and(|bytes| cpu.bus.receive_serial(bytes))
                     {
                         pending_serial = None;
                     }
