@@ -6,13 +6,16 @@ use std::collections::VecDeque;
 
 /// Packets kept from the device when nobody drains them (oldest dropped).
 const MIDI_RECEIVED_MAX: usize = 4096;
+/// Device endpoints EP0..EP4: vendor WL82.h has count and DMA address
+/// registers for each (EP4's after EP3's, at 0x11834..0x1183c).
+const ENDPOINTS: usize = 5;
 #[derive(Default)]
 pub struct Usb {
     regs: [u32; 16],
     io: u32,
     clock: u32,
     sie: [u8; 16],
-    endpoints: [[u8; 8]; 4],
+    endpoints: [[u8; 8]; ENDPOINTS],
     index: usize,
     ticks: u64,
     deadline: u64,
@@ -91,6 +94,27 @@ mod tests {
             .unwrap()
             .unwrap();
         usb.read(0x11804).unwrap() & 255
+    }
+
+    #[test]
+    fn endpoint_4_uses_its_own_count_and_dma_address() {
+        // Felucca 1.0 fm1_usb.h: INDEX 4 for its UAC IN stream, with
+        // EP4_TADR 0x11838 and EP4_CNT 0x11834 (vendor WL82.h JL_USB).
+        let mut usb = Usb::default();
+        let mut ram = vec![0; 4096];
+        usb.write(0x11800, 4, &mut ram).unwrap().unwrap();
+        usb.write(0x11838, RAM + 0x100, &mut ram).unwrap().unwrap();
+        usb.write(0x11834, 64, &mut ram).unwrap().unwrap();
+        assert_eq!(usb.read(0x11838), Some(RAM + 0x100));
+        sie_write(&mut usb, &mut ram, 14, 4);
+        assert_eq!(sie_read(&mut usb, &mut ram, 14), 4);
+        // TxPktRdy: EP1's registers are zero, so reading them for EP4 would
+        // move 0 bytes from address 0 rather than 64 from EP4_TADR.
+        sie_write(&mut usb, &mut ram, 17, 1);
+        assert_eq!(sie_read(&mut usb, &mut ram, 2) & 0x10, 0x10);
+        usb.write(0x11834, 65, &mut ram).unwrap().unwrap();
+        assert!(usb.write(0x11804, 17 << 8 | 1, &mut ram).unwrap().is_err());
+        assert!(usb.write(0x11804, 14 << 8 | 5, &mut ram).unwrap().is_err());
     }
 
     #[test]
@@ -399,7 +423,7 @@ impl Usb {
             return Ok(());
         }
         let n = self.midi.to_device.len().min(16);
-        let buffer = Self::dma(ram, self.regs[8 + (ep - 1) * 2], n * 4)?;
+        let buffer = Self::dma(ram, self.rx_address(ep), n * 4)?;
         for (slot, packet) in buffer
             .as_chunks_mut::<4>()
             .0
@@ -414,16 +438,36 @@ impl Usb {
         self.sie[4] |= 1 << ep;
         Ok(())
     }
+    /// EPn_CNT: EP0..EP3 at 0x11808 + 4n; EP4 follows EP3's addresses.
+    fn count(&self, ep: usize) -> u32 {
+        if ep == 4 {
+            self.regs[13]
+        } else {
+            self.regs[2 + ep]
+        }
+    }
+    /// EPn_TADR: EP0 0x11818, EP1..EP3 0x1181c + 8(n - 1), EP4 0x11838.
+    fn tx_address(&self, ep: usize) -> u32 {
+        match ep {
+            0 => self.regs[6],
+            4 => self.regs[14],
+            _ => self.regs[7 + (ep - 1) * 2],
+        }
+    }
+    /// EPn_RADR: EP1..EP3 0x11820 + 8(n - 1), EP4 0x1183c.
+    fn rx_address(&self, ep: usize) -> u32 {
+        match ep {
+            0 => self.regs[6],
+            4 => self.regs[15],
+            _ => self.regs[8 + (ep - 1) * 2],
+        }
+    }
     fn send(&mut self, ep: usize, ram: &mut [u8]) -> Result<(), &'static str> {
-        let n = self.regs[2 + ep] as usize;
+        let n = self.count(ep) as usize;
         if n > 64 {
             return Err("USB full-speed packet exceeds 64 bytes");
         }
-        let a = if ep == 0 {
-            self.regs[6]
-        } else {
-            self.regs[7 + (ep - 1) * 2]
-        };
+        let a = self.tx_address(ep);
         let bytes = Self::dma(ram, a, n)?;
         if ep == 0 {
             self.response.extend_from_slice(bytes);
@@ -465,7 +509,7 @@ impl Usb {
                     self.phase = 0;
                     self.waiting = false;
                     self.sie = [0; 16];
-                    self.endpoints = [[0; 8]; 4];
+                    self.endpoints = [[0; 8]; ENDPOINTS];
                     self.cdc_interface = None;
                     self.cdc_endpoint = None;
                     self.cdc_out = None;
@@ -493,7 +537,7 @@ impl Usb {
                 } else {
                     let data = v as u8;
                     if r == 14 {
-                        if data > 3 {
+                        if data as usize >= ENDPOINTS {
                             return Err("USB endpoint index exceeds modeled controller");
                         }
                         self.index = data as usize;
@@ -645,20 +689,20 @@ impl Usb {
             }
             e[1] &= !1;
             self.sie[2] |= 1 << ep;
-            let n = self.regs[2 + ep] as usize;
+            let n = self.count(ep) as usize;
             if n > 1023 {
                 return Err("USB isochronous packet exceeds 1023 bytes");
             }
-            let bytes = Self::dma(ram, self.regs[7 + (ep - 1) * 2], n)?;
+            let bytes = Self::dma(ram, self.tx_address(ep), n)?;
             self.audio.in_packet(ep, bytes);
         }
         if let Some((ep, packet)) = self.audio.out_packet() {
+            let address = self.rx_address(ep);
             let e = &mut self.endpoints[ep];
             if e[4] & 1 != 0 {
                 self.audio.out_lost();
                 return Ok(());
             }
-            let address = self.regs[8 + (ep - 1) * 2];
             Self::dma(ram, address, packet.len())?.copy_from_slice(&packet);
             e[4] |= 1;
             e[6] = packet.len() as u8;
@@ -683,7 +727,7 @@ impl Usb {
             return Ok(()); // Endpoint disabled, stalled, or still holding a packet (NAK).
         }
         let n = self.input.len().min(packet_size);
-        let destination = Self::dma(ram, self.regs[8 + (ep - 1) * 2], n)?;
+        let destination = Self::dma(ram, self.rx_address(ep), n)?;
         for (byte, &input) in destination.iter_mut().zip(self.input.iter()) {
             *byte = input;
         }
