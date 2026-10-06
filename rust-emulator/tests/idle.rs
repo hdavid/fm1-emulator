@@ -157,6 +157,36 @@ fn a_halted_core_with_a_deliverable_interrupt_is_not_skipped() {
     assert_eq!(cpu.r[2], 1);
 }
 
+#[test]
+fn step_next_delivers_interrupts_like_step() {
+    // A busy loop (r0 += 1) that the timer interrupts, at several clocks.
+    for mhz in [24, 96, 7] {
+        let code = [STI, INC_R0, GOTO_BACK_ONE];
+        let mut single = machine(&code, mhz);
+        let mut next = machine(&code, mhz);
+        for count in [1, 3, 599, 600, 601, 20_000] {
+            for _ in 0..count {
+                single.step().unwrap();
+                next.step_next().unwrap();
+            }
+            assert_eq!(
+                state(&mut single),
+                state(&mut next),
+                "{mhz} MHz, {count} steps"
+            );
+        }
+        assert!(next.r[2] > 5, "{mhz} MHz: {} interrupts", next.r[2]);
+    }
+    // A source made pending through the public fields: `step` sees it.
+    let mut cpu = machine(&[STI, INC_R0, GOTO_BACK_ONE], 24);
+    for _ in 0..3 {
+        cpu.step_next().unwrap();
+    }
+    cpu.bus.devices.timer5.pending = true;
+    cpu.step().unwrap();
+    assert_eq!(cpu.irq_entries, 1);
+}
+
 const SECONDARY_AT: u32 = RAM + 0x400;
 /// The secondary starts in interrupt context (the ROM handoff): it returns
 /// from it with interrupts on (rti to SECONDARY_AT + 12), then idles. Its

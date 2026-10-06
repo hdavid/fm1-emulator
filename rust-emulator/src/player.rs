@@ -100,6 +100,8 @@ impl Player {
     /// (`Cpu::skip_idle_calls`); instructions that issue are stepped one
     /// by one for the profile and the fault trace.
     fn run_calls(&mut self, calls: u64) -> Result<(), String> {
+        // The panel scan before this changed device state directly.
+        self.cpu.bus.devices_changed();
         let mut done = 0;
         while done < calls {
             if self.cpu.halted() {
@@ -128,7 +130,7 @@ impl Player {
             }
         }
         let exceptions = self.cpu.exception_entries;
-        match self.cpu.step() {
+        match self.cpu.step_next() {
             Ok(op) => {
                 if self.recent.len() >= self.trace {
                     self.recent.pop_front();

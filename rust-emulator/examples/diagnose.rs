@@ -143,7 +143,7 @@ fn run() -> Result<(), String> {
         if mmio_window > 0 && step + mmio_window == limit {
             cpu.bus.start_mmio_stats();
         }
-        match cpu.step() {
+        match cpu.step_next() {
             Ok(op) => {
                 if op_filter.as_deref() == Some(op) {
                     *op_pcs.entry(pc).or_default() += 1;
