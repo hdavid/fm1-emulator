@@ -53,6 +53,8 @@ mod guards;
 mod nor;
 
 pub mod usb;
+pub mod usb_audio;
+pub mod usb_audio_host;
 pub mod usb_midi;
 #[cfg(feature = "web")]
 pub mod web;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // USB0 register bridge and a small USB host for the CDC console and, when
-// enabled, USB-MIDI.
-use crate::{usb_midi::Packet, RAM};
+// enabled, USB-MIDI and USB audio (UAC1 streams).
+use crate::{usb_audio_host::AudioHost, usb_midi::Packet, RAM};
 use std::collections::VecDeque;
 
 /// Packets kept from the device when nobody drains them (oldest dropped).
@@ -30,6 +30,7 @@ pub struct Usb {
     midi: MidiHost,
     /// USB-MIDI packets the device sent on its MIDI IN endpoint.
     pub midi_received: VecDeque<Packet>,
+    audio: AudioHost,
 }
 /// The optional MIDI side of the host model (off unless enabled, so the CDC
 /// enumeration every existing check was measured with stays byte for byte).
@@ -261,8 +262,16 @@ impl Usb {
     fn complete(&mut self) {
         match self.phase {
             0 if self.response.len() >= 18 => self.midi.product_index = self.response[15],
-            2 => self.parse_configuration(),
+            2 => {
+                self.parse_configuration();
+                if self.audio.enabled() {
+                    self.audio.configure(&self.response);
+                }
+            }
             5 => self.midi.product = string_descriptor(&self.response),
+            p if p >= self.base_phases() => {
+                self.audio.completed(p - self.base_phases(), &self.response)
+            }
             _ => {}
         }
         self.phase += 1;
@@ -306,13 +315,17 @@ impl Usb {
         }
     }
     /// Requests the host makes: 5 without a MIDI host (up to the CDC line
-    /// state), 6 with one (then the product string).
-    fn last_phase(&self) -> usize {
+    /// state), 6 with one (then the product string)...
+    fn base_phases(&self) -> usize {
         if self.midi.enabled {
             6
         } else {
             5
         }
+    }
+    /// ...then the audio host's requests (stream alternates, rates).
+    fn last_phase(&self) -> usize {
+        self.base_phases() + self.audio.requests()
     }
     /// The SETUP packet of `phase`, or None for a request this device does
     /// not need (no CDC console: no line state; no product string to read).
@@ -320,6 +333,9 @@ impl Usb {
         Ok(Some(match phase {
             0 => [0x80, 6, 0, 1, 0, 0, 18, 0],
             1 => [0, 5, 1, 0, 0, 0, 0, 0],
+            // The audio host needs the whole configuration (411 bytes on the
+            // FM-1 audio builds); 255 stays for the checks without it.
+            2 if self.audio.enabled() => [0x80, 6, 0, 2, 0, 0, 0, 4],
             2 => [0x80, 6, 0, 2, 0, 0, 255, 0],
             3 => [0, 9, 1, 0, 0, 0, 0, 0],
             4 => match self.cdc_interface {
@@ -328,6 +344,7 @@ impl Usb {
                 // place): there is no line state to set.
                 None => return Ok(None),
             },
+            p if p >= self.base_phases() => return Ok(self.audio.setup(p - self.base_phases())),
             _ if self.midi.product_index == 0 => return Ok(None),
             _ => [0x80, 6, self.midi.product_index, 3, 0x09, 0x04, 255, 0],
         }))
@@ -336,6 +353,20 @@ impl Usb {
     /// reads the product string and moves packets on the MIDI endpoints.
     pub fn enable_midi_host(&mut self) {
         self.midi.enabled = true;
+    }
+    /// Turn the host into a USB audio host as well (and a MIDI host): after
+    /// enumeration it selects alternate `alt` (1 = 16 bit, 2 = 24 bit on the
+    /// FM-1 firmwares) of every audio stream, sets and reads the sampling
+    /// rate, then moves isochronous packets every 1 ms frame.
+    pub fn enable_audio_host(&mut self, alt: u8) {
+        self.enable_midi_host();
+        self.audio.enable(alt);
+    }
+    pub fn audio(&self) -> &AudioHost {
+        &self.audio
+    }
+    pub fn audio_mut(&mut self) -> &mut AudioHost {
+        &mut self.audio
     }
     /// Enumerated, configured, and the device has MIDI endpoints.
     pub fn midi_ready(&self) -> bool {
@@ -481,6 +512,9 @@ impl Usb {
                             }
                             if data & 0x40 != 0 {
                                 self.endpoints[0][1] &= !1;
+                                if data & 8 == 0 && self.waiting {
+                                    self.audio.data_stage_wanted();
+                                }
                             }
                             if data & 2 != 0 {
                                 self.send(0, ram)?;
@@ -488,6 +522,12 @@ impl Usb {
                             if data & 8 != 0 && self.waiting {
                                 self.complete();
                             }
+                        } else if self.audio.enabled() && self.endpoints[self.index][2] & 0x40 != 0
+                        {
+                            // Isochronous IN: the packet waits for the host's
+                            // IN token in the next frame (FlushFIFO drops it).
+                            let ready = u8::from(data & 9 == 1);
+                            self.endpoints[self.index][1] = (data & !0xc9) | ready;
                         } else {
                             self.endpoints[self.index][1] = data & !0xc9;
                             if data & 1 != 0 {
@@ -525,6 +565,16 @@ impl Usb {
         self.sie[13] = (frame >> 8) as u8;
         if self.ticks % 24000 < ticks as u64 {
             self.regs[0] |= 0x2000;
+            if self.audio.streaming() {
+                self.audio_frame(ram)?;
+            }
+        }
+        if self.audio.data_stage_pending() {
+            let data = self.audio.take_data_stage();
+            Self::dma(ram, self.regs[6], data.len())?.copy_from_slice(&data);
+            self.endpoints[0][1] |= 1;
+            self.endpoints[0][6] = data.len() as u8;
+            self.sie[2] |= 1;
         }
         if !self.attached {
             self.attached = true;
@@ -549,6 +599,9 @@ impl Usb {
                 return Ok(());
             }
         };
+        if self.phase >= self.base_phases() {
+            self.audio.begin(self.phase - self.base_phases());
+        }
         Self::dma(ram, self.regs[6], 8)?.copy_from_slice(&setup);
         self.response.clear();
         self.endpoints[0][1] = 1;
@@ -556,6 +609,43 @@ impl Usb {
         self.sie[2] |= 1;
         self.waiting = true;
         self.setups += 1;
+        Ok(())
+    }
+
+    /// One 1 ms frame of the open audio streams: the IN tokens of the
+    /// capture and feedback endpoints take what the device armed, then the
+    /// OUT stream's packet, sized by the device's feedback, goes into the
+    /// endpoint's RX buffer unless the device still owns it.
+    fn audio_frame(&mut self, ram: &mut [u8]) -> Result<(), &'static str> {
+        for ep in self.audio.in_endpoints() {
+            let e = &mut self.endpoints[ep];
+            if e[1] & 1 == 0 {
+                self.audio.in_missed(ep);
+                continue;
+            }
+            e[1] &= !1;
+            self.sie[2] |= 1 << ep;
+            let n = self.regs[2 + ep] as usize;
+            if n > 1023 {
+                return Err("USB isochronous packet exceeds 1023 bytes");
+            }
+            let bytes = Self::dma(ram, self.regs[7 + (ep - 1) * 2], n)?;
+            self.audio.in_packet(ep, bytes);
+        }
+        if let Some((ep, packet)) = self.audio.out_packet() {
+            let e = &mut self.endpoints[ep];
+            if e[4] & 1 != 0 {
+                self.audio.out_lost();
+                return Ok(());
+            }
+            let address = self.regs[8 + (ep - 1) * 2];
+            Self::dma(ram, address, packet.len())?.copy_from_slice(&packet);
+            e[4] |= 1;
+            e[6] = packet.len() as u8;
+            e[7] = (packet.len() >> 8) as u8;
+            self.sie[4] |= 1 << ep;
+            self.audio.out_delivered();
+        }
         Ok(())
     }
 
