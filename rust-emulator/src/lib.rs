@@ -11,6 +11,7 @@ pub mod firmware;
 mod float;
 pub mod gpio;
 pub mod lcd;
+pub mod leds;
 mod package;
 mod shift_spi;
 mod uart;
