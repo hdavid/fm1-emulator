@@ -599,6 +599,15 @@ impl eframe::App for Emulator {
                                 eprintln!("{error}");
                             }
                         }
+                        egui::ComboBox::from_id_salt("theme")
+                            .selected_text(ui_theme::THEMES[self.theme].name)
+                            .show_ui(ui, |ui| {
+                                for (index, theme) in ui_theme::THEMES.iter().enumerate() {
+                                    ui.selectable_value(&mut self.theme, index, theme.name);
+                                }
+                            })
+                            .response
+                            .on_hover_text("The panel's colours (--theme NAME or FM1_THEME=NAME at start)");
                         let before = self.clock_mhz;
                         let selected = CLOCKS
                             .iter()
@@ -697,17 +706,28 @@ struct Args {
     clock_mhz: Option<u32>,
     /// Web editor files to serve instead of FIRMWARE-ui.zip.
     ui: Option<PathBuf>,
+    /// Panel colours (an index into `ui_theme::THEMES`); None: FM1_THEME or Classic.
+    theme: Option<usize>,
 }
-const USAGE: &str = "usage: emulator [--cpu-mhz N] [--ui DIR] <firmware>";
-/// `[--cpu-mhz N] [--ui DIR] FIRMWARE`.
+const USAGE: &str = "usage: emulator [--cpu-mhz N] [--ui DIR] [--theme NAME] <firmware>";
+/// The theme called `name`, or an error listing them.
+fn theme_named(name: &str) -> Result<usize, String> {
+    ui_theme::find(name)
+        .ok_or_else(|| format!("unknown theme {name:?}; themes: {}", ui_theme::names()))
+}
+/// `[--cpu-mhz N] [--ui DIR] [--theme NAME] FIRMWARE`.
 fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Args, String> {
     let mut path = None;
     let mut clock = None;
     let mut ui = None;
+    let mut theme = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         if arg == "--ui" {
             ui = Some(PathBuf::from(args.next().ok_or("--ui needs a directory")?));
+        } else if arg == "--theme" {
+            let name = args.next().ok_or("--theme needs a name")?;
+            theme = Some(theme_named(&name.to_string_lossy())?);
         } else if arg == "--cpu-mhz" || arg.to_str().is_some_and(|a| a.starts_with("--cpu-mhz=")) {
             // `--cpu-mhz N`, or `--cpu-mhz=N` as the fork's launcher passes it.
             let value = match arg.to_str().and_then(|a| a.strip_prefix("--cpu-mhz=")) {
@@ -728,13 +748,20 @@ fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Args
         path: path.ok_or(USAGE)?,
         clock_mhz: clock,
         ui,
+        theme,
     })
 }
 fn main() -> eframe::Result {
-    let args = parse_args(std::env::args_os().skip(1)).unwrap_or_else(|error| {
+    let fail = |error: String| -> ! {
         eprintln!("{error}");
         std::process::exit(2);
-    });
+    };
+    let args = parse_args(std::env::args_os().skip(1)).unwrap_or_else(|error| fail(error));
+    let theme = match (args.theme, std::env::var("FM1_THEME")) {
+        (Some(theme), _) => theme,
+        (None, Ok(name)) => theme_named(&name).unwrap_or_else(|error| fail(error)),
+        (None, Err(_)) => 0,
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180., 830.])
@@ -749,6 +776,7 @@ fn main() -> eframe::Result {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
             let mut app = Emulator::new(args.path.clone());
             app.clock_mhz = args.clock_mhz;
+            app.theme = theme;
             app.worker.clock(args.clock_mhz.map(|mhz| mhz * 1_000_000));
             app.web =
                 web_editor::WebEditor::new(&args.path, args.ui.as_deref(), fm1_emu::web::ADDRESS);
@@ -980,6 +1008,7 @@ mod tests {
             path: PathBuf::from("a.fwsc"),
             clock_mhz,
             ui: ui.map(PathBuf::from),
+            theme: None,
         };
         assert_eq!(parse(&["a.fwsc"]), Ok(args(None, None)));
         assert_eq!(
@@ -995,6 +1024,20 @@ mod tests {
         assert_eq!(parse(&["--cpu-mhz=96", "a.fwsc"]), Ok(args(Some(96), None)));
         assert!(parse(&["a.fwsc", "b.fwsc"]).is_err());
         assert!(parse(&[]).is_err());
+    }
+    #[test]
+    fn the_command_line_picks_a_theme_by_name() {
+        let parse = |args: &[&str]| parse_args(args.iter().map(std::ffi::OsString::from));
+        let theme = |args: &[&str]| parse(args).map(|args| args.theme);
+        assert_eq!(theme(&["a.fwsc"]), Ok(None));
+        assert_eq!(
+            theme(&["--theme", "mint", "a.fwsc"]),
+            Ok(ui_theme::find("Mint"))
+        );
+        assert!(ui_theme::find("Mint").is_some());
+        let unknown = parse(&["--theme", "plaid", "a.fwsc"]).unwrap_err();
+        assert!(unknown.contains("Classic, Black"), "{unknown}");
+        assert!(parse(&["a.fwsc", "--theme"]).is_err());
     }
     #[test]
     fn the_worker_paces_the_guest_by_the_audio_queue() {
