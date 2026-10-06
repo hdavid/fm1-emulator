@@ -5,6 +5,7 @@ use fm1_emu::encoders::knob;
 use fm1_emu::{bus::Bus, cpu::Cpu, firmware::Firmware};
 mod host_audio;
 mod ui_leds;
+mod ui_theme;
 mod web_editor;
 mod worker;
 use std::{
@@ -132,6 +133,8 @@ struct Emulator {
     web: web_editor::WebEditor,
     /// The panel LEDs as the guest lights them.
     leds: ui_leds::LedView,
+    /// The panel's colours (an index into `ui_theme::THEMES`).
+    theme: usize,
 }
 impl Emulator {
     fn new(path: PathBuf) -> Self {
@@ -158,6 +161,7 @@ impl Emulator {
             speed_mark: (Instant::now(), 0),
             web: web_editor::WebEditor::disabled("No web editor"),
             leds: ui_leds::LedView::new(),
+            theme: 0,
         };
         app.knob_angle[0] = master_angle(app.master);
         app.reset();
@@ -263,18 +267,24 @@ impl Emulator {
         let pressed =
             focused && (down || keyboard || Instant::now() < self.pulse[id] || guest_pulse);
         self.pressed[id] = pressed;
+        let theme = canvas.theme;
         let fill = if pressed {
-            Color32::from_rgb(75, 65, 42)
+            theme.key_pressed
         } else if response.hovered() {
-            Color32::from_gray(53)
+            theme.key_hover
         } else {
-            Color32::from_gray(38)
+            theme.key
+        };
+        let ink = if pressed {
+            theme.pressed
+        } else {
+            theme.key_label
         };
         let radius = if note { 21. } else { 7. } * canvas.scale;
         canvas.painter.rect_filled(
             rect.translate(vec2(0., 3.) * canvas.scale),
             radius,
-            Color32::BLACK,
+            theme.key_shadow,
         );
         self.leds
             .halo(&canvas.painter, rect, radius, id, canvas.scale);
@@ -282,7 +292,7 @@ impl Emulator {
             rect,
             radius,
             fill,
-            Stroke::new(canvas.scale, Color32::from_gray(86)),
+            Stroke::new(canvas.scale, theme.key_edge),
             StrokeKind::Inside,
         );
         self.leds.tint(&canvas.painter, rect, radius, id);
@@ -290,7 +300,7 @@ impl Emulator {
         canvas.painter.rect_stroke(
             inset,
             radius,
-            Stroke::new(canvas.scale, Color32::from_gray(24)),
+            Stroke::new(canvas.scale, theme.key_inset),
             StrokeKind::Inside,
         );
         if note {
@@ -302,7 +312,8 @@ impl Emulator {
             canvas.painter.rect_filled(
                 Rect::from_center_size(pos2(rect.center().x, y), vec2(6., 31.) * canvas.scale),
                 3.,
-                self.leds.ink(id, if pressed { ACCENT } else { INK }),
+                self.leds
+                    .ink(id, if pressed { theme.pressed } else { theme.slot }),
             );
             if !label.is_empty() {
                 canvas.painter.text(
@@ -310,7 +321,7 @@ impl Emulator {
                     Align2::CENTER_CENTER,
                     label,
                     FontId::proportional(11. * canvas.scale),
-                    self.leds.ink(id, INK),
+                    self.leds.ink(id, theme.key_label),
                 );
             }
         } else {
@@ -319,7 +330,7 @@ impl Emulator {
                 Align2::CENTER_CENTER,
                 label,
                 FontId::proportional(12. * canvas.scale),
-                self.leds.ink(id, if pressed { ACCENT } else { INK }),
+                self.leds.ink(id, ink),
             );
         }
         response.on_hover_text(if note {
@@ -370,16 +381,18 @@ impl Emulator {
                 area.top() + 12. * scale,
             ),
             scale,
+            theme: &ui_theme::THEMES[self.theme],
         };
         let c = &canvas;
-        c.box_at([8., 14., 1120., 662.], 65., Color32::from_black_alpha(90));
-        c.box_at([0., 0., 1120., 660.], 65., Color32::from_gray(85));
-        c.box_at([3., 3., 1114., 651.], 62., Color32::from_gray(23));
-        c.box_at([7., 6., 1106., 640.], 58., Color32::from_gray(34));
+        let theme = c.theme;
+        c.box_at([8., 14., 1120., 662.], 65., theme.shadow);
+        c.box_at([0., 0., 1120., 660.], 65., theme.rim);
+        c.box_at([3., 3., 1114., 651.], 62., theme.edge);
+        c.box_at([7., 6., 1106., 640.], 58., theme.body);
         c.painter.rect_stroke(
             c.rect([11., 10., 1098., 631.]),
             53. * scale,
-            Stroke::new(scale, Color32::from_gray(48)),
+            Stroke::new(scale, theme.body_line),
             StrokeKind::Inside,
         );
         for (index, (x, y, name, encoder, keys)) in KNOBS.iter().enumerate() {
@@ -417,8 +430,8 @@ impl Emulator {
             });
             self.turn_knob(index, *encoder, amount);
         }
-        c.box_at([290., 52., 270., 272.], 34., Color32::from_gray(8));
-        c.box_at([310., 72., 230., 230.], 3., Color32::BLACK);
+        c.box_at([290., 52., 270., 272.], 34., theme.bezel);
+        c.box_at([310., 72., 230., 230.], 3., theme.glass);
         if let Some(texture) = &self.texture {
             c.painter.image(
                 texture.id(),
@@ -427,7 +440,7 @@ impl Emulator {
                 Color32::WHITE,
             );
         }
-        c.box_at([65., 286., 181., 56.], 12., Color32::from_gray(17));
+        c.box_at([65., 286., 181., 56.], 12., theme.oct_recess);
         for (id, label) in [(0, "OCT−"), (1, "OCT+")] {
             self.key(
                 ui,
@@ -438,7 +451,7 @@ impl Emulator {
                 false,
             );
         }
-        c.box_at([598., 186., 448., 157.], 23., Color32::from_gray(16));
+        c.box_at([598., 186., 448., 157.], 23., theme.button_recess);
         for (index, label) in [
             "FX",
             "SEL",
@@ -470,8 +483,8 @@ impl Emulator {
                 false,
             );
         }
-        c.box_at([40., 384., 1040., 238.], 40., Color32::from_gray(12));
-        c.box_at([43., 387., 1034., 232.], 38., Color32::from_gray(40));
+        c.box_at([40., 384., 1040., 238.], 40., theme.keybed_rim);
+        c.box_at([43., 387., 1034., 232.], 38., theme.keybed);
         let mut white_index = 0;
         let mut black_index = 0;
         let labels = [
@@ -498,6 +511,7 @@ struct Canvas {
     painter: egui::Painter,
     origin: egui::Pos2,
     scale: f32,
+    theme: &'static ui_theme::Theme,
 }
 impl Canvas {
     fn rect(&self, [x, y, w, h]: [f32; 4]) -> Rect {
@@ -525,31 +539,31 @@ impl Canvas {
             Align2::CENTER_CENTER,
             name,
             FontId::proportional(14. * self.scale),
-            INK,
+            self.theme.label,
         );
         self.painter.circle_filled(
             p + vec2(2., 4.) * self.scale,
             28. * self.scale,
-            Color32::from_gray(12),
+            self.theme.knob_shadow,
         );
         self.painter
-            .circle_filled(p, 26. * self.scale, Color32::from_gray(66));
+            .circle_filled(p, 26. * self.scale, self.theme.knob_rim);
         self.painter
-            .circle_filled(p, 22. * self.scale, Color32::from_gray(18));
+            .circle_filled(p, 22. * self.scale, self.theme.knob_skirt);
         for i in 0..24 {
             let angle = i as f32 * std::f32::consts::TAU / 24.;
             let d = vec2(angle.sin(), angle.cos()) * self.scale;
             self.painter.line_segment(
                 [p + d * 22., p + d * 25.],
-                Stroke::new(self.scale, Color32::from_gray(135)),
+                Stroke::new(self.scale, self.theme.knob_tick),
             );
         }
         self.painter
-            .circle_filled(p, 19. * self.scale, Color32::from_gray(35));
+            .circle_filled(p, 19. * self.scale, self.theme.knob_cap);
         let pointer = vec2(angle.sin(), -angle.cos()) * self.scale;
         self.painter.line_segment(
             [p + pointer * 11., p + pointer * 18.],
-            Stroke::new(3. * self.scale, INK),
+            Stroke::new(3. * self.scale, self.theme.knob_pointer),
         );
         ui.interact(
             Rect::from_center_size(p, vec2(56., 56.) * self.scale),
@@ -598,6 +612,15 @@ impl eframe::App for Emulator {
                             }
                         }
                         self.leds.toggle(ui);
+                        egui::ComboBox::from_id_salt("theme")
+                            .selected_text(ui_theme::THEMES[self.theme].name)
+                            .show_ui(ui, |ui| {
+                                for (index, theme) in ui_theme::THEMES.iter().enumerate() {
+                                    ui.selectable_value(&mut self.theme, index, theme.name);
+                                }
+                            })
+                            .response
+                            .on_hover_text("The panel's colours (--theme NAME or FM1_THEME=NAME at start)");
                         let before = self.clock_mhz;
                         let selected = CLOCKS
                             .iter()
@@ -696,17 +719,28 @@ struct Args {
     clock_mhz: Option<u32>,
     /// Web editor files to serve instead of FIRMWARE-ui.zip.
     ui: Option<PathBuf>,
+    /// Panel colours (an index into `ui_theme::THEMES`); None: FM1_THEME or Classic.
+    theme: Option<usize>,
 }
-const USAGE: &str = "usage: emulator [--cpu-mhz N] [--ui DIR] <firmware>";
-/// `[--cpu-mhz N] [--ui DIR] FIRMWARE`.
+const USAGE: &str = "usage: emulator [--cpu-mhz N] [--ui DIR] [--theme NAME] <firmware>";
+/// The theme called `name`, or an error listing them.
+fn theme_named(name: &str) -> Result<usize, String> {
+    ui_theme::find(name)
+        .ok_or_else(|| format!("unknown theme {name:?}; themes: {}", ui_theme::names()))
+}
+/// `[--cpu-mhz N] [--ui DIR] [--theme NAME] FIRMWARE`.
 fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Args, String> {
     let mut path = None;
     let mut clock = None;
     let mut ui = None;
+    let mut theme = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         if arg == "--ui" {
             ui = Some(PathBuf::from(args.next().ok_or("--ui needs a directory")?));
+        } else if arg == "--theme" {
+            let name = args.next().ok_or("--theme needs a name")?;
+            theme = Some(theme_named(&name.to_string_lossy())?);
         } else if arg == "--cpu-mhz" || arg.to_str().is_some_and(|a| a.starts_with("--cpu-mhz=")) {
             // `--cpu-mhz N`, or `--cpu-mhz=N` as the fork's launcher passes it.
             let value = match arg.to_str().and_then(|a| a.strip_prefix("--cpu-mhz=")) {
@@ -727,13 +761,20 @@ fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Args
         path: path.ok_or(USAGE)?,
         clock_mhz: clock,
         ui,
+        theme,
     })
 }
 fn main() -> eframe::Result {
-    let args = parse_args(std::env::args_os().skip(1)).unwrap_or_else(|error| {
+    let fail = |error: String| -> ! {
         eprintln!("{error}");
         std::process::exit(2);
-    });
+    };
+    let args = parse_args(std::env::args_os().skip(1)).unwrap_or_else(|error| fail(error));
+    let theme = match (args.theme, std::env::var("FM1_THEME")) {
+        (Some(theme), _) => theme,
+        (None, Ok(name)) => theme_named(&name).unwrap_or_else(|error| fail(error)),
+        (None, Err(_)) => 0,
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180., 830.])
@@ -748,6 +789,7 @@ fn main() -> eframe::Result {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
             let mut app = Emulator::new(args.path.clone());
             app.clock_mhz = args.clock_mhz;
+            app.theme = theme;
             app.worker.clock(args.clock_mhz.map(|mhz| mhz * 1_000_000));
             app.web =
                 web_editor::WebEditor::new(&args.path, args.ui.as_deref(), fm1_emu::web::ADDRESS);
@@ -979,6 +1021,7 @@ mod tests {
             path: PathBuf::from("a.fwsc"),
             clock_mhz,
             ui: ui.map(PathBuf::from),
+            theme: None,
         };
         assert_eq!(parse(&["a.fwsc"]), Ok(args(None, None)));
         assert_eq!(
@@ -994,6 +1037,20 @@ mod tests {
         assert_eq!(parse(&["--cpu-mhz=96", "a.fwsc"]), Ok(args(Some(96), None)));
         assert!(parse(&["a.fwsc", "b.fwsc"]).is_err());
         assert!(parse(&[]).is_err());
+    }
+    #[test]
+    fn the_command_line_picks_a_theme_by_name() {
+        let parse = |args: &[&str]| parse_args(args.iter().map(std::ffi::OsString::from));
+        let theme = |args: &[&str]| parse(args).map(|args| args.theme);
+        assert_eq!(theme(&["a.fwsc"]), Ok(None));
+        assert_eq!(
+            theme(&["--theme", "mint", "a.fwsc"]),
+            Ok(ui_theme::find("Mint"))
+        );
+        assert!(ui_theme::find("Mint").is_some());
+        let unknown = parse(&["--theme", "plaid", "a.fwsc"]).unwrap_err();
+        assert!(unknown.contains("Classic, Black"), "{unknown}");
+        assert!(parse(&["a.fwsc", "--theme"]).is_err());
     }
     #[test]
     fn the_worker_paces_the_guest_by_the_audio_queue() {
