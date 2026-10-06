@@ -235,6 +235,7 @@ impl Emulator {
         let binding = match id {
             0 => Some(egui::Key::ArrowLeft),
             1 => Some(egui::Key::ArrowRight),
+            12 => Some(egui::Key::Space), // PLAY / STOP
             14..=26 => Some(NOTE_KEYS[id - 14]),
             _ => None,
         };
@@ -322,6 +323,8 @@ impl Emulator {
         }
         response.on_hover_text(if note {
             format!("Note {} · hold to press", id - 14 + 53)
+        } else if id == 12 {
+            format!("{} · hold to press · Space", label.replace('\n', " / "))
         } else {
             format!("{label} · hold to press")
         });
