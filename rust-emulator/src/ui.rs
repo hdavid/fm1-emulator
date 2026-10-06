@@ -2,6 +2,7 @@
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Rect, Sense, Stroke, StrokeKind};
 #[cfg(test)]
 use fm1_emu::{bus::Bus, cpu::Cpu, firmware::Firmware};
+mod ui_leds;
 mod worker;
 use std::{
     path::PathBuf,
@@ -46,6 +47,8 @@ struct Emulator {
     pressed: [bool; 41],
     pulse: [Instant; 41],
     pulse_steps: [u64; 41],
+    /// The panel LEDs as the guest lights them.
+    leds: ui_leds::LedView,
 }
 impl Emulator {
     fn new(path: PathBuf) -> Self {
@@ -61,6 +64,7 @@ impl Emulator {
             pressed: [false; 41],
             pulse: [Instant::now(); 41],
             pulse_steps: [0; 41],
+            leds: ui_leds::LedView::new(),
         };
         app.reset();
         app
@@ -71,6 +75,7 @@ impl Emulator {
         self.pulse_steps.fill(0);
         self.paused = false;
         self.texture = None;
+        self.leds.reset();
         self.generation += 1;
         self.loaded = false;
         self.steps = 0;
@@ -89,6 +94,9 @@ impl Emulator {
         self.loaded = snapshot.loaded;
         self.steps = snapshot.steps;
         self.fault = snapshot.fault;
+        if let Some(leds) = snapshot.leds {
+            self.leds.receive(leds);
+        }
         let Some(pixels) = snapshot.pixels else {
             return;
         };
@@ -157,6 +165,8 @@ impl Emulator {
             radius,
             Color32::BLACK,
         );
+        self.leds
+            .halo(&canvas.painter, rect, radius, id, canvas.scale);
         canvas.painter.rect(
             rect,
             radius,
@@ -164,6 +174,7 @@ impl Emulator {
             Stroke::new(canvas.scale, Color32::from_gray(86)),
             StrokeKind::Inside,
         );
+        self.leds.tint(&canvas.painter, rect, radius, id);
         let inset = rect.shrink(4. * canvas.scale);
         canvas.painter.rect_stroke(
             inset,
@@ -180,7 +191,7 @@ impl Emulator {
             canvas.painter.rect_filled(
                 Rect::from_center_size(pos2(rect.center().x, y), vec2(6., 31.) * canvas.scale),
                 3.,
-                if pressed { ACCENT } else { INK },
+                self.leds.ink(id, if pressed { ACCENT } else { INK }),
             );
             if !label.is_empty() {
                 canvas.painter.text(
@@ -188,7 +199,7 @@ impl Emulator {
                     Align2::CENTER_CENTER,
                     label,
                     FontId::proportional(11. * canvas.scale),
-                    INK,
+                    self.leds.ink(id, INK),
                 );
             }
         } else {
@@ -197,7 +208,7 @@ impl Emulator {
                 Align2::CENTER_CENTER,
                 label,
                 FontId::proportional(12. * canvas.scale),
-                if pressed { ACCENT } else { INK },
+                self.leds.ink(id, if pressed { ACCENT } else { INK }),
             );
         }
         response.on_hover_text(if note {
@@ -402,6 +413,7 @@ impl eframe::App for Emulator {
                         if ui.button("Restart").clicked() {
                             self.reset();
                         }
+                        self.leds.toggle(ui);
                         if ui
                             .add_enabled(
                                 self.loaded && self.fault.is_none(),
