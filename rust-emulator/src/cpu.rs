@@ -331,18 +331,30 @@ impl Cpu {
         }
     }
 
+    #[inline(always)]
     pub(crate) fn read(&self, address: u32, size: usize) -> Step<u32> {
-        self.bus
-            .read(address, size)
-            .map_err(|fault| Box::new(Fault::Access { pc: self.pc, fault }))
+        match self.bus.read(address, size) {
+            Ok(value) => Ok(value),
+            Err(fault) => Err(self.access_fault(fault)),
+        }
     }
 
+    #[inline(always)]
     pub(crate) fn write(&mut self, address: u32, value: u32) -> Step<()> {
-        self.bus
-            .write(address, value, 4)
-            .map_err(|fault| Box::new(Fault::Access { pc: self.pc, fault }))
+        match self.bus.write(address, value, 4) {
+            Ok(()) => Ok(()),
+            Err(fault) => Err(self.access_fault(fault)),
+        }
     }
 
+    /// A faulting access by the instruction at `pc`.
+    #[cold]
+    #[inline(never)]
+    fn access_fault(&self, fault: AccessFault) -> Box<Fault> {
+        Box::new(Fault::Access { pc: self.pc, fault })
+    }
+
+    #[inline(always)]
     pub(crate) fn push(&mut self, value: u32) -> Step<()> {
         let address = self.sr[14].wrapping_sub(4);
         self.write(address, value)?;
@@ -350,6 +362,7 @@ impl Cpu {
         Ok(())
     }
 
+    #[inline(always)]
     pub(crate) fn pop(&mut self) -> Step<u32> {
         let value = self.read(self.sr[14], 4)?;
         self.sr[14] = self.sr[14].wrapping_add(4);
