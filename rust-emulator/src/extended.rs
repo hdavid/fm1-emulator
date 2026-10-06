@@ -674,7 +674,30 @@ pub(crate) fn execute(
                         _ => packed(x),
                     };
                     let lhs = cpu.r[d];
-                    let test = if h & 0x60 == 0x60 {
+                    let test = if h & 0x60 == 0x40 && x & 128 != 0 {
+                        // Vendor r3: x bit 7 makes the register form an
+                        // IEEE single compare (iff), the conditions in the
+                        // order of the conditional blocks: FF42 7380 is
+                        // iff (r7 u>= r3) (X0X's limiter, 0x0201ffa2).
+                        let lhs = f32::from_bits(lhs);
+                        let rhs = f32::from_bits(value);
+                        if !lhs.is_finite() || !rhs.is_finite() {
+                            return Err(Fault::Access {
+                                pc,
+                                fault: crate::bus::AccessFault {
+                                    address: pc,
+                                    size: 6,
+                                    operation: "floating-point condition",
+                                    reason:
+                                        "exceptional floating-point comparison is not implemented",
+                                },
+                            });
+                        }
+                        let kind = [
+                            0x81, 0x89, 0x91, 0x99, 0, 0, 0, 0, 0xc1, 0xc9, 0xd1, 0xd9, 0xe1, 0xe9,
+                        ][(h & 15) as usize];
+                        float_condition(kind, lhs, rhs)
+                    } else if h & 0x60 == 0x60 {
                         if h & 1 == 0 {
                             lhs & value == 0
                         } else {

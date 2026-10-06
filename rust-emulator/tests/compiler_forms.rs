@@ -828,3 +828,54 @@ fn data_cache_flush_of_a_line_changes_nothing() {
     c.step().unwrap();
     assert_eq!((c.r, c.sr, c.pc), (r, sr, XIP + 4));
 }
+
+#[test]
+fn six_byte_register_compare_branch_with_x_bit_7_compares_floats() {
+    // Vendor objdump: ff42 7300 0172 = if (r7 >= r3), ff42 7380 0172 =
+    // iff (r7 u>= r3); ff40..ff4d with x bit 7: ==, u!=, u>=, <, u>, <=, >=,
+    // u<, >, u<=. X0X 0.9's limiter (master_process, 0x0201ffa2) skips its
+    // negative soft clip with ff42 7380 when s >= -0.89f; as an unsigned
+    // integer compare +0.0 < 0xbf63d70a and every silent sample was clipped.
+    let taken = |words: [u16; 2], lhs: f32, rhs: f32| {
+        let mut c = cpu(&[words[0], words[1], 0x0008, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        c.r[7] = lhs.to_bits();
+        c.r[3] = rhs.to_bits();
+        c.step().unwrap();
+        match c.pc - XIP {
+            22 => true,
+            6 => false,
+            other => panic!("unexpected PC offset {other}"),
+        }
+    };
+    assert!(taken([0xff42, 0x7380], 0.0, -0.89));
+    assert!(!taken([0xff42, 0x7380], -1.0, -0.89));
+    assert!(!taken([0xff42, 0x7300], 0.0, -0.89));
+    // (h low nibble, then: a<b, a==b, a>b)
+    for (nibble, expected) in [
+        (0x0u16, [false, true, false]),
+        (0x1, [true, false, true]),
+        (0x2, [false, true, true]),
+        (0x3, [true, false, false]),
+        (0x8, [false, false, true]),
+        (0x9, [true, true, false]),
+        (0xa, [false, true, true]),
+        (0xb, [true, false, false]),
+        (0xc, [false, false, true]),
+        (0xd, [true, true, false]),
+    ] {
+        for ((lhs, rhs), want) in [(-2.0f32, 1.5f32), (-0.0, 0.0), (3.0, -3.0)]
+            .into_iter()
+            .zip(expected)
+        {
+            assert_eq!(
+                taken([0xff40 | nibble, 0x7380], lhs, rhs),
+                want,
+                "ff4{nibble:x} 7380 with {lhs} vs {rhs}"
+            );
+        }
+    }
+    // Unordered operands still fault, as in the conditional blocks.
+    let mut c = cpu(&[0xff42, 0x7380, 0x0008, 0, 0, 0]);
+    c.r[7] = f32::NAN.to_bits();
+    assert!(c.step().is_err());
+}
