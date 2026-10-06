@@ -101,6 +101,8 @@ impl Machine {
                     cpu.r[0] = 0x01c7fe08;
                     cpu.bus.devices.adc.master = master;
                     cpu.bus.set_instruction_clock(clock);
+                    // FM1_NESTED_IRQ=1: interrupt nesting (USB audio builds; unmeasured, off by default).
+                    cpu.nested_irqs = std::env::var("FM1_NESTED_IRQ").is_ok_and(|v| v == "1");
                     if midi {
                         cpu.bus.usb.enable_midi_host();
                     }

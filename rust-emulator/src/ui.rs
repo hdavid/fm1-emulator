@@ -83,11 +83,13 @@ const DETENT_ANGLE: f32 = std::f32::consts::TAU / 24.;
 /// Instruction clock choices: None follows the firmware's system clock (the
 /// accurate default); a lower rate gives the guest fewer instructions per
 /// second of guest time, so a light firmware can play in real time.
-const CLOCKS: [(Option<u32>, &str); 4] = [
+const CLOCKS: [(Option<u32>, &str); 6] = [
     (None, "Firmware clock"),
     (Some(24), "24 MHz"),
     (Some(48), "48 MHz"),
     (Some(96), "96 MHz"),
+    (Some(192), "192 MHz"),
+    (Some(312), "312 MHz"),
 ];
 /// The ADC model's MASTER reading at reset.
 const MASTER_DEFAULT: u16 = 512;
