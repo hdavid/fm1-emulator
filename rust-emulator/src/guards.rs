@@ -69,6 +69,15 @@ impl Guards {
         });
         Some(Ok(()))
     }
+    /// EMU_CON of a core's q32DSP bank (vendor csfr.h: core 1 is 0x200 up).
+    pub(crate) fn emu_con(&self, core: usize) -> u32 {
+        self.value(0x1eef0d0 + 0x200 * core as u32)
+    }
+    /// Latch exception causes in a core's EMU_MSG (write one to clear).
+    pub(crate) fn raise_emu_msg(&mut self, core: usize, bits: u32) {
+        let a = 0x1eef0d4 + 0x200 * core as u32;
+        self.registers.insert(a, self.value(a) | bits);
+    }
     #[inline]
     pub fn check_write(&self, a: u32, size: usize) -> Result<(), &'static str> {
         // Runs on every guest write: consult the cached register copies.

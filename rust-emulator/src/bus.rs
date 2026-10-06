@@ -132,6 +132,13 @@ pub struct Bus {
 pub type MmioStats = std::collections::BTreeMap<(u32, u32), [u64; 2]>;
 
 impl Bus {
+    /// EMU_CON of `core`: exception enables (bit 2 divide by zero).
+    pub(crate) fn emu_con(&self, core: usize) -> u32 {
+        self.guards.emu_con(core)
+    }
+    pub(crate) fn raise_emu_msg(&mut self, core: usize, bits: u32) {
+        self.guards.raise_emu_msg(core, bits);
+    }
     pub(crate) fn core_control(&self, core: usize) -> u32 {
         self.cache.core_control(core)
     }
