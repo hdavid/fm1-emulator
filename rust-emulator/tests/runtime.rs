@@ -1196,6 +1196,63 @@ fn conditional_finishes_and_skips_else_before_an_interrupt_enters() {
 }
 
 #[test]
+fn a_conditional_arm_that_returns_lets_interrupts_enter_after_it() {
+    // Felucca ed_val: if (r0 > 71) { r0 <<= 1; r0 += r1; r0 += 128; rts }.
+    // The arm returns before its end; back in the caller, a pending
+    // interrupt must enter (it stayed deferred for good: watchdog expiry).
+    use fm1_emu::devices::IRQ_CONFIG;
+    let mut c = cpu(&[
+        0xec30, 0xc047, 0xa100, 0x1810, 0xe100, 0x0080, 0x0080, // if (r0 > 71) { ...; rts }
+        0x2041, // 14: r1 = 0, the arm's end (not reached)
+        0x2041, 0x2041, // 16: the caller
+        0x0000, // 20: handler
+    ]);
+    c.r[0] = 100;
+    c.sr[3] = XIP + 16;
+    c.sr[14] = RAM + 256;
+    c.sr[13] = RAM + 512;
+    c.sr[11] = 0x100;
+    c.bus.write(0x01c7fe00 + 120 * 4, XIP + 20, 4).unwrap();
+    c.bus.write(IRQ_CONFIG + 15 * 4, 5, 4).unwrap();
+    c.interrupts_enabled = true;
+    for _ in 0..5 {
+        c.step().unwrap();
+    }
+    assert_eq!(c.pc, XIP + 16, "returned to the caller");
+    assert_eq!(c.r[0], 100 * 2 + 128);
+    c.bus.write(0x1eef1a0, 1, 4).unwrap();
+    c.step().unwrap();
+    assert_eq!(c.irq_entries, 1);
+    assert_eq!(c.sr[0], XIP + 18);
+}
+
+#[test]
+fn a_conditional_arm_that_returns_does_not_skip_a_later_else() {
+    // if (r0 > 71) { r0 <<= 1; r0 += r1; r0 += 128; rts } else { r1 = 1 }:
+    // the then arm returns, so its skip of the else arm must not survive
+    // to the next call, where the condition fails and the else arm runs.
+    let mut c = cpu(&[
+        0xec30, 0xd047, 0xa100, 0x1810, 0xe100, 0x0080, 0x0080, // then arm
+        0x2141, // 14: else: r1 = 1
+        0x0080, // 16: rts
+        0x2041, // 18: the caller
+    ]);
+    c.r[0] = 100;
+    c.sr[3] = XIP + 18;
+    for _ in 0..5 {
+        c.step().unwrap();
+    }
+    assert_eq!(c.pc, XIP + 18, "returned to the caller");
+    c.r[0] = 5;
+    c.r[1] = 0;
+    c.pc = XIP;
+    c.step().unwrap();
+    c.step().unwrap();
+    assert_eq!(c.r[1], 1, "the else arm ran");
+    assert_eq!(c.pc, XIP + 16);
+}
+
+#[test]
 fn repeat_finishes_before_dispatching_a_pending_interrupt() {
     use fm1_emu::devices::{IRQ_CONFIG, TIMER5};
     for repeat in [0x8200, 0x0303] {
