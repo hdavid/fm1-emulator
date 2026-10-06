@@ -158,6 +158,9 @@ impl Worker {
         let snapshot = Arc::new(Mutex::new(None));
         let mailbox = Arc::clone(&snapshot);
         let thread = thread::spawn(move || {
+            // The guest keeps real time on a performance core, not on an
+            // efficiency core where a spawned thread's default class lands.
+            fm1_emu::host_thread::favour_performance_cores();
             let mut machine = Machine::new();
             let mut pending_serial: Option<Vec<u8>> = None;
             let mut next_frame = Instant::now();
