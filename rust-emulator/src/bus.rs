@@ -452,7 +452,7 @@ impl Bus {
             2 => peripheral_hz,
             _ => 0,
         };
-        self.devices.advance_uart(ticks, uart_hz);
+        self.devices.advance_uart(ticks, uart_hz, &mut self.ram);
         if let Some(bytes) = self.shift_spi.advance(ticks, peripheral_hz) {
             self.devices.gpio.shift_spi(&bytes);
         }
@@ -475,6 +475,22 @@ impl Bus {
     /// packet (up to 16 events) whenever its OUT endpoint buffer is free.
     pub fn usb_midi_send(&mut self, packets: &[crate::usb_midi::Packet]) {
         self.usb.midi_send(packets);
+    }
+
+    /// Put MIDI bytes on the UART1 RX line (the FM-1's DIN/TRS MIDI IN):
+    /// they arrive back to back at 31250 baud.
+    pub fn uart_midi_send(&mut self, bytes: &[u8]) {
+        self.devices.uart_mut().receive(bytes);
+    }
+
+    /// UART1 receive line: bytes still waiting, received, lost.
+    pub fn uart_rx_counts(&self) -> (usize, u64, u64) {
+        self.devices.uart().rx_counts()
+    }
+
+    /// Bytes UART1 finished transmitting (MIDI OUT; the first 4096).
+    pub fn uart_transmitted(&self) -> &[u8] {
+        self.devices.uart().transmitted()
     }
 
     pub fn advance_usb(&mut self, ticks: u32) -> Result<(), AccessFault> {

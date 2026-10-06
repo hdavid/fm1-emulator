@@ -372,8 +372,15 @@ impl Devices {
     ) -> Option<Result<(), &'static str>> {
         self.uart.write(address, value, size, Some(ram))
     }
-    pub(crate) fn advance_uart(&mut self, ticks: u32, hz: u32) {
+    pub(crate) fn advance_uart(&mut self, ticks: u32, hz: u32, ram: &mut [u8]) {
         self.uart.advance(ticks, hz);
+        self.uart.advance_rx(ticks, ram);
+    }
+    pub(crate) fn uart(&self) -> &crate::uart::Uart {
+        &self.uart
+    }
+    pub(crate) fn uart_mut(&mut self) -> &mut crate::uart::Uart {
+        &mut self.uart
     }
     pub(crate) fn advance_with_timer_clock(&mut self, ticks: u32, peripheral_hz: u32) {
         self.advance_with_clocks(ticks, peripheral_hz, 360_000_000);
