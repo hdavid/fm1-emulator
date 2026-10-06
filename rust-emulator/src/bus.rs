@@ -627,7 +627,7 @@ impl Bus {
         let (peripheral_hz, core_hz, uart_hz) = self.device_clocks();
         self.devices
             .advance_with_clocks(ticks, peripheral_hz, core_hz);
-        self.devices.advance_uart(ticks, uart_hz);
+        self.devices.advance_uart(ticks, uart_hz, &mut self.ram);
         if let Some(bytes) = self.shift_spi.advance(ticks, peripheral_hz) {
             self.devices.gpio.shift_spi(&bytes);
         }
@@ -706,6 +706,23 @@ impl Bus {
         self.advance_clocked(ticks)?;
         self.next_event = now + self.ticks_to_event();
         Ok(())
+    }
+
+    /// Put MIDI bytes on the UART1 RX line (the FM-1's DIN/TRS MIDI IN):
+    /// they arrive back to back at 31250 baud from the next tick.
+    pub fn uart_midi_send(&mut self, bytes: &[u8]) {
+        self.next_event = self.next_event.min(self.oscillator_ticks + 1);
+        self.devices.uart_mut().receive(bytes);
+    }
+
+    /// UART1 receive line: bytes still waiting, received, lost.
+    pub fn uart_rx_counts(&self) -> (usize, u64, u64) {
+        self.devices.uart().rx_counts()
+    }
+
+    /// Bytes UART1 finished transmitting (MIDI OUT; the first 4096).
+    pub fn uart_transmitted(&self) -> &[u8] {
+        self.devices.uart().transmitted()
     }
 
     /// Queue terminal bytes for the guest's CDC OUT endpoint (see
@@ -788,8 +805,9 @@ impl Bus {
     }
 
     pub fn advance_audio(&mut self, ticks: u32) -> Result<(), AccessFault> {
+        // A frame transfers only on a device event, whose tick is `synced`.
         self.audio
-            .advance(ticks, &self.ram)
+            .advance(ticks, &self.ram, self.synced)
             .map_err(|reason| Self::fault(0x12e1c, 4, "audio DMA", reason))
     }
 

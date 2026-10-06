@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // UART1: WL82.h JL_UART_TypeDef and the vendor uart.c/spec_uart.c.
-// There is no host DIN-MIDI input. Receive counters stay empty, DMA buffers
-// stay untouched, and no receive/timeout event is generated without bytes.
-// TX supports 8N1 byte/DMA transfers. No host DIN-MIDI routing is provided.
+// TX supports 8N1 byte/DMA transfers. Receive: a host can put MIDI bytes on
+// the RX line (`receive`, the FM-1's DIN/TRS MIDI IN, hal/fm1_uart.h); they
+// arrive back to back at 31250 baud (10 bits = 7680 oscillator ticks each,
+// whatever BAUD says: the sender's rate) and the RX DMA writes each at the
+// end of its stop bit into the ring RXSADR..RXEADR (wrapping), counting it;
+// CON0 RDC (bit 7) latches the count into HRXCNT and restarts it, bit 14
+// is RX pending (bit 12 clears it). RX needs UTEN (bit 0) and RXDMA (bit
+// 6); bytes arriving otherwise are lost. Unmeasured on hardware: no RX
+// interrupt or OT timeout is generated. Without host bytes nothing changes.
 #[derive(Default)]
 pub(crate) struct Uart {
     registers: [u32; 11],
@@ -11,7 +17,23 @@ pub(crate) struct Uart {
     pending: bool,
     // Bounded observation of bytes that have actually finished transmitting.
     transmitted: Vec<u8>,
+    /// Host bytes not yet received, oldest first.
+    rx_queue: std::collections::VecDeque<u8>,
+    /// Ticks until the byte on the line has been received (0: line idle).
+    rx_left: u64,
+    /// Next ring offset the RX DMA writes, from RXSADR.
+    rx_offset: u32,
+    /// Bytes received since the last RDC latch, and the latched count.
+    rx_count: u32,
+    rx_latched: u32,
+    rx_pending: bool,
+    /// Bytes the RX DMA wrote, and bytes lost with RX off or no ring.
+    rx_bytes: u64,
+    rx_lost: u64,
 }
+
+/// Oscillator ticks per MIDI byte on the RX line: 10 bits at 31250 baud.
+pub const RX_BYTE_TICKS: u64 = 24_000_000 * 10 / 31_250;
 
 #[cfg(test)]
 mod tests {
@@ -39,6 +61,44 @@ mod tests {
         uart.write(0x12100, 0x206d, 2, None).unwrap().unwrap();
         assert!(!uart.pending_irq());
         assert_eq!(uart.read(0x12100, 2), Some(Ok(0x6d)));
+    }
+
+    #[test]
+    fn midi_in_bytes_land_in_the_ring_at_31250_baud_and_wrap() {
+        let mut ram = vec![0u8; 16];
+        let mut uart = Uart::default();
+        uart.write(0x1211c, crate::RAM + 4, 4, None)
+            .unwrap()
+            .unwrap(); // RXSADR
+        uart.write(0x12120, crate::RAM + 6, 4, None)
+            .unwrap()
+            .unwrap(); // RXEADR
+        uart.write(0x12100, 0x41, 2, None).unwrap().unwrap(); // UTEN + RXDMA
+        uart.receive(&[0xf8, 0xfa, 0x90]);
+        assert_eq!(uart.ticks_to_event(48_000_000), Some(RX_BYTE_TICKS));
+        uart.advance_rx((RX_BYTE_TICKS - 1) as u32, &mut ram);
+        assert_eq!(ram[4], 0);
+        uart.advance_rx(1, &mut ram);
+        assert_eq!(ram[4], 0xf8);
+        assert_eq!(uart.read(0x12100, 2), Some(Ok(0x4041)));
+        uart.advance_rx(RX_BYTE_TICKS as u32, &mut ram);
+        uart.advance_rx(RX_BYTE_TICKS as u32, &mut ram);
+        assert_eq!((ram[4], ram[5]), (0x90, 0xfa), "a two-byte ring wraps");
+        assert_eq!(uart.ticks_to_event(48_000_000), None);
+        uart.write(0x12100, 0x10c1, 2, None).unwrap().unwrap(); // RDC, clear RX pending
+        assert_eq!(uart.read(0x12128, 2), Some(Ok(3)));
+        assert_eq!(uart.read(0x12100, 2), Some(Ok(0x41)));
+        assert_eq!(uart.rx_counts(), (0, 3, 0));
+    }
+
+    #[test]
+    fn midi_in_bytes_are_lost_while_receive_is_off() {
+        let mut ram = vec![0u8; 16];
+        let mut uart = Uart::default();
+        uart.receive(&[0xf8]);
+        uart.advance_rx(RX_BYTE_TICKS as u32, &mut ram);
+        assert_eq!(uart.rx_counts(), (0, 0, 1));
+        assert_eq!(uart.read(0x12128, 2), Some(Ok(0)));
     }
 
     #[test]
@@ -104,8 +164,10 @@ impl Uart {
             match index {
                 2 | 6 => Err("UART register is write-only"),
                 3 => Err("UART byte input is not implemented"),
-                10 => Ok(0), // RDC latches zero bytes received on an idle wire.
-                0 => Ok(self.registers[0] | if self.pending { 0x8000 } else { 0 }),
+                10 => Ok(self.rx_latched),
+                0 => Ok(self.registers[0]
+                    | if self.pending { 0x8000 } else { 0 }
+                    | if self.rx_pending { 0x4000 } else { 0 }),
                 _ => Ok(self.registers[index]),
             }
         })
@@ -129,6 +191,13 @@ impl Uart {
                     // or manufacture pending events on a quiet input.
                     if value & 0x2000 != 0 {
                         self.pending = false;
+                    }
+                    if value & 0x1000 != 0 {
+                        self.rx_pending = false;
+                    }
+                    if value & 0x80 != 0 {
+                        self.rx_latched = self.rx_count & 0xffff;
+                        self.rx_count = 0;
                     }
                     self.registers[0] = value & 0x37f;
                     if value & 1 == 0 {
@@ -160,10 +229,66 @@ impl Uart {
                 10 => Err("UART receive count latch is read-only"),
                 _ => {
                     self.registers[index] = value;
+                    if index == 7 {
+                        self.rx_offset = 0;
+                    }
                     Ok(())
                 }
             }
         })
+    }
+
+    /// Put bytes on the RX line: the first starts now if the line is idle,
+    /// the others follow back to back.
+    pub(crate) fn receive(&mut self, bytes: &[u8]) {
+        self.rx_queue.extend(bytes.iter().copied());
+        if self.rx_left == 0 && !self.rx_queue.is_empty() {
+            self.rx_left = RX_BYTE_TICKS;
+        }
+    }
+
+    /// Bytes waiting for or on the RX line; bytes received; bytes lost.
+    pub(crate) fn rx_counts(&self) -> (usize, u64, u64) {
+        (self.rx_queue.len(), self.rx_bytes, self.rx_lost)
+    }
+
+    /// Bytes that finished transmitting (bounded).
+    pub(crate) fn transmitted(&self) -> &[u8] {
+        &self.transmitted
+    }
+
+    /// Advance the RX line by `ticks` (spans end at its events, so at most
+    /// one byte completes); a received byte goes into `ram` (SRAM).
+    pub(crate) fn advance_rx(&mut self, ticks: u32, ram: &mut [u8]) {
+        if self.rx_left == 0 {
+            return;
+        }
+        if (ticks as u64) < self.rx_left {
+            self.rx_left -= ticks as u64;
+            return;
+        }
+        self.rx_left = 0;
+        let Some(byte) = self.rx_queue.pop_front() else {
+            return;
+        };
+        if !self.rx_queue.is_empty() {
+            self.rx_left = RX_BYTE_TICKS;
+        }
+        let (start, end) = (self.registers[7], self.registers[8]);
+        let on = self.registers[0] & 0x41 == 0x41;
+        let offset = start.wrapping_add(self.rx_offset).wrapping_sub(crate::RAM) as usize;
+        if !on || end <= start || offset >= ram.len() {
+            self.rx_lost += 1;
+            return;
+        }
+        ram[offset] = byte;
+        self.rx_offset += 1;
+        if start + self.rx_offset >= end {
+            self.rx_offset = 0;
+        }
+        self.rx_count += 1;
+        self.rx_bytes += 1;
+        self.rx_pending = true;
     }
 
     fn start(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
@@ -183,8 +308,10 @@ impl Uart {
 
     /// Oscillator ticks at `hz` until a transmission in progress ends.
     pub(crate) fn ticks_to_event(&self, hz: u32) -> Option<u64> {
-        (!self.transmit.is_empty() && self.registers[0] & 1 != 0 && hz != 0)
-            .then(|| self.remaining.div_ceil(hz as u64).max(1))
+        let transmit = (!self.transmit.is_empty() && self.registers[0] & 1 != 0 && hz != 0)
+            .then(|| self.remaining.div_ceil(hz as u64).max(1));
+        let receive = (self.rx_left > 0).then_some(self.rx_left);
+        transmit.into_iter().chain(receive).min()
     }
 
     pub(crate) fn advance(&mut self, ticks: u32, hz: u32) {

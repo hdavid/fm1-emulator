@@ -22,6 +22,45 @@ pub struct Audio {
     pub frames: u64,
     pub halves: u64,
     pub samples: VecDeque<[i32; 2]>,
+    /// Onset probe (timing measurements): off while `threshold` is 0.
+    pub probe: OnsetProbe,
+}
+
+/// Records when the DMA transfers a frame that rises out of silence: the
+/// first frame with |left| or |right| >= `threshold` after at least `quiet`
+/// frames below `threshold / 8` (and the first one after arming). Each onset
+/// is (frame index, oscillator tick of its transfer).
+#[derive(Default)]
+pub struct OnsetProbe {
+    pub threshold: i32,
+    pub quiet: u32,
+    below: u32,
+    armed: bool,
+    pub onsets: Vec<(u64, u64)>,
+    /// (frame index, tick) of every half-buffer switch while the probe is on.
+    pub halves: Vec<(u64, u64)>,
+}
+impl OnsetProbe {
+    pub fn arm(&mut self, threshold: i32, quiet: u32) {
+        self.threshold = threshold;
+        self.quiet = quiet;
+        self.below = quiet;
+        self.armed = true;
+        self.onsets.clear();
+        self.halves.clear();
+    }
+    fn frame(&mut self, frame: u64, tick: u64, [l, r]: [i32; 2]) {
+        let level = l.unsigned_abs().max(r.unsigned_abs());
+        if level >= self.threshold as u32 {
+            if self.armed && self.below >= self.quiet {
+                self.onsets.push((frame, tick));
+            }
+            self.armed = true;
+            self.below = 0;
+        } else if level < (self.threshold / 8).max(1) as u32 {
+            self.below = self.below.saturating_add(1);
+        }
+    }
 }
 impl Audio {
     pub fn read(&self, address: u32) -> Option<u32> {
@@ -85,7 +124,9 @@ impl Audio {
                 .max(1)
         })
     }
-    pub fn advance(&mut self, ticks: u32, ram: &[u8]) -> Result<(), &'static str> {
+    /// `now`: the oscillator tick at the end of this span (a frame
+    /// transfers at its end: spans end at `ticks_to_event`).
+    pub fn advance(&mut self, ticks: u32, ram: &[u8], now: u64) -> Result<(), &'static str> {
         if self.control & 0x800 == 0 {
             return Ok(());
         }
@@ -107,6 +148,9 @@ impl Audio {
                 self.samples.pop_front();
             }
             self.samples.push_back([left, right]);
+            if self.probe.threshold > 0 {
+                self.probe.frame(self.frames, now, [left, right]);
+            }
             self.frames += 1;
             self.frame += 1;
             let half_frames = self.half_words / 2;
@@ -114,6 +158,9 @@ impl Audio {
                 self.control ^= 0x8000;
                 self.pending |= 0x80;
                 self.halves += 1;
+                if self.probe.threshold > 0 {
+                    self.probe.halves.push((self.frames, now));
+                }
             }
             if self.frame == half_frames * 2 {
                 self.frame = 0;
