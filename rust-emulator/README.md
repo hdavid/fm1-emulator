@@ -58,6 +58,12 @@ and receives the latest LCD snapshot; unchanged pixels do not require texture
 uploads. Guest time still follows the emulated clock, so execution speed depends
 on the host and is not yet calibrated to real time.
 
+The drawn panel comes in the emulator's original Classic colours (the
+default) and in colours sampled from the FM-1's editions: Black, Lilac,
+Orange, Mint, Cream and Blue. Pick one in the toolbar, or at start with
+`--theme NAME` or `FM1_THEME=NAME` (the option wins); the choice is not
+saved between runs.
+
 Instruction dispatch uses a shared first-word decode table and a bounded cache
 of wide instruction words. A bounded basic-block cache also prepares common
 register, arithmetic, shift, memory and short branch operations, including their

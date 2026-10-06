@@ -415,6 +415,17 @@ impl eframe::App for Emulator {
                         if ui.button("Restart").clicked() {
                             self.reset();
                         }
+                        egui::ComboBox::from_id_salt("theme")
+                            .selected_text(ui_theme::THEMES[self.theme].name)
+                            .show_ui(ui, |ui| {
+                                for (index, theme) in ui_theme::THEMES.iter().enumerate() {
+                                    ui.selectable_value(&mut self.theme, index, theme.name);
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "The panel's colours (--theme NAME or FM1_THEME=NAME at start)",
+                            );
                         if ui
                             .add_enabled(
                                 self.loaded && self.fault.is_none(),
@@ -463,16 +474,40 @@ impl eframe::App for Emulator {
         ctx.request_repaint_after(Duration::from_millis(16));
     }
 }
+/// The theme called `name`, or an error listing them.
+fn theme_named(name: &str) -> Result<usize, String> {
+    ui_theme::find(name)
+        .ok_or_else(|| format!("unknown theme {name:?}; themes: {}", ui_theme::names()))
+}
+/// `[--theme NAME] FIRMWARE`: the firmware and the theme, if one was named.
+fn parse_args(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<(PathBuf, Option<usize>), String> {
+    let mut path = None;
+    let mut theme = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "--theme" {
+            let name = args.next().ok_or("--theme needs a name")?;
+            theme = Some(theme_named(&name.to_string_lossy())?);
+        } else if path.replace(PathBuf::from(arg)).is_some() {
+            return Err("expected one firmware path".into());
+        }
+    }
+    let path = path.ok_or("usage: emulator [--theme NAME] <application.elf|application.bin>")?;
+    Ok((path, theme))
+}
 fn main() -> eframe::Result {
-    let mut args = std::env::args_os().skip(1);
-    let Some(path) = args.next() else {
-        eprintln!("usage: emulator <application.elf|application.bin>");
+    let fail = |error: String| -> ! {
+        eprintln!("{error}");
         std::process::exit(2);
     };
-    if args.next().is_some() {
-        eprintln!("expected one firmware path");
-        std::process::exit(2);
-    }
+    let (path, theme) = parse_args(std::env::args_os().skip(1)).unwrap_or_else(|error| fail(error));
+    let theme = match (theme, std::env::var("FM1_THEME")) {
+        (Some(theme), _) => theme,
+        (None, Ok(name)) => theme_named(&name).unwrap_or_else(|error| fail(error)),
+        (None, Err(_)) => 0,
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180., 830.])
@@ -485,7 +520,8 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            let app = Emulator::new(PathBuf::from(path));
+            let mut app = Emulator::new(path);
+            app.theme = theme;
             app.worker.read_stdin();
             Ok(Box::new(app))
         }),
@@ -638,6 +674,22 @@ mod tests {
                 .inspect(|machine| machine.cpu.as_ref().unwrap().steps),
             steps
         );
+    }
+    #[test]
+    fn the_command_line_takes_a_firmware_and_picks_a_theme_by_name() {
+        let parse = |args: &[&str]| parse_args(args.iter().map(std::ffi::OsString::from));
+        assert_eq!(parse(&["a.elf"]), Ok((PathBuf::from("a.elf"), None)));
+        let mint = ui_theme::find("Mint");
+        assert!(mint.is_some());
+        assert_eq!(
+            parse(&["--theme", "mint", "a.elf"]),
+            Ok((PathBuf::from("a.elf"), mint))
+        );
+        let unknown = parse(&["--theme", "plaid", "a.elf"]).unwrap_err();
+        assert!(unknown.contains("Classic, Black"), "{unknown}");
+        assert!(parse(&["a.elf", "--theme"]).is_err());
+        assert!(parse(&["a.elf", "b.elf"]).is_err());
+        assert!(parse(&[]).is_err());
     }
     #[test]
     #[ignore = "requires FM1_STOCK_FWSC; measures GUI worker latency in release mode"]
