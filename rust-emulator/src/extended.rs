@@ -35,10 +35,8 @@ fn byte_offset(h: u32, x: u32) -> u32 {
 }
 
 /// Store the upper halfword of rD (the vendor's `= rD.h` stores).
-fn store_upper_half(cpu: &mut Cpu, pc: u32, address: u32, d: usize) -> Step<()> {
-    cpu.bus
-        .write(address, cpu.r[d] >> 16, 2)
-        .map_err(|fault| Box::new(Fault::Access { pc, fault }))
+fn store_upper_half(cpu: &mut Cpu, address: u32, d: usize) -> Step<()> {
+    cpu.write_sized(address, cpu.r[d] >> 16, 2)
 }
 
 /// Load or store the register pair rD+1:rD, the even register at `address`.
@@ -324,7 +322,7 @@ pub(crate) fn execute(
                     let addr = cpu.r[s].wrapping_add(offset as u32);
                     let updated = if h & 8 != 0 { Some(addr) } else { None };
                     if store && h & 4 != 0 {
-                        store_upper_half(cpu, pc, addr, d)?;
+                        store_upper_half(cpu, addr, d)?;
                         if let Some(value) = updated {
                             cpu.r[s] = value;
                         }
@@ -342,7 +340,7 @@ pub(crate) fn execute(
                         signed(((h & 3) << 8) | (((x >> 8) & 15) << 4) | (x & 14), 10) as u32;
                     let address = cpu.r[s];
                     if store && h & 4 != 0 {
-                        store_upper_half(cpu, pc, address, d)?;
+                        store_upper_half(cpu, address, d)?;
                         cpu.r[s] = address.wrapping_add(increment);
                     } else {
                         mem = Some((
@@ -1114,9 +1112,7 @@ pub(crate) fn execute(
                     // is h[++r5=r6] = r4.h (SLOOP's sequencer event ring).
                     let address = cpu.r[s].wrapping_add(cpu.r[c]);
                     let value = if x & 2 != 0 { cpu.r[d] >> 16 } else { cpu.r[d] };
-                    cpu.bus
-                        .write(address, value, 2)
-                        .map_err(|fault| Fault::Access { pc, fault })?;
+                    cpu.write_sized(address, value, 2)?;
                     cpu.r[s] = address;
                     op = "halfword_register_preincrement_store";
                 }
@@ -1138,9 +1134,7 @@ pub(crate) fn execute(
                         } else {
                             cpu.r[d]
                         };
-                        cpu.bus
-                            .write(address, value, size)
-                            .map_err(|fault| Fault::Access { pc, fault })?;
+                        cpu.write_sized(address, value, size)?;
                         cpu.r[s] = updated;
                     } else {
                         let value = cpu.read(address, size)?;
@@ -1253,9 +1247,7 @@ pub(crate) fn execute(
     }
     if let Some((reg, base, address, size, store, sign, updated)) = mem {
         if store {
-            cpu.bus
-                .write(address, cpu.r[reg], size)
-                .map_err(|fault| Fault::Access { pc, fault })?;
+            cpu.write_sized(address, cpu.r[reg], size)?;
         } else {
             let value = cpu.read(address, size)?;
             cpu.r[reg] = if sign {
