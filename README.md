@@ -65,7 +65,8 @@ and Baud Girl results.
 - [ ] Remaining CPU instructions, peripherals and firmware UI paths.
 - [ ] USB MIDI, and real-time host audio for heavier firmware (playback and
   rotary controls work; speed is the limit).
-- [ ] Flash persistence, plus fuller encryption, interrupt and timing behavior.
+- [x] Flash persistence between runs (`state/`, `--fresh`; see the [emulator README](rust-emulator/README.md#flash-kept-between-runs)).
+- [ ] Fuller encryption, interrupt and timing behavior.
 
 GPL-3.0-only; see [LICENSE](LICENSE). Based on research and components from
 [Felucca](https://github.com/hugelton/Felucca), the

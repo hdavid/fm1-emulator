@@ -212,6 +212,12 @@ impl Firmware {
         })
     }
 
+    /// End of the NOR the package's boot and application areas occupy
+    /// (0x0 to here); 0 for an ELF or raw image, which has no package.
+    pub fn code_end(&self) -> usize {
+        self.package.as_ref().map_or(0, |package| package.code_end)
+    }
+
     pub fn bus(&self) -> Result<crate::bus::Bus, String> {
         let mut bus = crate::bus::Bus::new(self.image.clone())?;
         if let Some(package) = &self.package {

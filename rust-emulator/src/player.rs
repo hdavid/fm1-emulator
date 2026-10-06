@@ -36,6 +36,8 @@ pub struct Player {
     /// fault instead of letting the firmware's crash handler run. On by
     /// default; FM1_EXCEPTION_CONTINUE=1 turns it off.
     pub stop_on_exception: bool,
+    /// End of the package's code area in the NOR (`Firmware::code_end`).
+    pub code_end: usize,
 }
 
 /// Audio level of the guest's output since the last `Level::take`.
@@ -79,6 +81,7 @@ impl Player {
             recent: VecDeque::new(),
             trace,
             stop_on_exception: std::env::var_os("FM1_EXCEPTION_CONTINUE").is_none(),
+            code_end: firmware.code_end(),
         })
     }
 

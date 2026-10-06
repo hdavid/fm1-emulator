@@ -5,12 +5,13 @@ use fm1_emu::{
     cpu::Cpu,
     encoders::Encoders,
     firmware::Firmware,
+    flash_state::{Persistence, Store},
     usb_midi::Decoder,
     web::{self, Hub},
 };
 use std::{
     io::{self, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{mpsc, Arc, Mutex},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -26,10 +27,27 @@ pub(super) struct Snapshot {
     pub pixels: Option<Vec<u32>>,
     /// Panel LED brightness per key id over the last stretch of guest time.
     pub leds: Option<[f32; fm1_emu::leds::KEYS]>,
+    /// What the flash state did last (restored, saved, an error); None
+    /// without a flash state.
+    pub state: Option<String>,
+}
+
+/// Where the flash is kept between runs (`flash_state`).
+pub(super) struct StateConfig {
+    /// `--state PATH` (a file or a folder); None: the default folder.
+    pub path: Option<PathBuf>,
+    /// Start the next machine from the package alone, replacing the state.
+    pub fresh: bool,
 }
 
 enum Command {
     Restart(u64, PathBuf),
+    /// Keep the flash between runs from now on (the next restart applies).
+    State(StateConfig),
+    /// Forget the saved flash state and restart from the package alone.
+    ResetState(u64),
+    /// Save the flash state now if it changed; then answer.
+    Flush(mpsc::SyncSender<()>),
     Input([bool; 41]),
     /// Queue detents (+ clockwise) on a matrix encoder.
     Turn(usize, i32),
@@ -46,6 +64,20 @@ enum Command {
     Stop,
     #[cfg(test)]
     Inspect(Box<dyn FnOnce(&mut Machine) + Send>),
+}
+
+/// Saves the flash state on request, from any thread (`Worker::flusher`).
+pub(super) struct Flusher(mpsc::Sender<Command>);
+
+impl Flusher {
+    /// Ask the worker to save the flash state if it changed, and wait for it
+    /// (at most `timeout`: a worker deep in a long step must not hang a quit).
+    pub fn flush(&self, timeout: Duration) {
+        let (done, wait) = mpsc::sync_channel(1);
+        if self.0.send(Command::Flush(done)).is_ok() {
+            let _ = wait.recv_timeout(timeout);
+        }
+    }
 }
 
 pub(super) struct Worker {
@@ -66,6 +98,11 @@ pub(super) struct Machine {
     web: Option<(Arc<Hub>, Decoder)>,
     generation: u64,
     last_lcd: Option<(u64, bool)>,
+    state: Option<StateConfig>,
+    persistence: Option<Persistence>,
+    state_message: Option<String>,
+    /// The firmware the machine was last started from.
+    path: Option<PathBuf>,
 }
 
 impl Machine {
@@ -81,11 +118,80 @@ impl Machine {
             web: None,
             generation: 0,
             last_lcd: None,
+            state: None,
+            persistence: None,
+            state_message: None,
+            path: None,
         }
+    }
+    /// Report a flash state event on stderr and in the status line.
+    fn state_note(&mut self, message: String) {
+        eprintln!("{message}");
+        self.state_message = Some(message);
+    }
+    /// Save the flash state if the flash changed since it was saved.
+    fn flush_state(&mut self) {
+        self.save_state(|persistence, bus| persistence.flush(bus));
+    }
+    /// Save the flash state once the firmware has been quiet a moment.
+    fn poll_state(&mut self) {
+        self.save_state(|persistence, bus| persistence.poll(bus, Instant::now()));
+    }
+    /// Run `save` on the flash state and report what it did.
+    fn save_state(
+        &mut self,
+        save: impl FnOnce(&mut Persistence, &fm1_emu::bus::Bus) -> Option<Result<(), String>>,
+    ) {
+        let (Some(persistence), Some(cpu)) = (&mut self.persistence, &self.cpu) else {
+            return;
+        };
+        let message = match save(persistence, &cpu.bus) {
+            Some(Ok(())) => format!(
+                "flash state: saved to {}",
+                persistence.store.image.display()
+            ),
+            Some(Err(error)) => format!("flash state: not saved: {error}"),
+            None => return,
+        };
+        self.state_note(message);
+    }
+    /// Lay the saved flash over a machine just loaded from `path`.
+    fn attach_state(&mut self, path: &Path, code_end: usize) {
+        let Some(config) = &mut self.state else {
+            return;
+        };
+        let Some(cpu) = &mut self.cpu else {
+            return;
+        };
+        let store = Store::for_firmware(config.path.as_deref(), path);
+        let fresh = std::mem::take(&mut config.fresh);
+        let (persistence, message) =
+            Persistence::attach(store, &mut cpu.bus, path, code_end, fresh);
+        self.persistence = Some(persistence);
+        self.state_note(message);
     }
     fn command(&mut self, command: Command) -> bool {
         match command {
+            Command::State(config) => self.state = Some(config),
+            Command::ResetState(generation) => {
+                // The running flash is not saved: it is what is being reset.
+                self.persistence = None;
+                if let Some(config) = &mut self.state {
+                    config.fresh = true;
+                }
+                if let Some(path) = self.path.clone() {
+                    return self.command(Command::Restart(generation, path));
+                }
+            }
+            Command::Flush(done) => {
+                self.flush_state();
+                let _ = done.send(());
+            }
             Command::Restart(generation, path) => {
+                // A restart is a power cycle: what the firmware wrote stays.
+                self.flush_state();
+                self.persistence = None;
+                self.path = Some(path.clone());
                 self.generation = generation;
                 self.paused = false;
                 self.last_lcd = None;
@@ -108,11 +214,12 @@ impl Machine {
                     if midi {
                         cpu.bus.usb.enable_midi_host();
                     }
-                    Ok(cpu)
+                    Ok((cpu, firmware.code_end()))
                 }) {
-                    Ok(cpu) => {
+                    Ok((cpu, code_end)) => {
                         self.cpu = Some(cpu);
                         self.fault = None;
+                        self.attach_state(&path, code_end);
                     }
                     Err(error) => {
                         self.cpu = None;
@@ -151,7 +258,10 @@ impl Machine {
             Command::Audio(queue) => self.audio = queue,
             Command::Web(hub) => self.web = hub.map(|hub| (hub, Decoder::default())),
             Command::Pause(paused) => self.paused = paused,
-            Command::Stop => return false,
+            Command::Stop => {
+                self.flush_state();
+                return false;
+            }
             #[cfg(test)]
             Command::Inspect(inspect) => inspect(self),
         }
@@ -204,6 +314,7 @@ impl Machine {
             fault: self.fault.clone(),
             pixels: None,
             leds: None,
+            state: self.state_message.clone(),
         };
         if let Some(cpu) = &mut self.cpu {
             let leds = &mut cpu.bus.devices.gpio.leds;
@@ -301,6 +412,7 @@ impl Worker {
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
                 }
+                machine.poll_state();
                 if Instant::now() >= next_frame {
                     machine.publish(&mailbox);
                     next_frame = Instant::now() + Duration::from_millis(16);
@@ -334,6 +446,19 @@ impl Worker {
     }
     pub fn audio(&self, queue: Option<AudioQueue>) {
         let _ = self.commands.send(Command::Audio(queue));
+    }
+    /// Keep the flash between runs (applies from the next restart).
+    pub fn keep_flash(&self, config: StateConfig) {
+        let _ = self.commands.send(Command::State(config));
+    }
+    /// Forget the saved flash and restart from the package alone.
+    pub fn reset_state(&self, generation: u64) {
+        let _ = self.commands.send(Command::ResetState(generation));
+    }
+    /// Something that saves the flash state from any thread (a signal
+    /// handler), waiting until it is written.
+    pub fn flusher(&self) -> Flusher {
+        Flusher(self.commands.clone())
     }
     pub fn pause(&self, paused: bool) {
         let _ = self.commands.send(Command::Pause(paused));
