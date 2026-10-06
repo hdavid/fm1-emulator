@@ -158,7 +158,8 @@ pub(crate) struct Prepared<'a> {
 }
 pub(crate) struct Cache {
     slots: Box<[Option<Block>]>,
-    #[cfg(test)]
+    /// Off by default (`Cpu::set_block_cache`): on the measured firmware
+    /// the per-instruction lookups cost more than the prepared forms save.
     pub(crate) enabled: bool,
     #[cfg(test)]
     pub(crate) jit_enabled: bool,
@@ -169,8 +170,7 @@ impl Cache {
     pub(crate) fn new() -> Self {
         Self {
             slots: std::iter::repeat_with(|| None).take(SLOTS).collect(),
-            #[cfg(test)]
-            enabled: true,
+            enabled: false,
             #[cfg(test)]
             jit_enabled: true,
             #[cfg(test)]
@@ -189,7 +189,6 @@ impl Cache {
         pc: u32,
         h: u16,
     ) -> Option<Prepared<'_>> {
-        #[cfg(test)]
         if !self.enabled {
             return None;
         }

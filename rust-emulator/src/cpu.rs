@@ -382,6 +382,16 @@ impl Cpu {
         Ok(())
     }
 
+    /// Execute through upstream's prepared basic blocks and their native
+    /// code (`blocks`, `jit`) instead of decoding each instruction.
+    /// Guest-visible behaviour is the same either way. Off by default:
+    /// measured on Felucca, SLOOP and stock firmware, the lookups cost more
+    /// than the prepared forms save while each native call still runs one
+    /// instruction (PERFORMANCE.md).
+    pub fn set_block_cache(&mut self, enabled: bool) {
+        self.blocks.enabled = enabled;
+    }
+
     /// Instructions `run_steps` runs between checks for halted cores.
     const HALT_CHECK_INTERVAL: u64 = 64;
 
@@ -573,21 +583,21 @@ impl Cpu {
                 self.pc = continuation;
                 op
             } else {
-                let prepared =
-                    if self
+                let prepared = if self.blocks.enabled
+                    && self
                         .blocks
                         .can_execute(&self.decode, self.block_cursor, pc, h as u16)
-                    {
-                        self.blocks.instruction(
-                            &self.bus,
-                            &mut self.decode,
-                            &mut self.block_cursor,
-                            pc,
-                            h as u16,
-                        )
-                    } else {
-                        None
-                    };
+                {
+                    self.blocks.instruction(
+                        &self.bus,
+                        &mut self.decode,
+                        &mut self.block_cursor,
+                        pc,
+                        h as u16,
+                    )
+                } else {
+                    None
+                };
                 if let Some(prepared) = prepared {
                     let instruction = prepared.instruction;
                     if let Some(native) = prepared.native {
@@ -1285,9 +1295,9 @@ mod block_tests {
     }
     fn pair(words: &[u16]) -> (Cpu, Cpu) {
         let bytes: Vec<_> = words.iter().flat_map(|h| h.to_le_bytes()).collect();
-        let a = Cpu::new(Bus::new(bytes.clone()).unwrap(), crate::XIP);
-        let mut b = Cpu::new(Bus::new(bytes).unwrap(), crate::XIP);
-        b.blocks.enabled = false;
+        let mut a = Cpu::new(Bus::new(bytes.clone()).unwrap(), crate::XIP);
+        a.set_block_cache(true);
+        let b = Cpu::new(Bus::new(bytes).unwrap(), crate::XIP);
         (a, b)
     }
     #[test]
@@ -1393,8 +1403,8 @@ mod jit_tests {
                 .flat_map(u16::to_le_bytes)
                 .collect();
                 let mut a = Cpu::new(Bus::new(bytes.clone()).unwrap(), crate::XIP);
+                a.set_block_cache(true);
                 let mut b = Cpu::new(Bus::new(bytes).unwrap(), crate::XIP);
-                b.blocks.enabled = false;
                 for _ in 0..64 {
                     a.pc = crate::XIP;
                     a.step().unwrap();
@@ -1423,6 +1433,7 @@ mod jit_tests {
     #[test]
     fn hot_native_code_revalidates_sram_operands_and_flash_permissions() {
         let mut c = Cpu::new(Bus::new(vec![0xc0, 0x20, 0, 0]).unwrap(), crate::XIP);
+        c.set_block_cache(true);
         for _ in 0..64 {
             c.pc = crate::XIP;
             c.step().unwrap();
