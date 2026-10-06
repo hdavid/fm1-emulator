@@ -2078,3 +2078,22 @@ fn float_min_max_and_comparison_flags_match_the_fm1_986_capture() {
         assert_eq!(c.sr[5], 0xabc00000 | flags);
     }
 }
+
+#[test]
+fn corex2_cycle_counter_counts_issued_cycles_once_dbg_con_enables_it() {
+    // Vendor csfr.h C0_TL_CKCNTL 0x1eee218, DBG_CON 0x1eee344 (cpu_effic_init
+    // sets bits 0-2). X0X 0.9 reads TL_CKCNTL at boot and expects it frozen
+    // until enabled (measured on a physical FM-1 with DBG_CON 0).
+    let mut c = cpu(&[0; 4096]);
+    for _ in 0..100 {
+        c.step().unwrap();
+    }
+    assert_eq!(c.bus.read(0x1eee218, 4).unwrap(), 0);
+    c.bus.write(0x1eee344, 7, 4).unwrap();
+    assert_eq!(c.bus.read(0x1eee344, 4).unwrap(), 7);
+    for _ in 0..1000 {
+        c.step().unwrap();
+    }
+    assert_eq!(c.bus.read(0x1eee218, 4).unwrap(), 1000);
+    assert_eq!(c.bus.read(0x1eee238, 4).unwrap(), 0, "core 1 not enabled");
+}

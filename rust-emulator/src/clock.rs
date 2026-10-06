@@ -11,6 +11,8 @@ pub(crate) struct Clock {
     /// Instructions per second of guest time when set, instead of the
     /// firmware's system clock (an opt-in for real-time playback).
     pub(crate) issue_override: Option<u32>,
+    /// CPU clock cycles issued: one per instruction step of shared time.
+    cycles: u64,
 }
 impl Default for Clock {
     fn default() -> Self {
@@ -22,6 +24,7 @@ impl Default for Clock {
             phase_hz: 360_000_000,
             issue_clock: None,
             issue_override: None,
+            cycles: 0,
         }
     }
 }
@@ -73,6 +76,7 @@ impl Clock {
     /// calls of `instruction_ticks`, summed.
     pub(crate) fn issue(&mut self, clk_con3: u32, count: u64) -> u64 {
         let hz = self.issue_hz(clk_con3) as u64;
+        self.cycles += count;
         let phase = self.instruction_phase + count * 24_000_000;
         self.instruction_phase = phase % hz;
         phase / hz
@@ -85,7 +89,11 @@ impl Clock {
             .checked_sub(self.instruction_phase + 1)
             .map_or(0, |room| room / 24_000_000)
     }
+    pub(crate) fn cycles(&self) -> u64 {
+        self.cycles
+    }
     pub(crate) fn instruction_ticks(&mut self, clk_con3: u32) -> u32 {
+        self.cycles += 1;
         let hz = self.issue_hz(clk_con3);
         // One nominal CPU issue per step. Latencies/cache stalls are not
         // cycle accurate; an instruction is no longer one full OSC cycle.

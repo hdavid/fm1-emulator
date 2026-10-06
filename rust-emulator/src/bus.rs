@@ -126,6 +126,7 @@ pub struct Bus {
     pub(crate) mmio_counting: bool,
     /// PC of the instruction executing, kept while counting MMIO accesses.
     pub(crate) pc_hint: std::cell::Cell<u32>,
+    perf: crate::perf::Perf,
 }
 
 /// MMIO reads and writes per (address, PC of the accessing instruction).
@@ -205,6 +206,7 @@ impl Bus {
             mmio_stats: Default::default(),
             mmio_counting: false,
             pc_hint: Default::default(),
+            perf: Default::default(),
         };
         bus.clocks = bus.select_clocks();
         Ok(bus)
@@ -401,6 +403,11 @@ impl Bus {
             if let Some(value) = self.nor.read(address) {
                 return Ok(value);
             }
+            if size == 4 {
+                if let Some(value) = self.perf.read(address, self.clock.cycles()) {
+                    return Ok(value);
+                }
+            }
             if let Some(value) = self.guards.read(address) {
                 return Ok(value);
             }
@@ -544,6 +551,17 @@ impl Bus {
             .map_err(|reason| Self::fault(address, size, "write", reason))?;
         if self.cache.write(address, size, value).is_some() {
             return Ok(());
+        }
+        if size == 4
+            && self
+                .perf
+                .write(address, value, self.clock.cycles())
+                .is_some()
+        {
+            return Ok(());
+        }
+        if address == crate::perf::DBG_CON {
+            self.perf.control(value, self.clock.cycles());
         }
         if let Some(result) = self.guards.write(address, value) {
             return result.map_err(|reason| Self::fault(address, size, "write", reason));
