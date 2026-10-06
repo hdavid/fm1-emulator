@@ -5,8 +5,13 @@
 // PRESETS KNOB1..KNOB4), hold:ID,ID.. / release (matrix key ids, notes 14..40,
 // as fm1-ui's KEYMAP), level:SECONDS (run and print the audio level),
 // wav:SECONDS:PATH (record the guest output), png:PATH, words:ADDRESS:N
-// (N words, decimal), halves:ADDRESS:N (non-zero words per DMA half).
-// FM1_CPU_MHZ=N sets the instruction clock (default: the firmware's).
+// (N words, decimal), halves:ADDRESS:N (non-zero words per DMA half),
+// cores (instructions per core), click:KNOB:N (N settled detents), align (to
+// the next audio DMA half: pins a following hold or release to the same
+// audio block at any render cost).
+// FM1_CPU_MHZ=N sets the instruction clock (default: the firmware's);
+// FM1_NESTED_IRQ=1 lets interrupts nest (USB audio builds); FM1_IDLE_SKIP=0
+// steps every halted slot instead of skipping to the next device event.
 // FM1_HOT=N profiles the primary core: hot:on / hot:off start and
 // pause counting (without them, every step is counted), hot:print reports and
 // clears; peek:SYMBOL:WORDS prints WORDS 32-bit words at an ELF symbol; the report (top N functions, their hot address ranges) uses the
@@ -151,6 +156,8 @@ fn main() -> Result<(), String> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(40);
     let mut player = Player::boot(Path::new(firmware), trace)?;
+    player.cpu.nested_irqs = env::var("FM1_NESTED_IRQ").is_ok_and(|v| v == "1");
+    player.cpu.idle_skip = env::var("FM1_IDLE_SKIP").map_or(true, |v| v != "0");
     // Optional: FM1_CPU_MHZ=N issues one instruction per N MHz of guest time.
     if let Ok(mhz) = env::var("FM1_CPU_MHZ") {
         let mhz: u32 = mhz.parse().map_err(|_| "invalid FM1_CPU_MHZ")?;
@@ -202,6 +209,47 @@ fn main() -> Result<(), String> {
                 Ok(())
             }
             ["wav", s, path] => record(&mut player, seconds(step, s)?, path),
+            ["click", name, clicks] => {
+                // One detent at a time, each settled (as preset_sweep): a
+                // multi-detent turn can skip or add steps in the firmware.
+                let clicks: i32 = clicks.parse().map_err(|_| format!("bad {step}"))?;
+                let id = knob(name)?;
+                (0..clicks.abs()).try_for_each(|_| {
+                    player.encoders.turn(id, clicks.signum());
+                    player.settle_encoders(1.0)?;
+                    player.run_seconds(0.3)
+                })
+            }
+            ["align"] => {
+                // Run to the next audio DMA half boundary (the start of the
+                // audio ISR's burst). A key held or released here completes
+                // its debounce 2-4 ms (press) or 8-10 ms (release) later, in
+                // the gap between two bursts at any CPU load: the note lands
+                // on the same audio block whatever the render costs.
+                let start = player.cpu.bus.audio.halves;
+                let mut waited = 0u64;
+                while player.cpu.bus.audio.halves == start {
+                    player.run(64)?;
+                    waited += 64;
+                    if waited > 1_000_000_000 {
+                        return Err("align: the audio DMA is not running".into());
+                    }
+                }
+                Ok(())
+            }
+            ["cores"] => {
+                // Instructions per core and guest time so far.
+                let c = &player.cpu;
+                println!(
+                    "  cores: {} instructions (CPU0 {}, CPU1 {}), {} ticks of guest time; secondary pc {:?}",
+                    c.steps,
+                    c.core_steps[0],
+                    c.core_steps[1],
+                    c.bus.oscillator_ticks(),
+                    c.secondary_pc().map(|pc| format!("0x{pc:08x}"))
+                );
+                Ok(())
+            }
             ["words", base, words] => {
                 // 32-bit words of guest memory (decimal), e.g. a firmware's counters.
                 let base = u32::from_str_radix(base.trim_start_matches("0x"), 16)
