@@ -12,7 +12,7 @@ pub const OSC_TICKS_PER_INSTRUCTION: u32 = 1;
 
 // Core TTMR: WL82 csfr.h/hwi.h; stock code acknowledges with bit 6 and
 // enables with bit 0. Its clock follows the guest's system-clock selection.
-#[derive(Default)]
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct TickTimer {
     control: u8,
     counter: u32,
@@ -57,6 +57,27 @@ impl TickTimer {
         }
         self.counter = (next % period) as u32;
     }
+    /// Oscillator ticks at `hz` until `advance` first sets `pending`: until
+    /// then every advance only counts, so a span of fewer ticks advanced at
+    /// once equals the same ticks advanced one by one. None: no event (off,
+    /// already pending, or no clock).
+    fn ticks_to_event(&self, hz: u32) -> Option<u64> {
+        if self.control & 1 == 0 || self.pending || hz == 0 {
+            return None;
+        }
+        let period = self.period as u64 + 1;
+        let counter = self.counter as u64;
+        if counter >= period {
+            return Some(1);
+        }
+        let needed = (period - counter) * 24_000_000;
+        Some(
+            needed
+                .saturating_sub(self.clock_phase)
+                .div_ceil(hz as u64)
+                .max(1),
+        )
+    }
 }
 
 // WL82.h/hwi.h: low-speed RC measurement, IRQ 44. Stock measures 32 or 64
@@ -70,21 +91,26 @@ struct RcMeasurement {
     pending: bool,
 }
 
-// WL82 RAND R64L/R64H. Deterministic emulator noise advances with device
-// time; paired reads share a single 64-bit value until the next advance.
-struct Random(u64);
-impl Default for Random {
-    fn default() -> Self {
-        Self(0x9e3779b97f4a7c15)
-    }
+// WL82 RAND R64L/R64H. Deterministic emulator noise that changes with
+// device time: a hash of the oscillator ticks elapsed, so reads see the same
+// words whether device time advanced tick by tick or in one span. Paired
+// reads within one oscillator tick share a single 64-bit value.
+#[derive(Default)]
+struct Random {
+    ticks: u64,
 }
 impl Random {
     fn advance(&mut self, ticks: u32) {
-        if ticks != 0 {
-            self.0 ^= self.0 << 13;
-            self.0 ^= self.0 >> 7;
-            self.0 ^= self.0 << 17;
-        }
+        self.ticks += ticks as u64;
+    }
+    /// The 64-bit value `elapsed` ticks after the last advance (SplitMix64).
+    fn value(&self, elapsed: u64) -> u64 {
+        let mut z = (self.ticks + elapsed)
+            .wrapping_add(1)
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
     }
 }
 impl RcMeasurement {
@@ -111,6 +137,13 @@ impl RcMeasurement {
         self.control = (value & 3) as u8;
         Some(Ok(()))
     }
+    fn ticks_to_event(&self) -> Option<u64> {
+        if self.control & 1 == 0 || self.pending {
+            return None;
+        }
+        let period = (32u64 << ((self.control >> 1) & 1)) * (24_000_000 / 32_000);
+        Some(period.saturating_sub(self.elapsed as u64).max(1))
+    }
     fn advance(&mut self, ticks: u32) {
         if self.control & 1 == 0 || self.pending {
             return;
@@ -126,7 +159,7 @@ impl RcMeasurement {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct Timer {
     control: u32,
     counter: u32,
@@ -173,6 +206,41 @@ impl Timer {
 
     pub fn advance(&mut self, oscillator_ticks: u32) {
         self.advance_with_clock(oscillator_ticks, 60_000_000);
+    }
+
+    /// Oscillator ticks until `advance_with_clock` first sets `pending`
+    /// (see `TickTimer::ticks_to_event`).
+    fn ticks_to_event(&self, peripheral_hz: u32) -> Option<u64> {
+        if self.control & 3 != 1 || self.pending {
+            return None;
+        }
+        let prescaler = [
+            1u64, 4, 16, 64, 2, 8, 32, 128, 256, 1024, 4096, 16384, 512, 2048, 8192, 32768,
+        ][((self.control >> 4) & 15) as usize];
+        let hz = if self.control & 12 == 8 {
+            24_000_000
+        } else {
+            peripheral_hz
+        };
+        if hz == 0 {
+            return None;
+        }
+        let period = if self.period == u32::MAX {
+            1u64 << 32
+        } else {
+            self.period.max(1) as u64
+        };
+        let counter = self.counter as u64;
+        if counter >= period {
+            return Some(1);
+        }
+        let needed = (period - counter) * 24_000_000 * prescaler;
+        Some(
+            needed
+                .saturating_sub(self.divider_phase)
+                .div_ceil(hz as u64)
+                .max(1),
+        )
     }
 
     fn advance_with_clock(&mut self, oscillator_ticks: u32, peripheral_hz: u32) {
@@ -255,7 +323,7 @@ impl Devices {
         } else if (0x13600..0x13608).contains(&a) {
             self.rc_measurement.read(a - 0x13600)
         } else if matches!(a, 0x13b00 | 0x13b04) {
-            Some((self.random.0 >> if a & 4 == 0 { 0 } else { 32 }) as u32)
+            Some((self.random.value(0) >> if a & 4 == 0 { 0 } else { 32 }) as u32)
         } else if (IRQ_CONFIG..IRQ_CONFIG + 128).contains(&a) {
             Some(self.irq_config[core][((a - IRQ_CONFIG) / 4) as usize])
         } else if matches!(a, 0x1eef1a0 | 0x1eef1a4) {
@@ -362,6 +430,80 @@ impl Devices {
     }
     pub fn advance(&mut self, ticks: u32) {
         self.advance_with_timer_clock(ticks, 60_000_000);
+    }
+    /// A register read `elapsed` oscillator ticks after the last advance,
+    /// with no device event in between: counters are what that many more
+    /// ticks at these clocks give.
+    pub(crate) fn read_at(
+        &self,
+        address: u32,
+        size: usize,
+        elapsed: u64,
+        peripheral_hz: u32,
+        core_hz: u32,
+    ) -> Option<Result<u32, &'static str>> {
+        if elapsed == 0 {
+            return self.read(address, size);
+        }
+        let ticks = u32::try_from(elapsed).expect("device spans are bounded");
+        let (core, a) = Self::bank(address);
+        let value = if (0x10400..0x10800).contains(&a) {
+            let mut timer = self.startup_timers[((a - 0x10400) / 256) as usize].clone();
+            timer.advance_with_clock(ticks, peripheral_hz);
+            timer.read(a & 255)
+        } else if (TIMER4..TIMER4 + 12).contains(&a) {
+            let mut timer = self.timer4.clone();
+            timer.advance_with_clock(ticks, peripheral_hz);
+            timer.read(a - TIMER4)
+        } else if (TIMER5..TIMER5 + 12).contains(&a) {
+            let mut timer = self.timer5.clone();
+            timer.advance_with_clock(ticks, peripheral_hz);
+            timer.read(a - TIMER5)
+        } else if (TICK_TIMER..TICK_TIMER + 12).contains(&a) {
+            let mut tick = if core == 0 {
+                self.tick.clone()
+            } else {
+                self.tick_secondary.clone()
+            };
+            tick.advance(ticks, core_hz);
+            tick.read(a - TICK_TIMER)
+        } else if matches!(a, 0x13b00 | 0x13b04) {
+            Some((self.random.value(elapsed) >> if a & 4 == 0 { 0 } else { 32 }) as u32)
+        } else {
+            return self.read(address, size);
+        }?;
+        Some(if size == 4 || (a == TICK_TIMER && size == 1) {
+            Ok(value)
+        } else {
+            Err("device registers require word accesses")
+        })
+    }
+    /// Oscillator ticks until the next tick at which advancing does more
+    /// than count (an interrupt source sets, a conversion or transfer ends),
+    /// at these clocks; None when nothing is scheduled.
+    pub(crate) fn ticks_to_event(
+        &self,
+        peripheral_hz: u32,
+        core_hz: u32,
+        uart_hz: u32,
+    ) -> Option<u64> {
+        [
+            self.adc.ticks_to_event(),
+            self.timer4.ticks_to_event(peripheral_hz),
+            self.timer5.ticks_to_event(peripheral_hz),
+            self.tick.ticks_to_event(core_hz),
+            self.tick_secondary.ticks_to_event(core_hz),
+            self.rc_measurement.ticks_to_event(),
+            self.uart.ticks_to_event(uart_hz),
+        ]
+        .into_iter()
+        .chain(
+            self.startup_timers
+                .iter()
+                .map(|timer| timer.ticks_to_event(peripheral_hz)),
+        )
+        .flatten()
+        .min()
     }
     pub(crate) fn write_uart(
         &mut self,
@@ -521,6 +663,115 @@ mod tests {
             t.advance_with_clock(1, 60_000_000);
             assert_eq!(t.read(4), Some(0));
             assert!(t.pending);
+        }
+    }
+
+    struct XorShift(u64);
+    impl XorShift {
+        fn below(&mut self, bound: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % bound
+        }
+    }
+
+    /// Ticks before `ticks_to_event` only count: one advance over them
+    /// equals single ticks, and the event tick is the first that sets
+    /// pending (or a conservative single tick).
+    #[test]
+    fn timer_spans_match_single_ticks_up_to_the_event() {
+        let mut rng = XorShift(0x2545_f491_4f6c_dd1d);
+        for _ in 0..4000 {
+            let period = match rng.below(8) {
+                0 => 0,
+                1 => u32::MAX,
+                _ => rng.below(3000) as u32,
+            };
+            let hz = [24_000_000, 60_000_000, 45_000_000, 7_000_000][rng.below(4) as usize];
+            let source = if rng.below(2) == 0 { 0 } else { 8 };
+            let mut timer = Timer {
+                control: 1 | source | (rng.below(3) as u32) << 4,
+                counter: rng.below(period as u64 + 40) as u32,
+                period,
+                ..Timer::default()
+            };
+            if period == u32::MAX {
+                timer.counter = u32::MAX - rng.below(5000) as u32;
+            }
+            timer.advance_with_clock(rng.below(7) as u32, hz);
+            timer.pending = false;
+            let Some(events) = timer.ticks_to_event(hz) else {
+                panic!("{timer:?} has no event");
+            };
+            let events = events.min(20_000);
+            let mut single = timer.clone();
+            for _ in 1..events {
+                single.advance_with_clock(1, hz);
+                assert!(!single.pending, "{timer:?} wrapped before {events}");
+            }
+            let mut spanned = timer.clone();
+            if events > 1 {
+                spanned.advance_with_clock((events - 1) as u32, hz);
+            }
+            assert_eq!(spanned, single, "{timer:?}");
+        }
+    }
+
+    #[test]
+    fn tick_timer_spans_match_single_ticks_up_to_the_event() {
+        let mut rng = XorShift(0x9e37_79b9_7f4a_7c15);
+        for _ in 0..4000 {
+            let period = rng.below(5000) as u32;
+            let hz = [360_000_000, 192_000_000, 24_000_000, 5_000_000][rng.below(4) as usize];
+            let mut timer = TickTimer {
+                control: 1,
+                counter: rng.below(period as u64 + 40) as u32,
+                period,
+                ..TickTimer::default()
+            };
+            timer.advance(rng.below(3) as u32, hz);
+            timer.pending = false;
+            let events = timer.ticks_to_event(hz).unwrap();
+            let mut single = timer.clone();
+            for _ in 1..events {
+                single.advance(1, hz);
+                assert!(!single.pending, "{timer:?} wrapped before {events}");
+            }
+            let mut spanned = timer.clone();
+            if events > 1 {
+                spanned.advance((events - 1) as u32, hz);
+            }
+            assert_eq!(spanned, single, "{timer:?}");
+            single.advance(1, hz);
+            assert!(
+                single.pending || events == 1,
+                "{timer:?} no wrap at {events}"
+            );
+        }
+    }
+
+    #[test]
+    fn reads_between_events_see_the_counters_of_single_ticks() {
+        let mut lazy = Devices::default();
+        lazy.write(TIMER5 + 8, 1000, 4).unwrap().unwrap();
+        lazy.write(TIMER5, 1, 4).unwrap().unwrap();
+        lazy.write(TICK_TIMER + 8, 100_000, 4).unwrap().unwrap();
+        lazy.write(TICK_TIMER, 1, 4).unwrap().unwrap();
+        let mut eager = Devices::default();
+        eager.write(TIMER5 + 8, 1000, 4).unwrap().unwrap();
+        eager.write(TIMER5, 1, 4).unwrap().unwrap();
+        eager.write(TICK_TIMER + 8, 100_000, 4).unwrap().unwrap();
+        eager.write(TICK_TIMER, 1, 4).unwrap().unwrap();
+        for elapsed in 1..300u64 {
+            eager.advance_with_clocks(1, 60_000_000, 320_000_000);
+            for address in [TIMER5 + 4, TICK_TIMER + 4, 0x13b00, 0x13b04] {
+                assert_eq!(
+                    lazy.read_at(address, 4, elapsed, 60_000_000, 320_000_000),
+                    eager.read(address, 4),
+                    "{address:x} after {elapsed}"
+                );
+            }
         }
     }
 }

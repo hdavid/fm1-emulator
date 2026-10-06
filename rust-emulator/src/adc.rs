@@ -96,6 +96,11 @@ impl Adc {
         Some(Ok(()))
     }
 
+    /// Oscillator ticks until a conversion in progress completes.
+    pub(crate) fn ticks_to_event(&self) -> Option<u64> {
+        (self.remaining != 0).then_some(self.remaining as u64)
+    }
+
     pub fn advance(&mut self, ticks: u32) {
         if self.remaining == 0 {
             return;

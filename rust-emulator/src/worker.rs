@@ -174,11 +174,10 @@ impl Machine {
         // Encoder phases advance with the guest's own matrix scans.
         self.encoders.drive(&mut cpu.bus.devices.gpio);
         // Poll commands between small batches, independently of repaint rate.
-        for _ in 0..1024 {
-            if let Err(error) = cpu.step() {
-                self.fault = Some(error.to_string());
-                break;
-            }
+        // Halted spans are skipped (Cpu::run_steps): idle firmware costs
+        // little host time.
+        if let Err(error) = cpu.run_steps(1024) {
+            self.fault = Some(error.to_string());
         }
         if let Some(audio) = &self.audio {
             audio.push(cpu.bus.audio.samples.drain(..));
@@ -275,7 +274,7 @@ impl Worker {
                     }
                     if pending_serial
                         .as_ref()
-                        .is_some_and(|bytes| cpu.bus.usb.receive_serial(bytes))
+                        .is_some_and(|bytes| cpu.bus.receive_serial(bytes))
                     {
                         pending_serial = None;
                     }

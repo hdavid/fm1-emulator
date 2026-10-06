@@ -3,6 +3,10 @@ use std::collections::BTreeMap;
 #[derive(Default)]
 pub struct Guards {
     registers: BTreeMap<u32, u32>,
+    /// Copies of the protection enable register (0x1eee348) and the three
+    /// (end, start) limit pairs, which every guest write consults.
+    enabled: u32,
+    limits: [(u32, u32); 3],
 }
 impl Guards {
     fn known(a: u32) -> bool {
@@ -58,6 +62,11 @@ impl Guards {
                 self.registers.insert(a, v);
             }
         }
+        self.enabled = self.value(0x1eee348);
+        self.limits = std::array::from_fn(|n| {
+            let n = n as u32;
+            (self.value(0x1eee280 + n * 4), self.value(0x1eee2c0 + n * 4))
+        });
         Some(Ok(()))
     }
     /// EMU_CON of a core's q32DSP bank (vendor csfr.h: core 1 is 0x200 up).
@@ -69,12 +78,15 @@ impl Guards {
         let a = 0x1eef0d4 + 0x200 * core as u32;
         self.registers.insert(a, self.value(a) | bits);
     }
+    #[inline]
     pub fn check_write(&self, a: u32, size: usize) -> Result<(), &'static str> {
-        for n in 0..3 {
-            if self.value(0x1eee348) & (1 << n) != 0
-                && a <= self.value(0x1eee280 + n * 4)
-                && a as u64 + size as u64 > self.value(0x1eee2c0 + n * 4) as u64
-            {
+        // Runs on every guest write: consult the cached register copies.
+        let enabled = self.enabled;
+        if enabled & 7 == 0 {
+            return Ok(());
+        }
+        for (n, &(end, start)) in self.limits.iter().enumerate() {
+            if enabled & (1 << n) != 0 && a <= end && a as u64 + size as u64 > start as u64 {
                 return Err("CPU write protection violation");
             }
         }

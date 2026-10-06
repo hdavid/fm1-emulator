@@ -17,6 +17,17 @@ pub struct Nor {
     write_enabled: bool,
     busy_ticks: u32,
     pending: Option<Pending>,
+    /// Counts completed programs and erases (flash contents changed).
+    generation: u64,
+}
+
+/// Everything an XIP read depends on besides the address: when it is
+/// unchanged, so is what every XIP address reads.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct XipKey {
+    registers: [u32; 6],
+    busy: bool,
+    generation: u64,
 }
 
 impl Default for Nor {
@@ -32,6 +43,7 @@ impl Default for Nor {
             write_enabled: false,
             busy_ticks: 0,
             pending: None,
+            generation: 0,
         }
     }
 }
@@ -43,18 +55,50 @@ impl Nor {
         crate::package::sfc(&mut decoded, key);
         self.decoded = Some(decoded);
         self.key = key;
+        self.generation += 1;
         self.regs[..3].copy_from_slice(&[0x809803b5, 1, 0x8e17]);
     }
     pub fn packaged(&self) -> bool {
         self.decoded.is_some()
     }
+    pub(crate) fn xip_key(&self) -> XipKey {
+        let r = &self.regs;
+        XipKey {
+            registers: [r[0] & 1, r[3], r[4], r[6], r[7], r[10] & 32],
+            busy: self.busy_ticks != 0,
+            generation: self.generation,
+        }
+    }
+    /// Whether an aligned access of up to 4 bytes is either wholly inside
+    /// or wholly outside the plain (unencrypted) window, wherever it is.
+    pub(crate) fn plain_window_aligned(&self) -> bool {
+        self.regs[4] & 2 == 0 || (self.regs[7].is_multiple_of(4) && self.regs[6] % 4 == 3)
+    }
     pub fn xip_active(&self) -> bool {
-        self.read(0x40200).unwrap() & 1 != 0 && self.read(0x5101c).unwrap() & 32 != 0
+        // SFC CON (0x40200) enable and IOMAP CON0 (0x5101c) flash routing.
+        self.regs[0] & 1 != 0 && self.regs[10] & 32 != 0
     }
 
+    /// Little-endian value of 1, 2 or 4 bytes (any other size: 0..4 bytes).
+    #[inline(always)]
+    fn value(bytes: &[u8]) -> u32 {
+        match *bytes {
+            [a, b, c, d] => u32::from_le_bytes([a, b, c, d]),
+            [a, b] => u16::from_le_bytes([a, b]) as u32,
+            [a] => a as u32,
+            _ => bytes
+                .iter()
+                .enumerate()
+                .fold(0, |value, (i, byte)| value | ((*byte as u32) << (i * 8))),
+        }
+    }
+
+    #[inline]
     pub fn xip(&self, address: u32, size: usize) -> Option<Result<u32, &'static str>> {
-        // The SFC maps flash offset 0x4000 at CPU address 0x02000000.
-        let offset = address.checked_sub(0x0200_0000)? as usize + self.read(0x4020c)? as usize;
+        // The SFC maps flash offset 0x4000 (SFC BASE, 0x4020c) at CPU
+        // address 0x02000000. Registers are read from `regs` directly: see
+        // `register_index` for their addresses.
+        let offset = address.checked_sub(0x0200_0000)? as usize + self.regs[3] as usize;
         let bytes = self.bytes.get(offset..offset.checked_add(size)?)?;
         if self.busy_ticks != 0 {
             return Some(Err("XIP unavailable while SPI NOR is busy"));
@@ -64,11 +108,12 @@ impl Nor {
                 "XIP unavailable while SFC or flash pin routing is disabled",
             ));
         }
-        let control = self.read(0x40300).unwrap();
+        // ENC CON (0x40300); the plain window is 0x4030c..=0x40308.
+        let control = self.regs[4];
         let plain = control & 1 == 0
             || (control & 2 != 0
-                && address >= self.read(0x4030c).unwrap()
-                && address.checked_add(size as u32 - 1)? <= self.read(0x40308).unwrap());
+                && address >= self.regs[7]
+                && address.checked_add(size as u32 - 1)? <= self.regs[6]);
         if !plain {
             if let Some(decoded) = &self.decoded {
                 if offset < 0x4000 {
@@ -76,20 +121,16 @@ impl Nor {
                         "encrypted XIP below application area is not implemented",
                     ));
                 }
-                let bytes = &decoded[offset - 0x4000..offset - 0x4000 + size];
-                return Some(Ok(bytes
-                    .iter()
-                    .enumerate()
-                    .fold(0, |value, (i, byte)| value | ((*byte as u32) << (i * 8)))));
+                return Some(Ok(Self::value(
+                    &decoded[offset - 0x4000..offset - 0x4000 + size],
+                )));
             } else {
                 return Some(Err(
                     "encrypted XIP outside the supplied application is not available",
                 ));
             }
         }
-        Some(Ok(bytes.iter().enumerate().fold(0, |value, (i, byte)| {
-            value | ((*byte as u32) << (i * 8))
-        })))
+        Some(Ok(Self::value(bytes)))
     }
 
     pub fn read(&self, a: u32) -> Option<u32> {
@@ -145,6 +186,13 @@ impl Nor {
         }
     }
 
+    /// Oscillator ticks until a program or erase in progress completes.
+    pub(crate) fn ticks_to_event(&self) -> Option<u64> {
+        self.pending
+            .is_some()
+            .then(|| (self.busy_ticks as u64).max(1))
+    }
+
     pub(crate) fn advance(&mut self, ticks: u32) {
         self.busy_ticks = self.busy_ticks.saturating_sub(ticks);
         if self.busy_ticks != 0 {
@@ -167,6 +215,7 @@ impl Nor {
             None => return,
         };
         self.write_enabled = false;
+        self.generation += 1;
         if let Some(decoded) = &mut self.decoded {
             let start = start.max(0x4000);
             if start < end {

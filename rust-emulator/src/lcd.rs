@@ -6,7 +6,7 @@ pub const IOMAP: u32 = 0x51020;
 pub const WIDTH: usize = 240;
 pub const HEIGHT: usize = 240;
 pub(crate) const IRQ: usize = 16;
-const GRAM_HEIGHT: usize = 320;
+pub const GRAM_HEIGHT: usize = 320;
 
 pub struct Lcd {
     pub pixels: Vec<u32>,
@@ -65,6 +65,12 @@ impl Lcd {
         } else {
             None
         }
+    }
+
+    /// The panel's whole frame memory (WIDTH x GRAM_HEIGHT, 0xRRGGBB),
+    /// including the rows below the visible 240 (diagnostics).
+    pub fn frame_memory(&self) -> &[u32] {
+        &self.gram
     }
 
     pub fn dma_address(&self) -> u32 {
