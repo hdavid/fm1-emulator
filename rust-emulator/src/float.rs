@@ -28,18 +28,12 @@ pub(crate) fn result(x: u32, registers: &[u32; 16]) -> Result<Option<FloatResult
             8 => (registers[c] as i32 as f32).to_bits(),
             9 => (registers[c] as f32).to_bits(),
             0..=7 => {
+                // Out-of-range and NaN inputs saturate (NaN gives 0), as Rust's
+                // casts do. X0X's ftou of a negative value (disc() drawing) runs
+                // on FM-1 hardware without a fault; the exact value hardware
+                // returns there is not measured.
                 let v = round(b) as f64;
-                let signed = s < 4;
-                if !v.is_finite()
-                    || if signed {
-                        !(-2147483648.0..2147483648.0).contains(&v)
-                    } else {
-                        !(0.0..4294967296.0).contains(&v)
-                    }
-                {
-                    return Err("exceptional floating-point conversion is not implemented");
-                }
-                if signed {
+                if s < 4 {
                     v as i32 as u32
                 } else {
                     v as u32
@@ -142,4 +136,28 @@ fn from_half(h: u16) -> Option<f32> {
         e => (1.0 + mantissa / 1024.0) * 2f32.powi(e - 15),
     };
     Some(if negative { -magnitude } else { magnitude })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::result;
+
+    fn convert(s: u32, input: f32) -> u32 {
+        // rD = r1, rC = r2, unary sub-operation s
+        let mut registers = [0u32; 16];
+        registers[2] = input.to_bits();
+        let x = 1 << 12 | 2 << 8 | s << 4 | 15;
+        result(x, &registers).unwrap().unwrap().value
+    }
+
+    #[test]
+    fn out_of_range_float_to_integer_saturates() {
+        assert_eq!(convert(5, -32.3), 0); // ftou trunc of a negative value (X0X disc())
+        assert_eq!(convert(5, 5.0e9), u32::MAX);
+        assert_eq!(convert(1, 3.0e9), i32::MAX as u32);
+        assert_eq!(convert(1, -3.0e9), i32::MIN as u32);
+        assert_eq!(convert(1, f32::NAN), 0);
+        assert_eq!(convert(5, 12.7), 12); // in range: unchanged
+        assert_eq!(convert(1, -12.7), (-12i32) as u32);
+    }
 }
