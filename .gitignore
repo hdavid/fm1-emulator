@@ -14,3 +14,4 @@ build/display/text.bin
 build/display/data.bin
 build/display/ramtext.bin
 tests/fixtures/display/*.o
+rust-emulator/state/
