@@ -218,6 +218,13 @@ impl Emulator {
                 Some(ctx.load_texture("Guest LCD", image, egui::TextureOptions::NEAREST));
         }
     }
+    /// Steps that make at least 100 ms of guest time for a click: two
+    /// issued core instructions per shared clock step at the selected clock,
+    /// or 360 MHz (the firmware's own clock is not known here). A fixed
+    /// 72 M steps held a click 0.4-0.75 s of guest time at 96 MHz.
+    fn pulse_len(&self) -> u64 {
+        u64::from(self.clock_mhz.unwrap_or(360)) * 200_000
+    }
     fn key(
         &mut self,
         ui: &mut egui::Ui,
@@ -231,7 +238,7 @@ impl Emulator {
         let down = response.is_pointer_button_down_on();
         if down || response.clicked() {
             self.pulse[id] = Instant::now() + Duration::from_millis(100);
-            self.pulse_steps[id] = self.steps + 72_000_000;
+            self.pulse_steps[id] = self.steps + self.pulse_len();
         }
         let focused = ui.input(|i| i.focused);
         let binding = match id {
@@ -243,7 +250,7 @@ impl Emulator {
         let keyboard = binding.is_some_and(|key| ui.input(|i| i.key_down(key)));
         if binding.is_some_and(|key| ui.input(|i| i.key_pressed(key))) {
             self.pulse[id] = Instant::now() + Duration::from_millis(100);
-            self.pulse_steps[id] = self.steps + 72_000_000;
+            self.pulse_steps[id] = self.steps + self.pulse_len();
         }
         if !focused {
             self.pulse[id] = Instant::now();
