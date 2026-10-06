@@ -2,7 +2,7 @@
 // Compiler-emitted forms, decoded against vendor disassembly and the pinned
 // Quarkslab pi32v2 SLEIGH reference. Unknown/reserved forms still fault.
 use crate::{
-    cpu::{signed, Cpu, Fault},
+    cpu::{signed, Cpu, Fault, Step},
     decode::{Extended, Wide},
     simd::{self, half, set_half},
 };
@@ -35,14 +35,14 @@ fn byte_offset(h: u32, x: u32) -> u32 {
 }
 
 /// Store the upper halfword of rD (the vendor's `= rD.h` stores).
-fn store_upper_half(cpu: &mut Cpu, pc: u32, address: u32, d: usize) -> Result<(), Fault> {
+fn store_upper_half(cpu: &mut Cpu, pc: u32, address: u32, d: usize) -> Step<()> {
     cpu.bus
         .write(address, cpu.r[d] >> 16, 2)
-        .map_err(|fault| Fault::Access { pc, fault })
+        .map_err(|fault| Box::new(Fault::Access { pc, fault }))
 }
 
 /// Load or store the register pair rD+1:rD, the even register at `address`.
-fn pair_access(cpu: &mut Cpu, address: u32, d: usize, store: bool) -> Result<(), Fault> {
+fn pair_access(cpu: &mut Cpu, address: u32, d: usize, store: bool) -> Step<()> {
     let reg = d & 14;
     if store {
         cpu.write(address, cpu.r[reg])?;
@@ -76,7 +76,7 @@ pub(crate) fn execute(
     h: u32,
     pc: u32,
     kind: Extended,
-) -> Result<Option<(u32, &'static str)>, Fault> {
+) -> Step<Option<(u32, &'static str)>> {
     let a = (h & 7) as usize;
     let b = ((h >> 4) & 7) as usize;
     let mut next = pc + 2;
@@ -499,7 +499,7 @@ pub(crate) fn execute(
                             .checked_div(cpu.r[c] as i32 as i64)
                             .map(|n| n as u64)
                     }
-                    .ok_or(Fault::Unsupported { pc, word: h as u16 })?;
+                    .ok_or_else(|| Box::new(Fault::Unsupported { pc, word: h as u16 }))?;
                     cpu.r[d] = quotient as u32;
                     cpu.r[d + 1] = (quotient >> 32) as u32;
                     op = "divide_wide";
@@ -540,7 +540,7 @@ pub(crate) fn execute(
                             .checked_div(cpu.r[c] as i32)
                             .map(|v| v as u32)
                     }
-                    .ok_or(Fault::Unsupported { pc, word: h as u16 })?;
+                    .ok_or_else(|| Box::new(Fault::Unsupported { pc, word: h as u16 }))?;
                     op = if x & 1 == 0 {
                         "divide_unsigned"
                     } else {
@@ -682,7 +682,7 @@ pub(crate) fn execute(
                         let lhs = f32::from_bits(lhs);
                         let rhs = f32::from_bits(value);
                         if !lhs.is_finite() || !rhs.is_finite() {
-                            return Err(Fault::Access {
+                            return Err(Box::new(Fault::Access {
                                 pc,
                                 fault: crate::bus::AccessFault {
                                     address: pc,
@@ -691,7 +691,7 @@ pub(crate) fn execute(
                                     reason:
                                         "exceptional floating-point comparison is not implemented",
                                 },
-                            });
+                            }));
                         }
                         let kind = [
                             0x81, 0x89, 0x91, 0x99, 0, 0, 0, 0, 0xc1, 0xc9, 0xd1, 0xd9, 0xe1, 0xe9,
@@ -882,7 +882,7 @@ pub(crate) fn execute(
                         let lhs = f32::from_bits(lhs);
                         let rhs = f32::from_bits(rhs);
                         if !lhs.is_finite() || !rhs.is_finite() {
-                            return Err(Fault::Access {
+                            return Err(Box::new(Fault::Access {
                                 pc,
                                 fault: crate::bus::AccessFault {
                                     address: pc,
@@ -891,7 +891,7 @@ pub(crate) fn execute(
                                     reason:
                                         "exceptional floating-point comparison is not implemented",
                                 },
-                            });
+                            }));
                         }
                         float_condition(kind, lhs, rhs)
                     } else {
@@ -1005,7 +1005,7 @@ pub(crate) fn execute(
                     let lhs = f32::from_bits(cpu.r[d]);
                     let rhs = f32::from_bits(cpu.r[n]);
                     if !lhs.is_finite() || !rhs.is_finite() {
-                        return Err(Fault::Access {
+                        return Err(Box::new(Fault::Access {
                             pc,
                             fault: crate::bus::AccessFault {
                                 address: pc,
@@ -1013,7 +1013,7 @@ pub(crate) fn execute(
                                 operation: "floating-point branch",
                                 reason: "exceptional floating-point comparison is not implemented",
                             },
-                        });
+                        }));
                     }
                     // Vendor objdump: E800 ==, E880 !=, E900 >=, E980 <, EC00 >,
                     // EC80 <=, then the measured ED00-EE80 forms.

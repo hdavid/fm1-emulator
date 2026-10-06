@@ -3,7 +3,7 @@
 // SRAM instruction nor a changed SFC mapping can execute stale prepared code.
 use crate::{
     bus::Bus,
-    cpu::{signed, Cpu, Fault},
+    cpu::{signed, Cpu, Fault, Step},
     decode::{Cache as Decode, Extended, First, Wide},
     RAM, RAM_SIZE, XIP, XIP_END,
 };
@@ -68,7 +68,7 @@ impl Instruction {
     fn ends_block(self) -> bool {
         matches!(self.op, Op::Jump(..) | Op::BranchZero(..) | Op::Fallback)
     }
-    pub(crate) fn execute(self, cpu: &mut Cpu) -> Result<&'static str, Fault> {
+    pub(crate) fn execute(self, cpu: &mut Cpu) -> Step<&'static str> {
         let mut next = self.pc.wrapping_add(self.length as u32);
         match self.op {
             Op::Move(d, v) => d.set(cpu, v.get(cpu)),
