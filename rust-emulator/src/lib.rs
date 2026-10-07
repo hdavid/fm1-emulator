@@ -14,6 +14,7 @@ pub mod lcd;
 mod package;
 mod perf;
 mod shift_spi;
+mod simd;
 mod uart;
 mod wireless;
 

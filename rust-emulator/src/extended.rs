@@ -4,6 +4,7 @@
 use crate::{
     cpu::{signed, Cpu, Fault},
     decode::{Extended, Wide},
+    simd::{self, half, set_half},
 };
 pub(crate) fn packed(x: u32) -> u32 {
     match (x >> 10) & 3 {
@@ -1203,6 +1204,47 @@ pub(crate) fn execute(
                         None,
                     ));
                     op = "memory_indexed";
+                }
+                Wide::HalfAddSubtract => {
+                    let (a, b) = (half(cpu.r[s], x & 4 != 0), half(cpu.r[c], x & 2 != 0));
+                    let value = if x & 1 == 0 { a + b } else { a - b };
+                    cpu.r[d] = set_half(cpu.r[d], x & 8 != 0, value);
+                    op = if x & 1 == 0 {
+                        "half_add"
+                    } else {
+                        "half_subtract"
+                    };
+                }
+                Wide::HalfMultiply => {
+                    let (a, b) = (half(cpu.r[s], x & 4 != 0), half(cpu.r[c], x & 2 != 0));
+                    let value = simd::mul16(a, b, h & 2 != 0);
+                    cpu.r[d] = set_half(cpu.r[d], x & 8 != 0, value);
+                    op = "half_multiply";
+                }
+                Wide::HalfMultiplyWord => {
+                    let (a, b) = (half(cpu.r[s], x & 4 != 0), half(cpu.r[c], x & 2 != 0));
+                    cpu.r[d] = simd::mul32(a, b, h & 2 != 0);
+                    op = "half_multiply_word";
+                }
+                Wide::Pack => {
+                    let (a, b) = (half(cpu.r[s], x & 4 != 0), half(cpu.r[c], x & 2 != 0));
+                    cpu.r[d] = simd::join(a, b);
+                    op = "pack";
+                }
+                Wide::DualAddSubtract => {
+                    let (a0, a1) = simd::lanes(cpu.r[s], x & 2 != 0, x & 1 != 0);
+                    let (b0, b1) = simd::lanes(cpu.r[c], h & 8 != 0, h & 4 != 0);
+                    let first = if x & 8 == 0 { a0 + b0 } else { a0 - b0 };
+                    let second = if x & 4 == 0 { a1 + b1 } else { a1 - b1 };
+                    cpu.r[d] = simd::join(simd::sat16(first as i64), simd::sat16(second as i64));
+                    op = "dual_add_subtract";
+                }
+                Wide::DualMultiply => {
+                    let (a0, a1) = simd::lanes(cpu.r[s], x & 2 != 0, x & 1 != 0);
+                    let (b0, b1) = simd::lanes(cpu.r[c], h & 8 != 0, h & 4 != 0);
+                    let x2 = h & 2 != 0;
+                    cpu.r[d] = simd::join(simd::mul16(a0, b0, x2), simd::mul16(a1, b1, x2));
+                    op = "dual_multiply";
                 }
                 Wide::Unknown => return Ok(None),
             }
