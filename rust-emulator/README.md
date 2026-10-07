@@ -108,8 +108,12 @@ slow guest scan can observe and debounce them.
 Every button also has a computer key, held for as long as the key is down, so
 layer chords (SAVE + note, FX + knob, the "press again" confirmations) need no
 mouse; each button's tooltip names its key. The first thirteen notes are
-`A W S E D R F G T H Y J K` (a piano row); the buttons use letters those and
-the knob keys leave free:
+`A W S E D R F G T H Y J K` (a piano row); hold **Shift** with the same keys
+for the next thirteen, one octave up (`Shift+A` is Note 66; the tooltip names
+the combo). The octave is chosen when the key goes down and kept until it is
+released, so letting go of Shift first never leaves a key stuck. The topmost
+(27th) key has no computer key. The buttons use letters those and the knob
+keys leave free:
 
 | Button | Key | Button | Key | Button | Key |
 |---|---|---|---|---|---|
@@ -119,8 +123,9 @@ the knob keys leave free:
 | REC | `C` | LFO | `L` | SEQ | `Q` |
 | | | EDIT | `I` | GLO | `O` |
 
-Modifier keys are not used: egui reports Shift/Ctrl/Alt/Cmd as state rather
-than as keys and does not tell left from right.
+Shift only selects the upper note octave; Ctrl/Alt/Cmd are not used (egui
+reports modifiers as state rather than as keys). A button letter with Shift
+held still presses its button and plays no note.
 Losing window focus releases contacts. Pause stops guest execution; Restart
 reloads the selected image and resets CPU, RAM, peripherals, and input state.
 

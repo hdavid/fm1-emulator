@@ -69,9 +69,16 @@ const BUTTON_KEYS: [egui::Key; 14] = [
 fn key_binding(id: usize) -> Option<egui::Key> {
     match id {
         0..=13 => Some(BUTTON_KEYS[id]),
-        14..=26 => Some(NOTE_KEYS[id - 14]),
+        14..=39 => Some(NOTE_KEYS[(id - 14) % NOTE_KEYS.len()]),
         _ => None,
     }
+}
+/// First matrix id of the upper octave: the same computer keys, with Shift held.
+const UPPER_NOTES: usize = 27;
+/// Whether note `id` is played with Shift held. Ids 27..=39 are the 13 bound
+/// keys one octave up; id 40 (the topmost key) has no computer key.
+fn needs_shift(id: usize) -> bool {
+    id >= UPPER_NOTES
 }
 /// A button's tooltip, ending with its computer key ("PLAY / STOP · hold to
 /// press · Space").
@@ -88,6 +95,9 @@ fn button_hint(id: usize, label: &str) -> String {
 fn note_hint(id: usize) -> String {
     let note = id - 14 + 53;
     match key_binding(id) {
+        Some(key) if needs_shift(id) => {
+            format!("Note {note} · hold to press · Shift+{}", key.name())
+        }
         Some(key) => format!("Note {note} · hold to press · {}", key.name()),
         None => format!("Note {note} · hold to press"),
     }
@@ -210,6 +220,10 @@ struct Emulator {
     pressed: [bool; 41],
     pulse: [Instant; 41],
     pulse_steps: [u64; 41],
+    /// For each note computer key, the octave it was pressed in (`true` =
+    /// Shift held at key-down) until it is released, so letting go of Shift
+    /// first releases the key that was pressed, not another one.
+    note_layer: [Option<bool>; 13],
     /// MASTER potentiometer as the ADC reads it (0..=1023).
     master: u16,
     /// Pointer angle per drawn knob (radians, 0 = up), unspent drag/scroll
@@ -266,6 +280,7 @@ impl Emulator {
             pressed: [false; 41],
             pulse: [Instant::now(); 41],
             pulse_steps: [0; 41],
+            note_layer: [None; 13],
             master: MASTER_DEFAULT,
             knob_angle: [0.; 8],
             knob_accum: [0.; 8],
@@ -583,6 +598,45 @@ impl Emulator {
     fn pulse_len(&self) -> u64 {
         u64::from(self.clock_mhz.unwrap_or(360)) * 200_000
     }
+    /// Whether the computer key bound to contact `id` holds it, and whether it
+    /// was just struck. Buttons follow their key; a note key plays the octave
+    /// chosen by Shift at key-down and keeps it until key-up.
+    fn keyboard_state(
+        &mut self,
+        ui: &egui::Ui,
+        id: usize,
+        binding: Option<egui::Key>,
+    ) -> (bool, bool) {
+        let Some(key) = binding else {
+            return (false, false);
+        };
+        if id < 14 {
+            return ui.input(|i| (i.key_down(key), i.key_pressed(key)));
+        }
+        let slot = (id - 14) % NOTE_KEYS.len();
+        let (down, struck) = ui.input(|i| {
+            let strike = i.events.iter().find_map(|event| match event {
+                egui::Event::Key {
+                    key: k,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } if *k == key => Some(modifiers.shift),
+                _ => None,
+            });
+            (i.key_down(key), strike)
+        });
+        if !down && struck.is_none() {
+            self.note_layer[slot] = None;
+        } else if let Some(shift) = struck {
+            self.note_layer[slot] = Some(shift);
+        } else if self.note_layer[slot].is_none() {
+            self.note_layer[slot] = Some(ui.input(|i| i.modifiers.shift));
+        }
+        let mine = self.note_layer[slot] == Some(needs_shift(id));
+        (mine && down, mine && struck.is_some())
+    }
     fn key(
         &mut self,
         ui: &mut egui::Ui,
@@ -600,8 +654,8 @@ impl Emulator {
         }
         let focused = ui.input(|i| i.focused);
         let binding = key_binding(id);
-        let keyboard = binding.is_some_and(|key| ui.input(|i| i.key_down(key)));
-        if binding.is_some_and(|key| ui.input(|i| i.key_pressed(key))) {
+        let (keyboard, key_hit) = self.keyboard_state(ui, id, binding);
+        if key_hit {
             self.pulse[id] = Instant::now() + Duration::from_millis(100);
             self.pulse_steps[id] = self.steps + self.pulse_len();
         }
@@ -1349,7 +1403,7 @@ mod tests {
     }
     #[test]
     fn every_button_has_its_own_key_clear_of_note_and_knob_keys() {
-        let mut keys: Vec<egui::Key> = (0..41).filter_map(key_binding).collect();
+        let mut keys: Vec<egui::Key> = (0..27).filter_map(key_binding).collect();
         assert_eq!(keys.len(), 14 + 13, "all buttons and the first 13 notes");
         keys.extend(KNOB_KEYS.iter().flat_map(|&(down, up)| [down, up]));
         let mut unique = keys.clone();
@@ -1369,6 +1423,101 @@ mod tests {
             assert!(hint.ends_with(&format!("· {}", key.name())), "{hint}");
         }
         assert_eq!(note_hint(14), "Note 53 · hold to press · A");
+    }
+    #[test]
+    fn shift_plus_a_note_key_names_every_upper_note_but_the_topmost() {
+        for id in 27..=39 {
+            let key = key_binding(id).expect("upper note has a combo");
+            assert_eq!(Some(key), key_binding(id - 13), "same key, one octave up");
+            assert!(needs_shift(id) && !needs_shift(id - 13));
+            let hint = note_hint(id);
+            assert!(hint.ends_with(&format!("· Shift+{}", key.name())), "{hint}");
+        }
+        assert_eq!(note_hint(27), "Note 66 · hold to press · Shift+A");
+        assert_eq!(key_binding(40), None, "the 27th key has no computer key");
+        assert_eq!(note_hint(40), "Note 79 · hold to press");
+        let chars: Vec<egui::Key> = (0..40).filter_map(key_binding).collect();
+        for button in 0..14 {
+            let key = key_binding(button).unwrap();
+            assert!(!NOTE_KEYS.contains(&key), "a button letter plays a note");
+        }
+        assert_eq!(chars.len(), 40, "ids 0..=39 are all bound");
+    }
+    fn key_event(key: egui::Key, pressed: bool, shift: bool) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                shift,
+                ..Default::default()
+            },
+        }
+    }
+    fn expire_all(app: &mut Emulator) {
+        app.pulse.fill(Instant::now());
+        app.pulse_steps.fill(0);
+    }
+    #[test]
+    fn shift_selects_the_octave_at_key_down_and_never_leaves_a_key_stuck() {
+        let mut app = demo();
+        let ctx = egui::Context::default();
+        let (low, high) = (14, 27); // A and Shift+A
+        draw(
+            &mut app,
+            &ctx,
+            vec![key_event(egui::Key::A, true, false)],
+            true,
+        );
+        assert!(app.pressed[low] && !app.pressed[high]);
+        draw(
+            &mut app,
+            &ctx,
+            vec![key_event(egui::Key::A, false, false)],
+            true,
+        );
+        expire_all(&mut app);
+        draw(&mut app, &ctx, vec![], true);
+        assert!(!app.pressed[low] && !app.pressed[high]);
+        draw(
+            &mut app,
+            &ctx,
+            vec![key_event(egui::Key::A, true, true)],
+            true,
+        );
+        assert!(app.pressed[high] && !app.pressed[low]);
+        // Shift is let go first: the held key stays in the octave it started in.
+        draw(&mut app, &ctx, vec![], true);
+        expire_all(&mut app);
+        draw(&mut app, &ctx, vec![], true);
+        assert!(app.pressed[high] && !app.pressed[low]);
+        draw(
+            &mut app,
+            &ctx,
+            vec![key_event(egui::Key::A, false, false)],
+            true,
+        );
+        expire_all(&mut app);
+        draw(&mut app, &ctx, vec![], true);
+        assert!(app.pressed.iter().all(|&down| !down), "nothing stuck");
+        assert!(app.note_layer.iter().all(Option::is_none));
+    }
+    #[test]
+    fn shift_with_a_button_letter_plays_no_note() {
+        let mut app = demo();
+        let ctx = egui::Context::default();
+        draw(
+            &mut app,
+            &ctx,
+            vec![key_event(egui::Key::Z, true, true)],
+            true,
+        );
+        assert!(app.pressed[9], "SAVE still follows Z");
+        assert!(
+            app.pressed[14..].iter().all(|&down| !down),
+            "no note played"
+        );
     }
     #[test]
     fn a_held_button_key_holds_the_button_through_note_taps() {
