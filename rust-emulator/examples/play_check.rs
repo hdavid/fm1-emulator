@@ -2,8 +2,9 @@
 // Headless playback script for reproducing what a user does in fm1-ui:
 //   play_check FIRMWARE STEP [STEP...]
 // Steps: run:SECONDS (guest time), turn:KNOB:DETENTS (SELECT ALGORITHM
-// PRESETS KNOB1..KNOB4), hold:ID,ID.. / release (matrix key ids, notes 14..40,
-// as fm1-ui's KEYMAP), level:SECONDS (run and print the audio level),
+// PRESETS KNOB1..KNOB4), hold:ID,ID.. (pressed, added to those held) /
+// release:ID,ID.. (those let go) / release (all let go) (matrix key ids,
+// notes 14..40, as fm1-ui's KEYMAP), level:SECONDS (run and print the audio level),
 // wav:SECONDS:PATH (record the guest output), png:PATH, words:ADDRESS:N
 // (N words, decimal), halves:ADDRESS:N (non-zero words per DMA half),
 // cores (instructions per core), click:KNOB:N (N settled detents), align (to
@@ -141,6 +142,17 @@ fn print_leds(brightness: &leds::Brightness) {
 
 fn seconds(step: &str, text: &str) -> Result<f64, String> {
     text.parse().map_err(|_| format!("bad {step}"))
+}
+
+/// hold:IDS presses the keys IDS (the others stay as they are), release:IDS
+/// lets go of them only: a key pressed twice under a held one (SAVE + a key,
+/// then that key again) needs its own release in between.
+fn set_keys(held: &mut [bool; 41], step: &str, ids: &str, down: bool) -> Result<(), String> {
+    for id in ids.split(',') {
+        let id: usize = id.parse().map_err(|_| format!("bad {step}"))?;
+        *held.get_mut(id).ok_or(format!("bad key {id}"))? = down;
+    }
+    Ok(())
 }
 
 /// Run `seconds` of guest time and write the audio DMA output to a 24-bit
@@ -290,13 +302,8 @@ fn play(player: &mut Player, firmware: &str, steps: &[String]) -> Result<(), Str
                 player.encoders.turn(knob(name)?, detents);
                 Ok(())
             }
-            ["hold", ids] => {
-                for id in ids.split(',') {
-                    let id: usize = id.parse().map_err(|_| format!("bad {step}"))?;
-                    *player.held.get_mut(id).ok_or(format!("bad key {id}"))? = true;
-                }
-                Ok(())
-            }
+            ["hold", ids] => set_keys(&mut player.held, step, ids, true),
+            ["release", ids] => set_keys(&mut player.held, step, ids, false),
             ["release"] => {
                 player.held = [false; 41];
                 Ok(())
@@ -467,4 +474,28 @@ fn play(player: &mut Player, firmware: &str, steps: &[String]) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::set_keys;
+
+    #[test]
+    fn release_with_ids_lets_go_of_those_keys_only() {
+        // SAVE (9) held, a key (21) pressed, then that key let go and pressed
+        // again with SAVE still held: two presses of 21 the guest can see.
+        let mut held = [false; 41];
+        set_keys(&mut held, "hold:9,21", "9,21", true).unwrap();
+        set_keys(&mut held, "release:21", "21", false).unwrap();
+        assert!(held[9] && !held[21]);
+        set_keys(&mut held, "hold:21", "21", true).unwrap();
+        assert!(held[9] && held[21]);
+    }
+
+    #[test]
+    fn bad_ids_are_errors() {
+        let mut held = [false; 41];
+        assert!(set_keys(&mut held, "release:41", "41", false).is_err());
+        assert!(set_keys(&mut held, "hold:x", "x", true).is_err());
+    }
 }
