@@ -114,9 +114,9 @@ fn hash_state(cpu: &Cpu) -> u64 {
     let hash = cpu.r.iter().fold(hash, |h, &v| fold(h, v));
     let hash = cpu.sr.iter().fold(hash, |h, &v| fold(h, v));
     let hash = fold(hash, cpu.irq_entries as u32);
-    (0..fm1_emu::RAM_SIZE as u32)
-        .step_by(4)
-        .fold(hash, |h, i| fold(h, cpu.bus.read(fm1_emu::RAM + i, 4).unwrap_or(0)))
+    (0..fm1_emu::RAM_SIZE as u32).step_by(4).fold(hash, |h, i| {
+        fold(h, cpu.bus.read(fm1_emu::RAM + i, 4).unwrap_or(0))
+    })
 }
 
 fn run() -> Result<(), String> {
