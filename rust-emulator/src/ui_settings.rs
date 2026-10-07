@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// The window's own settings, kept between runs of fm1-ui: for now its size.
-// They live in a short text file (`fm1-ui.toml`, a few `key = value` lines)
-// in the emulator's directory, written a second after the last change and
-// when the window closes. Headless tools never read or write it.
+// The window's own settings, kept between runs of fm1-ui: the MASTER volume,
+// the panel theme, the LEDs switch and the window size. They live in a short
+// text file (`fm1-ui.toml`, a few `key = value` lines) in the emulator's
+// directory, written a second after the last change and when the window
+// closes. Headless tools never read or write it.
 use std::{
     fs,
     io::{self, Write},
@@ -12,18 +13,37 @@ use std::{
 
 /// The settings file's name.
 pub(super) const FILE_NAME: &str = "fm1-ui.toml";
-/// Quiet time after a change before the file is written: a resize is saved
-/// once, when it settles.
+/// Quiet time after a change before the file is written: a drag or a window
+/// resize is saved once, when it settles.
 pub(super) const DEBOUNCE: Duration = Duration::from_secs(1);
 /// Window sizes outside this range (points) are not restored.
 const WINDOW_MIN: [u32; 2] = [800, 600];
 const WINDOW_MAX: u32 = 16_384;
+/// Highest MASTER reading (the ADC is 10-bit).
+const MASTER_MAX: u16 = 1023;
 
 /// What the window remembers.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct Settings {
+    /// MASTER potentiometer as the ADC reads it (0..=1023).
+    pub master: u16,
+    /// The panel theme's name; None: the default.
+    pub theme: Option<String>,
+    /// The LEDs switch.
+    pub leds: bool,
     /// The window's inner size in points; None: the default.
     pub window: Option<[u32; 2]>,
+}
+
+impl Settings {
+    pub fn new(master: u16) -> Self {
+        Self {
+            master,
+            theme: None,
+            leds: true,
+            window: None,
+        }
+    }
 }
 
 /// The settings file in the emulator's directory (the crate directory for a
@@ -55,6 +75,9 @@ pub(super) fn parse(text: &str, defaults: Settings) -> (Settings, Vec<String>) {
         };
         let (key, value) = (key.trim(), value.trim());
         let applied = match key {
+            "master" => parse_master(value).map(|master| settings.master = master),
+            "theme" => parse_string(value).map(|theme| settings.theme = Some(theme)),
+            "leds" => parse_bool(value).map(|leds| settings.leds = leds),
             "window" => parse_window(value).map(|window| settings.window = Some(window)),
             _ => Some(()),
         };
@@ -63,6 +86,23 @@ pub(super) fn parse(text: &str, defaults: Settings) -> (Settings, Vec<String>) {
         }
     }
     (settings, problems)
+}
+
+fn parse_master(value: &str) -> Option<u16> {
+    value.parse().ok().filter(|master| *master <= MASTER_MAX)
+}
+
+fn parse_string(value: &str) -> Option<String> {
+    let inner = value.strip_prefix('"')?.strip_suffix('"')?;
+    (!inner.contains(['"', '\\'])).then(|| inner.to_string())
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
 }
 
 fn parse_window(value: &str) -> Option<[u32; 2]> {
@@ -79,6 +119,15 @@ pub(super) fn format(settings: &Settings) -> String {
     let mut text = String::from(
         "# fm1-ui window settings, rewritten when they change in the window.\n# Delete this file to start from the defaults.\n",
     );
+    text.push_str(&format!("master = {}\n", settings.master));
+    if let Some(theme) = settings
+        .theme
+        .as_ref()
+        .filter(|theme| parse_string(&format!("\"{theme}\"")).is_some())
+    {
+        text.push_str(&format!("theme = \"{theme}\"\n"));
+    }
+    text.push_str(&format!("leds = {}\n", settings.leds));
     if let Some([width, height]) = settings.window {
         text.push_str(&format!("window = [{width}, {height}]\n"));
     }
@@ -196,17 +245,20 @@ mod tests {
         dir
     }
 
-    fn sized(width: u32, height: u32) -> Settings {
+    fn sample() -> Settings {
         Settings {
-            window: Some([width, height]),
+            master: 700,
+            theme: Some("Mint".into()),
+            leds: false,
+            window: Some([1300, 900]),
         }
     }
 
     #[test]
     fn defaults_when_there_is_no_file() {
         let dir = scratch("missing");
-        let (settings, problems) = load(&dir.join(FILE_NAME), Settings::default());
-        assert_eq!(settings, Settings::default());
+        let (settings, problems) = load(&dir.join(FILE_NAME), Settings::new(512));
+        assert_eq!(settings, Settings::new(512));
         assert!(problems.is_empty(), "{problems:?}");
         assert!(!dir.exists(), "loading creates nothing");
     }
@@ -215,40 +267,40 @@ mod tests {
     fn saved_settings_load_back_and_the_write_is_atomic() {
         let dir = scratch("roundtrip");
         let path = dir.join("nested").join(FILE_NAME);
-        save(&path, &sized(1300, 900)).unwrap();
-        assert_eq!(
-            load(&path, Settings::default()),
-            (sized(1300, 900), Vec::new())
-        );
+        save(&path, &sample()).unwrap();
+        assert_eq!(load(&path, Settings::new(512)), (sample(), Vec::new()));
         let leftovers: Vec<_> = fs::read_dir(path.parent().unwrap())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(leftovers, [FILE_NAME], "no temporary file left");
-        save(&path, &Settings::default()).unwrap();
-        assert_eq!(load(&path, sized(900, 700)).0, sized(900, 700));
+        let defaults = Settings::new(512);
+        save(&path, &defaults).unwrap();
+        assert_eq!(load(&path, Settings::new(0)).0, defaults);
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn a_corrupt_file_falls_back_per_line_and_says_why() {
-        let text = "window = [10, 10]\nwindow = 1200x800\nnonsense\nfuture = 1\n";
-        let (settings, problems) = parse(text, Settings::default());
-        assert_eq!(settings, Settings::default());
-        assert_eq!(problems.len(), 3, "{problems:?}");
-        assert!(problems[0].starts_with("line 1: bad value for window"));
-        assert!(problems[2].starts_with("line 3: expected"));
+        let text =
+            "master = 2000\ntheme = Mint\nleds = maybe\nwindow = [10, 10]\nnonsense\nfuture = 1\n";
+        let (settings, problems) = parse(text, Settings::new(512));
+        assert_eq!(settings, Settings::new(512));
+        assert_eq!(problems.len(), 5, "{problems:?}");
+        assert!(problems[0].starts_with("line 1: bad value for master"));
+        assert!(problems[4].starts_with("line 5: expected"));
         // Good lines among bad ones still count.
-        let (settings, problems) = parse("\u{0}\u{1}\nwindow = [1000, 700]\n", Settings::default());
-        assert_eq!(settings, sized(1000, 700));
+        let (settings, problems) =
+            parse("leds = false\n\u{0}\u{1}\nmaster = 3\n", Settings::new(512));
+        assert_eq!((settings.leds, settings.master), (false, 3));
         assert_eq!(problems.len(), 1);
         // Not UTF-8 at all: the defaults and one message.
         let dir = scratch("binary");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join(FILE_NAME);
         fs::write(&path, [0xff, 0xfe, 0x00, 0x80]).unwrap();
-        let (settings, problems) = load(&path, Settings::default());
-        assert_eq!(settings, Settings::default());
+        let (settings, problems) = load(&path, Settings::new(512));
+        assert_eq!(settings, Settings::new(512));
         assert_eq!(problems.len(), 1);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -265,34 +317,44 @@ mod tests {
     }
 
     #[test]
+    fn a_theme_name_that_cannot_be_written_is_left_out() {
+        let settings = Settings {
+            theme: Some("a\"b".into()),
+            ..Settings::new(1)
+        };
+        assert!(!format(&settings).contains("theme"));
+        assert_eq!(parse(&format(&settings), Settings::new(9)).0.theme, None);
+    }
+
+    #[test]
     fn changes_are_saved_once_they_settle_and_on_quit() {
         let dir = scratch("debounce");
         let path = dir.join(FILE_NAME);
-        let mut saver = Saver::new(path.clone(), Settings::default());
+        let mut saver = Saver::new(path.clone(), Settings::new(512));
         let start = Instant::now();
-        assert_eq!(saver.update(&Settings::default(), start), None, "unchanged");
-        // A resize: the size keeps moving, so nothing is written yet.
-        for step in 0..10u32 {
+        assert_eq!(saver.update(&Settings::new(512), start), None, "unchanged");
+        // A drag: the value keeps moving, so nothing is written yet.
+        for step in 0..10u16 {
             let at = start + Duration::from_millis(100 * u64::from(step));
-            assert_eq!(saver.update(&sized(1000 + step, 700), at), None);
+            assert_eq!(saver.update(&Settings::new(600 + step), at), None);
         }
         assert!(!path.exists());
-        let last = sized(1009, 700);
+        let last = Settings::new(609);
         let settled = start + Duration::from_millis(900) + DEBOUNCE;
         assert_eq!(saver.update(&last, settled), Some(Ok(())));
-        assert_eq!(load(&path, Settings::default()).0, last);
+        assert_eq!(load(&path, Settings::new(0)).0, last);
         assert_eq!(
             saver.update(&last, settled + DEBOUNCE),
             None,
             "written once"
         );
         // Changed back before the second passes: nothing to write.
-        assert_eq!(saver.update(&sized(900, 600), settled), None);
+        assert_eq!(saver.update(&Settings::new(1), settled), None);
         assert_eq!(saver.update(&last, settled + DEBOUNCE * 3), None);
         // Quitting writes a change at once.
-        saver.update(&sized(1500, 1000), settled);
-        saver.flush(&sized(1500, 1000)).unwrap();
-        assert_eq!(load(&path, Settings::default()).0, sized(1500, 1000));
+        saver.update(&sample(), settled);
+        saver.flush(&sample()).unwrap();
+        assert_eq!(load(&path, Settings::new(0)).0, sample());
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -303,9 +365,9 @@ mod tests {
         let blocker = dir.join("file");
         fs::write(&blocker, b"").unwrap();
         // A folder that cannot exist: its parent is a file.
-        let mut saver = Saver::new(blocker.join(FILE_NAME), Settings::default());
+        let mut saver = Saver::new(blocker.join(FILE_NAME), Settings::new(512));
         let start = Instant::now();
-        let changed = sized(1000, 700);
+        let changed = Settings::new(100);
         saver.update(&changed, start);
         assert!(matches!(
             saver.update(&changed, start + DEBOUNCE),
