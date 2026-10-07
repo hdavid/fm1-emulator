@@ -14,7 +14,9 @@ pub mod gpio;
 pub mod lcd;
 pub mod leds;
 mod package;
+mod perf;
 mod shift_spi;
+mod simd;
 mod uart;
 mod wireless;
 

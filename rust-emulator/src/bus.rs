@@ -104,9 +104,17 @@ pub struct Bus {
     clock: crate::clock::Clock,
     wireless: crate::wireless::Wireless,
     shift_spi: crate::shift_spi::ShiftSpi,
+    perf: crate::perf::Perf,
 }
 
 impl Bus {
+    /// EMU_CON of `core`: exception enables (bit 2 divide by zero).
+    pub(crate) fn emu_con(&self, core: usize) -> u32 {
+        self.guards.emu_con(core)
+    }
+    pub(crate) fn raise_emu_msg(&mut self, core: usize, bits: u32) {
+        self.guards.raise_emu_msg(core, bits);
+    }
     pub(crate) fn core_control(&self, core: usize) -> u32 {
         self.cache.core_control(core)
     }
@@ -142,6 +150,7 @@ impl Bus {
             clock: Default::default(),
             wireless: Default::default(),
             shift_spi: Default::default(),
+            perf: Default::default(),
         })
     }
 
@@ -241,6 +250,11 @@ impl Bus {
             }
             if let Some(value) = self.nor.read(address) {
                 return Ok(value);
+            }
+            if size == 4 {
+                if let Some(value) = self.perf.read(address, self.clock.cycles()) {
+                    return Ok(value);
+                }
             }
             if let Some(value) = self.guards.read(address) {
                 return Ok(value);
@@ -366,6 +380,17 @@ impl Bus {
             .map_err(|reason| Self::fault(address, size, "write", reason))?;
         if self.cache.write(address, size, value).is_some() {
             return Ok(());
+        }
+        if size == 4
+            && self
+                .perf
+                .write(address, value, self.clock.cycles())
+                .is_some()
+        {
+            return Ok(());
+        }
+        if address == crate::perf::DBG_CON {
+            self.perf.control(value, self.clock.cycles());
         }
         if let Some(result) = self.guards.write(address, value) {
             return result.map_err(|reason| Self::fault(address, size, "write", reason));

@@ -26,15 +26,13 @@ pub(crate) enum First {
     PushRegs,
     PopPc,
     PushRets,
-    PushReti,
-    PopReturnRegister,
+    PushSpecial,
+    PopSpecial,
     PopRegs,
     PushRetsRegs,
     PopRetsRegs,
     PopPcRegs,
     MoveStackPointer,
-    PushIrqFrame,
-    PopIrqFrame,
     CallRel32,
     Relative22,
     CallRel9,
@@ -136,9 +134,23 @@ pub(crate) enum Wide {
     WordRegisterPreincrementStore,
     WordRegisterPreincrement,
     HalfwordRegisterPreincrement,
+    HalfwordRegisterPreincrementStore,
     WordPostincrementStore,
     WordPostincrementLoad,
+    RegisterPostincrement,
+    PairPostincrement,
+    PairRegisterPreincrement,
+    PushSpecialMask,
+    PopSpecialMask,
+    Trigger,
+    SaturateSigned16,
     MemoryIndexed,
+    HalfAddSubtract,
+    HalfMultiply,
+    HalfMultiplyWord,
+    Pack,
+    DualAddSubtract,
+    DualMultiply,
     Unknown,
 }
 
@@ -206,11 +218,13 @@ fn first(h: u32) -> First {
     if h == 0x0410 {
         return First::PushRets;
     }
-    if h == 0x04c1 {
-        return First::PushReti;
+    if h & 0xffc0 == 0x04c0 {
+        // [--sp] = {psr, sr4, rets, retx, rete, reti} for mask bits 5..0
+        // (vendor objdump); interrupt stubs push 04c8 {rets} or 04e9.
+        return First::PushSpecial;
     }
-    if matches!(h, 0x0481 | 0x0488) {
-        return First::PopReturnRegister;
+    if h & 0xffc0 == 0x0480 {
+        return First::PopSpecial;
     }
     if h & 0xfff0 == 0x0440 {
         return First::PopRegs;
@@ -226,12 +240,6 @@ fn first(h: u32) -> First {
     }
     if matches!(h, 0x1440..=0x1443) {
         return First::MoveStackPointer;
-    }
-    if matches!(h, 0x04e1 | 0x04e8 | 0x04e9) {
-        return First::PushIrqFrame;
-    }
-    if matches!(h, 0x04a1 | 0x04a8 | 0x04a9) {
-        return First::PopIrqFrame;
     }
     if h == 0xff80 {
         return First::CallRel32;
@@ -294,10 +302,10 @@ fn extended(h: u32) -> Extended {
     if h & 0xfff8 == 0x14c0 {
         return Extended::ClearHighRegister;
     }
-    if h & 0xfff0 == 0x0230 {
+    if h & 0xffe0 == 0x0220 {
         return Extended::CacheFlushInvalidate;
     }
-    if h & 0xe058 == 0x2000 {
+    if h & 0xe050 == 0x2000 {
         return Extended::StackWord;
     }
     if matches!(h & 0xff88, 0x1700 | 0x1708 | 0x1780 | 0x1788) {
@@ -357,13 +365,13 @@ fn wide(h: u32, x: u32) -> Wide {
     if h & 0xfff8 == 0xed50 || h & 0xfff8 == 0xed58 {
         return Wide::HalfwordExtended;
     }
-    if h == 0xedd0 || h == 0xedd4 && x & 1 == 0 {
+    if h & 0xfff8 == 0xedd0 {
         return Wide::HalfwordPostincrement;
     }
-    if h == 0xeed2 {
+    if matches!(h, 0xeed2 | 0xeed3) {
         return Wide::BytePostincrementStore;
     }
-    if matches!(h, 0xeed0 | 0xeed4) {
+    if matches!(h, 0xeed0 | 0xeed1 | 0xeed4 | 0xeed5) {
         return Wide::BytePostincrementLoad;
     }
     if h & 0xfff0 == 0xe1e0 {
@@ -374,6 +382,19 @@ fn wide(h: u32, x: u32) -> Wide {
     }
     if h == 0xe9d0 {
         return Wide::StackPair;
+    }
+    if h == 0xe078 && x & 255 == 1 {
+        // rD = sat16(rS) (s); objdump's (u) form (x & 255 == 0) is not used.
+        return Wide::SaturateSigned16;
+    }
+    if h == 0xe958 && x & 0x8000 == 0 {
+        return Wide::PushSpecialMask;
+    }
+    if h == 0xe950 && x & 0x4000 == 0 {
+        return Wide::PopSpecialMask;
+    }
+    if h == 0xe870 && x == 0 {
+        return Wide::Trigger;
     }
     if h == 0xe070 && x & 255 == 0 {
         return Wide::ReverseBytes;
@@ -390,7 +411,9 @@ fn wide(h: u32, x: u32) -> Wide {
     if matches!(h, 0xe1f8 | 0xe1fc) && x & 15 == 0 {
         return Wide::MultiplyWide;
     }
-    if h == 0xe1f6 && d & 1 == 0 && s & 1 == 0 && x & 15 <= 1 {
+    if h == 0xe1f6 && s & 1 == 0 && x & 15 == 0 {
+        // Vendor objdump: x bit 12 selects the signed form (e1f6 1040 is
+        // r1_r0 = r5_r4 / r0 (s)); x bit 0 is not a valid encoding.
         return Wide::DivideWide;
     }
     if h == 0xe1d8 && d & 1 == 0 && s == 0 && matches!(x & 15, 0 | 2) {
@@ -426,7 +449,7 @@ fn wide(h: u32, x: u32) -> Wide {
     if matches!(h, 0xe0b4 | 0xe0b8) && matches!(x & 15, 0 | 2) {
         return Wide::ArithmeticRegister;
     }
-    if h == 0xe1c8 {
+    if h == 0xe1c8 && x & 15 <= 3 {
         return Wide::ShiftRegisterExtended;
     }
     if h == 0xeedc {
@@ -444,10 +467,11 @@ fn wide(h: u32, x: u32) -> Wide {
     if h == 0xe190 && x & 15 <= 3 {
         return Wide::LogicThree;
     }
-    if h & 0xfff0 == 0xeb20 && x != 0 {
+    if h & 0xffe0 == 0xeb20 && x != 0 {
+        // [rN+] = {...} (eb2X) and [rN++] = {...} (eb3X).
         return Wide::StoreRegisterList;
     }
-    if h & 0xfff0 == 0xeb00 && x != 0 {
+    if h & 0xffe0 == 0xeb00 && x != 0 {
         return Wide::LoadRegisterList;
     }
     if matches!(h, 0xe9d8 | 0xe9d9 | 0xe9dc | 0xe9dd | 0xe9de) {
@@ -456,8 +480,14 @@ fn wide(h: u32, x: u32) -> Wide {
     if h == 0xe9d4 {
         return Wide::StackExtended;
     }
-    if h & 0xfff8 == 0xec50 && x & 3 <= 1 {
+    if h & 0xfff8 == 0xec50 {
         return Wide::MemoryPair;
+    }
+    if h & 0xfff8 == 0xec58 && x & 2 == 0 {
+        return Wide::PairPostincrement;
+    }
+    if h == 0xec5c && x & 2 != 0 {
+        return Wide::PairRegisterPreincrement;
     }
     if matches!(h & 0xfff0, 0xe1a0 | 0xe1b0) {
         return Wide::BitField;
@@ -468,7 +498,7 @@ fn wide(h: u32, x: u32) -> Wide {
     if h & 0xfff0 == 0xe850 {
         return Wide::BranchBit;
     }
-    if matches!(h & 0xffe0, 0xef00 | 0xef80 | 0xefc0) {
+    if h & 0xff00 == 0xef00 {
         return Wide::MemoryMask;
     }
     if matches!(
@@ -482,11 +512,13 @@ fn wide(h: u32, x: u32) -> Wide {
             | 0x92
             | 0x93
             | 0x99
+            | 0x9a
             | 0x9b
             | 0xa1
             | 0xa2
             | 0xa3
             | 0xc1
+            | 0xc2
             | 0xc3
             | 0xc9
             | 0xca
@@ -501,8 +533,11 @@ fn wide(h: u32, x: u32) -> Wide {
             | 0xe2
             | 0xe3
             | 0xe9
+            | 0xea
             | 0xeb
     ) && h & 0xf000 == 0xe000
+        // Register forms with x bits 7 and 6 set are <unknown> to objdump.
+        && !((h >> 4) & 7 == 1 && x & 0xc0 == 0xc0)
     {
         return Wide::ConditionalBlock;
     }
@@ -533,7 +568,11 @@ fn wide(h: u32, x: u32) -> Wide {
     {
         return Wide::BranchCompareImmediate;
     }
-    if matches!(h & 0xfff0, 0xed00 | 0xed80 | 0xee00 | 0xee80) && x & 0xe00 == 0x800 {
+    if matches!(
+        h & 0xfff0,
+        0xe800 | 0xe880 | 0xe900 | 0xe980 | 0xec00 | 0xec80 | 0xed00 | 0xed80 | 0xee00 | 0xee80
+    ) && x & 0xe00 == 0x800
+    {
         return Wide::BranchCompareFloat;
     }
     if matches!(
@@ -545,7 +584,18 @@ fn wide(h: u32, x: u32) -> Wide {
     }
     if matches!(
         h,
-        0xee50 | 0xee51 | 0xee52 | 0xee54 | 0xee55 | 0xee58 | 0xee5a
+        0xee50
+            | 0xee51
+            | 0xee52
+            | 0xee53
+            | 0xee54
+            | 0xee55
+            | 0xee58
+            | 0xee59
+            | 0xee5a
+            | 0xee5b
+            | 0xee5c
+            | 0xee5d
     ) {
         return Wide::ByteExtended;
     }
@@ -561,16 +611,44 @@ fn wide(h: u32, x: u32) -> Wide {
     if h == 0xeddc && matches!(x & 15, 0 | 2) {
         return Wide::HalfwordRegisterPreincrement;
     }
-    if h == 0xecd8 && x & 3 == 1 {
+    if h == 0xeddc && matches!(x & 15, 1 | 3) {
+        return Wide::HalfwordRegisterPreincrementStore;
+    }
+    if h & 0xfff8 == 0xecd8 && x & 3 == 1 {
+        // ecd8-ecdf: rS advances by a signed 11-bit immediate.
         return Wide::WordPostincrementStore;
     }
-    if h == 0xecd8 && x & 3 == 0 {
+    if h & 0xfff8 == 0xecd8 && x & 3 == 0 {
         return Wide::WordPostincrementLoad;
+    }
+    if (h == 0xecde && x & 2 != 0) || h == 0xedde || (h == 0xeede && x & 3 != 3) {
+        // [rS++=rC]: the access at rS, then rS += rC.
+        return Wide::RegisterPostincrement;
     }
     if matches!(h, 0xecd8 | 0xedd8 | 0xeed8) {
         return Wide::MemoryIndexed;
     }
-    Wide::Unknown
+    simd(h, x)
+}
+
+/// The packed 16-bit forms of simd.rs: only the signed-saturating ones whose
+/// mode bits the vendor objdump prints (other bits stay unknown).
+fn simd(h: u32, x: u32) -> Wide {
+    if h == 0xe500 {
+        Wide::HalfAddSubtract
+    } else if matches!(h, 0xe541 | 0xe543) && x & 1 == 0 {
+        Wide::HalfMultiply
+    } else if matches!(h, 0xe551 | 0xe553) && x & 9 == 0 {
+        Wide::HalfMultiplyWord
+    } else if h == 0xe404 && x & 9 == 0 {
+        Wide::Pack
+    } else if h & 0xfff3 == 0xe511 {
+        Wide::DualAddSubtract
+    } else if h & 0xfff1 == 0xe561 && x & 12 == 0 {
+        Wide::DualMultiply
+    } else {
+        Wide::Unknown
+    }
 }
 
 static FIRST: OnceLock<Box<[First; 65536]>> = OnceLock::new();

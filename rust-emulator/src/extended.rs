@@ -4,6 +4,7 @@
 use crate::{
     cpu::{signed, Cpu, Fault},
     decode::{Extended, Wide},
+    simd::{self, half, set_half},
 };
 pub(crate) fn packed(x: u32) -> u32 {
     match (x >> 10) & 3 {
@@ -16,6 +17,60 @@ pub(crate) fn packed(x: u32) -> u32 {
         mode => ((0x80 | (x & 127)) << (32 - mode * 8)) >> ((x >> 7) & 7),
     }
 }
+/// Word offset of the E866/E868/E86C/E86D read-modify-write forms: x bits 2-7
+/// as a signed byte (vendor objdump: E868 12FC is [r1+-4] += r2).
+fn memory_offset(x: u32) -> u32 {
+    signed(x & 0xfc, 8) as u32
+}
+
+/// Signed nine-bit byte offset of the EE5X and EEDX forms; h bit 0 is its sign.
+fn word_increment(h: u32, x: u32) -> u32 {
+    // ECD8-ECDF: (h & 7) : x[11:8] : x[3:2], signed (vendor objdump: ECDF 4F00
+    // is r4 = [r0++=-16], ECDA 1238 is r1 = [r3++=552]).
+    signed(((h & 7) << 8) | (((x >> 8) & 15) << 4) | (x & 12), 11) as u32
+}
+
+fn byte_offset(h: u32, x: u32) -> u32 {
+    signed(((h & 1) << 8) | (((x >> 8) & 15) << 4) | (x & 15), 9) as u32
+}
+
+/// Store the upper halfword of rD (the vendor's `= rD.h` stores).
+fn store_upper_half(cpu: &mut Cpu, pc: u32, address: u32, d: usize) -> Result<(), Fault> {
+    cpu.bus
+        .write(address, cpu.r[d] >> 16, 2)
+        .map_err(|fault| Fault::Access { pc, fault })
+}
+
+/// Load or store the register pair rD+1:rD, the even register at `address`.
+fn pair_access(cpu: &mut Cpu, address: u32, d: usize, store: bool) -> Result<(), Fault> {
+    let reg = d & 14;
+    if store {
+        cpu.write(address, cpu.r[reg])?;
+        cpu.write(address.wrapping_add(4), cpu.r[reg + 1])?;
+    } else {
+        let low = cpu.read(address, 4)?;
+        let high = cpu.read(address.wrapping_add(4), 4)?;
+        cpu.r[reg] = low;
+        cpu.r[reg + 1] = high;
+    }
+    Ok(())
+}
+
+/// IEEE single test of a register conditional block with x bit 7 (vendor
+/// objdump -mattr=+fprev1 prints `iff`; the order of the compare-branches).
+/// Unordered operands are rejected by the caller.
+fn float_condition(kind: u32, lhs: f32, rhs: f32) -> bool {
+    match kind {
+        0x81 => lhs == rhs,
+        0x89 => lhs != rhs,
+        0x91 | 0xd1 => lhs >= rhs,
+        0x99 | 0xd9 => lhs < rhs,
+        0xa1 => lhs != rhs,
+        0xc1 | 0xe1 => lhs > rhs,
+        _ => lhs <= rhs,
+    }
+}
+
 pub(crate) fn execute(
     cpu: &mut Cpu,
     h: u32,
@@ -56,11 +111,14 @@ pub(crate) fn execute(
             op = "clear_high_register";
         }
         Extended::CacheFlushInvalidate => {
+            // flush [rN] (0220) and flushinv [rN] (0230) act on one data cache
+            // line; memory is not cached here, so neither changes anything.
             op = "cache_flush_invalidate";
         }
         Extended::StackWord => {
             mem = Some((
-                a,
+                // Bit 3 selects r8-r15 (vendor objdump: 2709 is r9 = [sp+28]).
+                (h & 15) as usize,
                 0,
                 // Bit 5 supplies offset bit 7; Felucca spills beyond 128 bytes.
                 cpu.sr[14].wrapping_add((((h >> 8) & 31) | (h & 32)) * 4),
@@ -189,6 +247,12 @@ pub(crate) fn execute(
             next = pc + 4;
             match cpu.decoded_wide(h, x) {
                 Wide::FloatRegister => {
+                    // A zero divisor of either sign raises the divide-by-zero
+                    // exception when armed: X0X ea3c665 crashed on a float
+                    // divide on a physical FM-1 with EMU_CON bit 2 set.
+                    if x & 15 == 3 && f32::from_bits(cpu.r[c]) == 0.0 && cpu.divide_by_zero(pc)? {
+                        return Ok(Some((pc + 4, "float_register")));
+                    }
                     let value =
                         crate::float::result(x, &cpu.r).map_err(|reason| Fault::Access {
                             pc,
@@ -217,7 +281,7 @@ pub(crate) fn execute(
                     op = "branch_register_mask";
                 }
                 Wide::MemoryShift => {
-                    let address = cpu.r[d].wrapping_add(x & 252);
+                    let address = cpu.r[d].wrapping_add(memory_offset(x));
                     let value = cpu.read(address, 4)?;
                     let shift = c + ((h & 1) as usize) * 16;
                     cpu.write(
@@ -231,7 +295,7 @@ pub(crate) fn execute(
                     op = "memory_shift";
                 }
                 Wide::MemoryArithmeticRegister => {
-                    let addr = cpu.r[d] + (x & 252);
+                    let addr = cpu.r[d].wrapping_add(memory_offset(x));
                     let value = cpu.read(addr, 4)?;
                     let operand = cpu.r[c];
                     cpu.write(
@@ -250,43 +314,52 @@ pub(crate) fn execute(
                 }
                 Wide::HalfwordExtended => {
                     let store = x & 1 != 0;
-                    let high = if store {
-                        signed(h & 7, 3)
-                    } else {
-                        // Loads have a signed ten-bit displacement. Bit 2 selects
-                        // value sign extension; bit 1 belongs to the address sign.
-                        // Stock LVGL uses ED5B to load at r8-4 and write back r8.
-                        signed(h & 3, 2)
-                    };
-                    let offset = (high << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 14) as i32;
+                    // Loads and stores have a signed ten-bit displacement. Bit 2
+                    // selects value sign extension of loads and the upper half
+                    // for stores (vendor objdump: ED53 0F2B is h[r2+-6] = r0 and
+                    // ED55 0F2B is h[r2+506] = r0.h). Stock LVGL uses ED5B to load
+                    // at r8-4 and write back r8.
+                    let offset =
+                        (signed(h & 3, 2) << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 14) as i32;
                     let addr = cpu.r[s].wrapping_add(offset as u32);
-                    mem = Some((
-                        d,
-                        s,
-                        addr,
-                        2,
-                        store,
-                        !store && h & 4 != 0,
-                        if h & 8 != 0 { Some(addr) } else { None },
-                    ));
+                    let updated = if h & 8 != 0 { Some(addr) } else { None };
+                    if store && h & 4 != 0 {
+                        store_upper_half(cpu, pc, addr, d)?;
+                        if let Some(value) = updated {
+                            cpu.r[s] = value;
+                        }
+                    } else {
+                        mem = Some((d, s, addr, 2, store, !store && h & 4 != 0, updated));
+                    }
                     op = "halfword_extended";
                 }
                 Wide::HalfwordPostincrement => {
-                    let increment = ((x >> 8) & 15) * 16 + (x & 14);
+                    // EDD0-EDD7: a signed ten-bit increment with h bits 0-1 on
+                    // top; bit 2 is a signed load or a store of the upper half
+                    // (vendor objdump: EDD4 1231 is h[r3++=32] = r1.h).
+                    let store = x & 1 != 0;
+                    let increment =
+                        signed(((h & 3) << 8) | (((x >> 8) & 15) << 4) | (x & 14), 10) as u32;
                     let address = cpu.r[s];
-                    mem = Some((
-                        d,
-                        s,
-                        address,
-                        2,
-                        x & 1 != 0,
-                        h & 4 != 0,
-                        Some(address.wrapping_add(increment)),
-                    ));
+                    if store && h & 4 != 0 {
+                        store_upper_half(cpu, pc, address, d)?;
+                        cpu.r[s] = address.wrapping_add(increment);
+                    } else {
+                        mem = Some((
+                            d,
+                            s,
+                            address,
+                            2,
+                            store,
+                            !store && h & 4 != 0,
+                            Some(address.wrapping_add(increment)),
+                        ));
+                    }
                     op = "halfword_postincrement";
                 }
                 Wide::BytePostincrementStore => {
-                    let increment = ((x >> 8) & 15) * 16 + (x & 15);
+                    // EED2/EED3: a signed nine-bit increment, h bit 0 its sign.
+                    let increment = byte_offset(h, x);
                     let address = cpu.r[s];
                     mem = Some((
                         d,
@@ -300,7 +373,7 @@ pub(crate) fn execute(
                     op = "byte_postincrement_store";
                 }
                 Wide::BytePostincrementLoad => {
-                    let off = ((x >> 8) & 15) * 16 + (x & 15);
+                    let off = byte_offset(h, x);
                     let addr = cpu.r[s];
                     mem = Some((
                         d,
@@ -338,6 +411,43 @@ pub(crate) fn execute(
                         cpu.r[r + 1] = cpu.read(addr + 4, 4)?;
                     }
                     op = "stack_pair";
+                }
+                Wide::SaturateSigned16 => {
+                    cpu.r[d] = (cpu.r[c] as i32).clamp(-32768, 32767) as u32;
+                    op = "saturate_signed16";
+                }
+                Wide::PushSpecialMask => {
+                    // [--sp] = {sp, ssp, usp, icfg, psr, rets, retx, rete, reti}
+                    // for x = 782F (the fatal-exception frame of Felucca-derived
+                    // fm1_vec.S, read back by fm1_fault_c from reti upwards):
+                    // bit n is sr[n], pushed highest first. The saved sp is its
+                    // value before the push; nothing reads it back as a pointer.
+                    let sp = cpu.sr[14];
+                    for index in (0..15).rev() {
+                        if x & (1 << index) != 0 {
+                            let value = if index == 14 { sp } else { cpu.sr[index] };
+                            cpu.push(value)?;
+                        }
+                    }
+                    op = "push_special_mask";
+                }
+                Wide::PopSpecialMask => {
+                    // The same set popped lowest first; bit 15 pops pc (stock
+                    // FM-1 0x02043854: E950 8000 is {pc} = [sp++]).
+                    for index in 0..14 {
+                        if x & (1 << index) != 0 {
+                            cpu.sr[index] = cpu.pop()?;
+                        }
+                    }
+                    if x & 0x8000 != 0 {
+                        next = cpu.pop()?;
+                    }
+                    op = "pop_special_mask";
+                }
+                Wide::Trigger => {
+                    // Debug trigger event (SDK ___trig, followed by a printf in
+                    // jl_fft.c): nothing happens without an attached debugger.
+                    op = "trigger";
                 }
                 Wide::ReverseBytes => {
                     cpu.r[d] = cpu.r[c].swap_bytes();
@@ -377,8 +487,12 @@ pub(crate) fn execute(
                     };
                 }
                 Wide::DivideWide => {
+                    if cpu.r[c] == 0 && cpu.divide_by_zero(pc)? {
+                        return Ok(Some((pc + 4, "divide_wide")));
+                    }
                     let dividend = cpu.r[s] as u64 | ((cpu.r[s + 1] as u64) << 32);
-                    let quotient = if x & 1 == 0 {
+                    let d = d & 14;
+                    let quotient = if x & 0x1000 == 0 {
                         dividend.checked_div(cpu.r[c] as u64)
                     } else {
                         (dividend as i64)
@@ -416,6 +530,9 @@ pub(crate) fn execute(
                     op = "shift_wide_immediate";
                 }
                 Wide::Divide => {
+                    if cpu.r[c] == 0 && cpu.divide_by_zero(pc)? {
+                        return Ok(Some((pc + 4, "divide")));
+                    }
                     cpu.r[d] = if x & 1 == 0 {
                         cpu.r[s].checked_div(cpu.r[c])
                     } else {
@@ -478,7 +595,7 @@ pub(crate) fn execute(
                     op = "decrement_branch";
                 }
                 Wide::MemoryBit => {
-                    let addr = cpu.r[d] + (x & 252);
+                    let addr = cpu.r[d].wrapping_add(memory_offset(x));
                     let old = cpu.read(addr, 4)?;
                     let mask = 1u32 << (cpu.r[c] & 31);
                     cpu.write(
@@ -516,11 +633,12 @@ pub(crate) fn execute(
                 }
                 Wide::ShiftRegisterExtended => {
                     let shift = cpu.r[c];
+                    // Quarkslab pi32v2 imm1619: 0 and 1 shift left, 2 logical
+                    // and 3 arithmetic right.
                     cpu.r[d] = match x & 3 {
-                        0 => cpu.r[s].checked_shl(shift).unwrap_or(0),
+                        0 | 1 => cpu.r[s].checked_shl(shift).unwrap_or(0),
                         2 => cpu.r[s].checked_shr(shift).unwrap_or(0),
-                        3 => ((cpu.r[s] as i32) >> shift.min(31)) as u32,
-                        _ => return Ok(None),
+                        _ => ((cpu.r[s] as i32) >> shift.min(31)) as u32,
                     };
                     op = "shift_register_extended";
                 }
@@ -556,7 +674,30 @@ pub(crate) fn execute(
                         _ => packed(x),
                     };
                     let lhs = cpu.r[d];
-                    let test = if h & 0x60 == 0x60 {
+                    let test = if h & 0x60 == 0x40 && x & 128 != 0 {
+                        // Vendor r3: x bit 7 makes the register form an
+                        // IEEE single compare (iff), the conditions in the
+                        // order of the conditional blocks: FF42 7380 is
+                        // iff (r7 u>= r3) (X0X's limiter, 0x0201ffa2).
+                        let lhs = f32::from_bits(lhs);
+                        let rhs = f32::from_bits(value);
+                        if !lhs.is_finite() || !rhs.is_finite() {
+                            return Err(Fault::Access {
+                                pc,
+                                fault: crate::bus::AccessFault {
+                                    address: pc,
+                                    size: 6,
+                                    operation: "floating-point condition",
+                                    reason:
+                                        "exceptional floating-point comparison is not implemented",
+                                },
+                            });
+                        }
+                        let kind = [
+                            0x81, 0x89, 0x91, 0x99, 0, 0, 0, 0, 0xc1, 0xc9, 0xd1, 0xd9, 0xe1, 0xe9,
+                        ][(h & 15) as usize];
+                        float_condition(kind, lhs, rhs)
+                    } else if h & 0x60 == 0x60 {
                         if h & 1 == 0 {
                             lhs & value == 0
                         } else {
@@ -599,6 +740,10 @@ pub(crate) fn execute(
                             address = address.wrapping_add(4);
                         }
                     }
+                    // [rN++] = {...} (EB3X): the base advances past the list.
+                    if h & 0x10 != 0 {
+                        cpu.r[n] = address;
+                    }
                     op = "store_register_list";
                 }
                 Wide::LoadRegisterList => {
@@ -608,6 +753,10 @@ pub(crate) fn execute(
                             cpu.r[register] = cpu.read(address, 4)?;
                             address = address.wrapping_add(4);
                         }
+                    }
+                    // {...} = [rN++] (EB1X), as the store.
+                    if h & 0x10 != 0 {
+                        cpu.r[n] = address;
                     }
                     op = "load_register_list";
                 }
@@ -637,15 +786,31 @@ pub(crate) fn execute(
                     let offset =
                         (signed(h & 7, 3) << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 12) as i32;
                     let addr = cpu.r[s].wrapping_add(offset as u32);
-                    let reg = d & 14;
-                    if x & 1 != 0 {
-                        cpu.write(addr, cpu.r[reg])?;
-                        cpu.write(addr + 4, cpu.r[reg + 1])?;
-                    } else {
-                        cpu.r[reg] = cpu.read(addr, 4)?;
-                        cpu.r[reg + 1] = cpu.read(addr + 4, 4)?;
+                    pair_access(cpu, addr, d, x & 1 != 0)?;
+                    if x & 2 != 0 {
+                        // Pre-increment: the address is written back to the base
+                        // (vendor objdump: EC50 8012 is r9_r8 = d[++r1=0]).
+                        cpu.r[s] = addr;
                     }
                     op = "memory_pair";
+                }
+                Wide::PairPostincrement => {
+                    // EC58-EC5F with x bit 1 clear: d[rS++=imm], the access at
+                    // rS, then rS += a signed eleven-bit immediate (vendor
+                    // objdump: EC58 2009 is d[r0++=8] = r3_r2).
+                    let offset =
+                        (signed(h & 7, 3) << 8) | (((x >> 8) & 15) << 4) as i32 | (x & 12) as i32;
+                    let addr = cpu.r[s];
+                    pair_access(cpu, addr, d, x & 1 != 0)?;
+                    cpu.r[s] = addr.wrapping_add(offset as u32);
+                    op = "pair_postincrement";
+                }
+                Wide::PairRegisterPreincrement => {
+                    // EC5C with x bit 1: r9_r8 = d[++r1=r0] (stock 0x0200940e).
+                    let addr = cpu.r[s].wrapping_add(cpu.r[c]);
+                    pair_access(cpu, addr, d, x & 1 != 0)?;
+                    cpu.r[s] = addr;
+                    op = "pair_register_preincrement";
                 }
                 Wide::BitField => {
                     let pos = (x >> 7) & 31;
@@ -653,8 +818,12 @@ pub(crate) fn execute(
                     let mask = (1u32 << len) - 1;
                     cpu.r[n] = if h & 0x10 == 0 {
                         (cpu.r[n] & !(mask << pos)) | ((cpu.r[d] & mask) << pos)
-                    } else {
+                    } else if x & 1 == 0 {
                         (cpu.r[d] >> pos) & mask
+                    } else {
+                        // sextra (vendor objdump: E1B0 B041 is
+                        // r0 = sextra(r11, p:0, l:16), Baud Girl 0x02012c5e).
+                        signed((cpu.r[d] >> pos) & mask, len.max(1)) as u32
                     };
                     op = "bit_field";
                 }
@@ -672,13 +841,17 @@ pub(crate) fn execute(
                     op = "branch_bit";
                 }
                 Wide::MemoryMask => {
-                    let addr = cpu.r[d].wrapping_add((h & 31) * 4);
+                    // EF00-EFFF: bits 7-6 select or, xor, and, and-not; bits 5-0
+                    // are a signed word offset (vendor objdump: EF3F 0400 is
+                    // [r0+-4] |= 0x80000000, EF40 0400 is [r0+0] ^= 0x80000000).
+                    let addr = cpu.r[d].wrapping_add((signed(h & 63, 6) * 4) as u32);
                     let old = cpu.read(addr, 4)?;
                     let value = packed(x);
                     cpu.write(
                         addr,
                         match h & 0xc0 {
                             0 => old | value,
+                            0x40 => old ^ value,
                             0x80 => old & value,
                             _ => old & !value,
                         },
@@ -700,10 +873,12 @@ pub(crate) fn execute(
                     } else {
                         packed(x)
                     };
-                    let test = if matches!(kind, 0xd1 | 0xd9 | 0xe1 | 0xe9) && x & 128 != 0 {
-                        // Vendor r3: bit 7 changes these register comparisons from
-                        // signed integers to floating point (iff). Stock voice pitch
-                        // calculation compares negative floats with this block form.
+                    // Vendor r3: x bit 7 changes the register comparisons from
+                    // integers to floating point (iff). Stock voice pitch
+                    // calculation compares negative floats with this block form.
+                    // EA1X with x = 0080 stays the integer bit test != 0.
+                    let float = kind & 7 == 1 && x & 128 != 0 && !(kind == 0xa1 && x & 0x7f == 0);
+                    let test = if float {
                         let lhs = f32::from_bits(lhs);
                         let rhs = f32::from_bits(rhs);
                         if !lhs.is_finite() || !rhs.is_finite() {
@@ -718,18 +893,13 @@ pub(crate) fn execute(
                                 },
                             });
                         }
-                        match kind {
-                            0xd1 => lhs >= rhs,
-                            0xd9 => lhs < rhs,
-                            0xe1 => lhs > rhs,
-                            _ => lhs <= rhs,
-                        }
+                        float_condition(kind, lhs, rhs)
                     } else {
                         match kind {
                             0x81..=0x83 => lhs == rhs,
                             0x89..=0x8b => lhs != rhs,
                             0x91..=0x93 => lhs >= rhs,
-                            0x99 | 0x9b => lhs < rhs,
+                            0x99..=0x9b => lhs < rhs,
                             0xa1 => {
                                 if x & 128 == 0 {
                                     lhs & rhs == 0
@@ -739,7 +909,7 @@ pub(crate) fn execute(
                             }
                             0xa2 => lhs & rhs == 0,
                             0xa3 => lhs & rhs != 0,
-                            0xc1 | 0xc3 => lhs > rhs,
+                            0xc1..=0xc3 => lhs > rhs,
                             0xc9..=0xcb => lhs <= rhs,
                             0xd1..=0xd3 => (lhs as i32) >= (rhs as i32),
                             0xd9..=0xdb => (lhs as i32) < (rhs as i32),
@@ -807,15 +977,20 @@ pub(crate) fn execute(
                 }
                 Wide::BranchCompareImmediate => {
                     let kind = (h >> 7) & 63;
-                    let immediate = signed((((h >> 4) & 7) << 7) | (x >> 9), 10) as u32;
+                    // The ordered unsigned forms take an unsigned imm10 (SLOOP's
+                    // fm1_delay_us: F9F1 81FC is jb r1, #960); equality and the
+                    // signed forms sign-extend it (Baud Girl: F874 FC04 is je
+                    // against -2).
+                    let raw = (((h >> 4) & 7) << 7) | (x >> 9);
+                    let immediate = signed(raw, 10) as u32;
                     let v = cpu.r[n];
                     let test = match kind {
                         0x30 => v == immediate,
                         0x31 => v != immediate,
-                        0x32 => v >= immediate,
-                        0x33 => v < immediate,
-                        0x38 => v > immediate,
-                        0x39 => v <= immediate,
+                        0x32 => v >= raw,
+                        0x33 => v < raw,
+                        0x38 => v > raw,
+                        0x39 => v <= raw,
                         0x3a => (v as i32) >= signed(immediate, 10),
                         0x3b => (v as i32) < signed(immediate, 10),
                         0x3c => (v as i32) > signed(immediate, 10),
@@ -840,10 +1015,14 @@ pub(crate) fn execute(
                             },
                         });
                     }
+                    // Vendor objdump: E800 ==, E880 !=, E900 >=, E980 <, EC00 >,
+                    // EC80 <=, then the measured ED00-EE80 forms.
                     let test = match h & 0xfff0 {
-                        0xed00 => lhs >= rhs,
-                        0xed80 => lhs < rhs,
-                        0xee00 => lhs > rhs,
+                        0xe800 => lhs == rhs,
+                        0xe880 => lhs != rhs,
+                        0xe900 | 0xed00 => lhs >= rhs,
+                        0xe980 | 0xed80 => lhs < rhs,
+                        0xec00 | 0xee00 => lhs > rhs,
                         _ => lhs <= rhs,
                     };
                     if test {
@@ -930,8 +1109,52 @@ pub(crate) fn execute(
                     };
                     op = "halfword_register_preincrement";
                 }
+                Wide::HalfwordRegisterPreincrementStore => {
+                    // Vendor objdump: EDDC 4651 is h[++r5=r6] = r4 and EDDC 4653
+                    // is h[++r5=r6] = r4.h (SLOOP's sequencer event ring).
+                    let address = cpu.r[s].wrapping_add(cpu.r[c]);
+                    let value = if x & 2 != 0 { cpu.r[d] >> 16 } else { cpu.r[d] };
+                    cpu.bus
+                        .write(address, value, 2)
+                        .map_err(|fault| Fault::Access { pc, fault })?;
+                    cpu.r[s] = address;
+                    op = "halfword_register_preincrement_store";
+                }
+                Wide::RegisterPostincrement => {
+                    // ECDE/EDDE/EEDE [rS++=rC]: the access at rS, then rS += rC.
+                    // x bits 0-1 (vendor objdump): word 2 load, 3 store; halfword
+                    // 0 load, 1 store, 2 signed load, 3 store of the upper half;
+                    // byte 0 load, 1 store, 2 signed load.
+                    let size = match h {
+                        0xecde => 4,
+                        0xedde => 2,
+                        _ => 1,
+                    };
+                    let address = cpu.r[s];
+                    let updated = address.wrapping_add(cpu.r[c]);
+                    if x & 1 != 0 {
+                        let value = if size == 2 && x & 2 != 0 {
+                            cpu.r[d] >> 16
+                        } else {
+                            cpu.r[d]
+                        };
+                        cpu.bus
+                            .write(address, value, size)
+                            .map_err(|fault| Fault::Access { pc, fault })?;
+                        cpu.r[s] = updated;
+                    } else {
+                        let value = cpu.read(address, size)?;
+                        cpu.r[s] = updated;
+                        cpu.r[d] = if size != 4 && x & 2 != 0 {
+                            signed(value, (size * 8) as u32) as u32
+                        } else {
+                            value
+                        };
+                    }
+                    op = "register_postincrement";
+                }
                 Wide::WordPostincrementStore => {
-                    let increment = (((x >> 8) & 15) << 4) | (x & 12);
+                    let increment = word_increment(h, x);
                     let address = cpu.r[s];
                     mem = Some((
                         d,
@@ -945,7 +1168,7 @@ pub(crate) fn execute(
                     op = "word_postincrement_store";
                 }
                 Wide::WordPostincrementLoad => {
-                    let increment = (((x >> 8) & 15) << 4) | (x & 12);
+                    let increment = word_increment(h, x);
                     let address = cpu.r[s];
                     mem = Some((
                         d,
@@ -981,6 +1204,47 @@ pub(crate) fn execute(
                         None,
                     ));
                     op = "memory_indexed";
+                }
+                Wide::HalfAddSubtract => {
+                    let (a, b) = (half(cpu.r[s], x & 4 != 0), half(cpu.r[c], x & 2 != 0));
+                    let value = if x & 1 == 0 { a + b } else { a - b };
+                    cpu.r[d] = set_half(cpu.r[d], x & 8 != 0, value);
+                    op = if x & 1 == 0 {
+                        "half_add"
+                    } else {
+                        "half_subtract"
+                    };
+                }
+                Wide::HalfMultiply => {
+                    let (a, b) = (half(cpu.r[s], x & 4 != 0), half(cpu.r[c], x & 2 != 0));
+                    let value = simd::mul16(a, b, h & 2 != 0);
+                    cpu.r[d] = set_half(cpu.r[d], x & 8 != 0, value);
+                    op = "half_multiply";
+                }
+                Wide::HalfMultiplyWord => {
+                    let (a, b) = (half(cpu.r[s], x & 4 != 0), half(cpu.r[c], x & 2 != 0));
+                    cpu.r[d] = simd::mul32(a, b, h & 2 != 0);
+                    op = "half_multiply_word";
+                }
+                Wide::Pack => {
+                    let (a, b) = (half(cpu.r[s], x & 4 != 0), half(cpu.r[c], x & 2 != 0));
+                    cpu.r[d] = simd::join(a, b);
+                    op = "pack";
+                }
+                Wide::DualAddSubtract => {
+                    let (a0, a1) = simd::lanes(cpu.r[s], x & 2 != 0, x & 1 != 0);
+                    let (b0, b1) = simd::lanes(cpu.r[c], h & 8 != 0, h & 4 != 0);
+                    let first = if x & 8 == 0 { a0 + b0 } else { a0 - b0 };
+                    let second = if x & 4 == 0 { a1 + b1 } else { a1 - b1 };
+                    cpu.r[d] = simd::join(simd::sat16(first as i64), simd::sat16(second as i64));
+                    op = "dual_add_subtract";
+                }
+                Wide::DualMultiply => {
+                    let (a0, a1) = simd::lanes(cpu.r[s], x & 2 != 0, x & 1 != 0);
+                    let (b0, b1) = simd::lanes(cpu.r[c], h & 8 != 0, h & 4 != 0);
+                    let x2 = h & 2 != 0;
+                    cpu.r[d] = simd::join(simd::mul16(a0, b0, x2), simd::mul16(a1, b1, x2));
+                    op = "dual_multiply";
                 }
                 Wide::Unknown => return Ok(None),
             }
