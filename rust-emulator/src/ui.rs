@@ -5,6 +5,7 @@ use fm1_emu::encoders::knob;
 use fm1_emu::{bus::Bus, cpu::Cpu, firmware::Firmware};
 mod host_audio;
 mod ui_leds;
+mod ui_settings;
 mod ui_theme;
 mod web_editor;
 mod worker;
@@ -141,6 +142,14 @@ struct Emulator {
     state_status: Option<String>,
     /// "Reset flash state" asked; waiting for the confirmation.
     confirm_reset: bool,
+    /// The window's settings kept between runs (None in tests).
+    settings: Option<ui_settings::Saver>,
+    /// The saved theme and the one the run started with: a `--theme` for
+    /// one run is not remembered unless the toolbar changes it.
+    theme_saved: Option<String>,
+    theme_start: usize,
+    /// The window's inner size (points) as of the last frame.
+    window_size: Option<[u32; 2]>,
 }
 impl Emulator {
     #[cfg(test)]
@@ -176,6 +185,10 @@ impl Emulator {
             keeps_flash: state.is_some(),
             state_status: None,
             confirm_reset: false,
+            settings: None,
+            theme_saved: None,
+            theme_start: 0,
+            window_size: None,
         };
         app.knob_angle[0] = master_angle(app.master);
         if let Some(state) = state {
@@ -183,6 +196,62 @@ impl Emulator {
         }
         app.reset();
         app
+    }
+    /// Take the remembered MASTER, theme and LEDs switch; `theme` (from
+    /// `--theme` or FM1_THEME) wins over the saved theme for this run.
+    fn apply_settings(&mut self, settings: &ui_settings::Settings, theme: Option<usize>) {
+        self.set_master(settings.master);
+        self.leds.enabled = settings.leds;
+        self.theme_saved = settings.theme.clone();
+        let saved = settings.theme.as_deref().and_then(ui_theme::find);
+        if let (Some(name), None) = (&settings.theme, saved) {
+            eprintln!(
+                "saved theme {name:?} is unknown; themes: {}",
+                ui_theme::names()
+            );
+        }
+        self.theme = theme.or(saved).unwrap_or(0);
+        self.theme_start = self.theme;
+    }
+    fn set_master(&mut self, master: u16) {
+        self.master = master.min(1023);
+        self.knob_accum[0] = 0.;
+        self.knob_angle[0] = master_angle(self.master);
+        self.worker.master(self.master);
+    }
+    /// The settings as the window has them now.
+    fn current_settings(&self, window: Option<[u32; 2]>) -> ui_settings::Settings {
+        let theme = if self.theme == self.theme_start {
+            self.theme_saved.clone()
+        } else {
+            Some(ui_theme::THEMES[self.theme].name.to_string())
+        };
+        ui_settings::Settings {
+            master: self.master,
+            theme,
+            leds: self.leds.enabled,
+            window,
+        }
+    }
+    /// Save the settings once they have settled (no-op without a saver).
+    fn keep_settings(&mut self, ctx: &egui::Context) {
+        if self.settings.is_none() {
+            return;
+        }
+        let window = ctx.input(|i| {
+            i.viewport()
+                .inner_rect
+                .map(|rect| [rect.width().round() as u32, rect.height().round() as u32])
+        });
+        self.window_size = window.or(self.window_size);
+        let current = self.current_settings(self.window_size);
+        if let Some(Err(error)) = self
+            .settings
+            .as_mut()
+            .and_then(|saver| saver.update(&current, Instant::now()))
+        {
+            eprintln!("window settings not saved: {error}");
+        }
     }
     fn reset(&mut self) {
         self.clear();
@@ -641,6 +710,10 @@ impl Canvas {
 
 impl eframe::App for Emulator {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let current = self.current_settings(self.window_size);
+        if let Some(Err(error)) = self.settings.as_mut().map(|saver| saver.flush(&current)) {
+            eprintln!("window settings not saved: {error}");
+        }
         self.worker.flusher().flush(QUIT_SAVE_WAIT);
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -783,6 +856,7 @@ impl eframe::App for Emulator {
             )
             .show(ctx, |ui| self.panel(ui));
         self.worker.input(self.pressed);
+        self.keep_settings(ctx);
         ctx.request_repaint_after(Duration::from_millis(16));
     }
 }
@@ -856,13 +930,20 @@ fn main() -> eframe::Result {
     };
     let args = parse_args(std::env::args_os().skip(1)).unwrap_or_else(|error| fail(error));
     let theme = match (args.theme, std::env::var("FM1_THEME")) {
-        (Some(theme), _) => theme,
-        (None, Ok(name)) => theme_named(&name).unwrap_or_else(|error| fail(error)),
-        (None, Err(_)) => 0,
+        (Some(theme), _) => Some(theme),
+        (None, Ok(name)) => Some(theme_named(&name).unwrap_or_else(|error| fail(error))),
+        (None, Err(_)) => None,
     };
+    let settings_path = ui_settings::default_path();
+    let (settings, problems) =
+        ui_settings::load(&settings_path, ui_settings::Settings::new(MASTER_DEFAULT));
+    for problem in problems {
+        eprintln!("window settings: {problem}");
+    }
+    let [width, height] = settings.window.unwrap_or([1180, 830]);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1180., 830.])
+            .with_inner_size([width as f32, height as f32])
             .with_min_inner_size([800., 600.]),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
@@ -880,7 +961,9 @@ fn main() -> eframe::Result {
             };
             let mut app = Emulator::start(args.path.clone(), Some(state));
             app.clock_mhz = args.clock_mhz;
-            app.theme = theme;
+            app.apply_settings(&settings, theme);
+            app.window_size = settings.window;
+            app.settings = Some(ui_settings::Saver::new(settings_path, settings));
             app.worker.clock(args.clock_mhz.map(|mhz| mhz * 1_000_000));
             app.web =
                 web_editor::WebEditor::new(&args.path, args.ui.as_deref(), fm1_emu::web::ADDRESS);
@@ -1162,6 +1245,47 @@ mod tests {
         assert!(parse(&["--cpu-mhz", "0", "a.fwsc"]).is_err());
         assert!(parse(&["a.fwsc", "b.fwsc"]).is_err());
         assert!(parse(&[]).is_err());
+    }
+    #[test]
+    fn remembered_settings_reach_the_panel_and_a_one_run_theme_is_not_saved() {
+        let mut app = demo();
+        assert!(
+            app.settings.is_none(),
+            "tests never touch the settings file"
+        );
+        let mint = ui_theme::find("Mint").unwrap();
+        let saved = ui_settings::Settings {
+            master: 300,
+            theme: Some("Mint".into()),
+            leds: false,
+            window: Some([1200, 800]),
+        };
+        app.apply_settings(&saved, None);
+        assert_eq!(
+            (app.master, app.theme, app.leds.enabled),
+            (300, mint, false)
+        );
+        assert!((app.knob_angle[0] - master_angle(300)).abs() < 1e-6);
+        let adc = app
+            .worker
+            .inspect(|machine| machine.cpu.as_ref().unwrap().bus.devices.adc.master);
+        assert_eq!(adc, 300, "the guest reads the remembered MASTER");
+        assert_eq!(app.current_settings(saved.window), saved);
+        // --theme Black for this run: the file keeps Mint until the toolbar
+        // picks a theme.
+        let black = ui_theme::find("Black").unwrap();
+        app.apply_settings(&saved, Some(black));
+        assert_eq!(app.theme, black);
+        assert_eq!(app.current_settings(None).theme.as_deref(), Some("Mint"));
+        app.theme = ui_theme::find("Blue").unwrap();
+        assert_eq!(app.current_settings(None).theme.as_deref(), Some("Blue"));
+        // An unknown saved theme falls back to Classic.
+        let unknown = ui_settings::Settings {
+            theme: Some("Plaid".into()),
+            ..ui_settings::Settings::new(MASTER_DEFAULT)
+        };
+        app.apply_settings(&unknown, None);
+        assert_eq!(app.theme, 0);
     }
     #[test]
     fn the_worker_paces_the_guest_by_the_audio_queue() {
