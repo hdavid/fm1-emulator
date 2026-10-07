@@ -100,6 +100,45 @@ fn master_angle(master: u16) -> f32 {
 }
 /// Longest wait for the flash state to be saved when quitting.
 const QUIT_SAVE_WAIT: Duration = Duration::from_secs(5);
+/// Computer keys that hold the fourteen buttons (matrix ids 0..=13): the
+/// arrows for OCT, Space for PLAY / STOP, and letters the note keys leave
+/// free (mostly from the button's name) for the others, so a layer chord
+/// such as SAVE + note is one key held while another is tapped. Modifiers
+/// are not used: egui reports them as state, not as keys, without telling
+/// left from right.
+const BUTTON_KEYS: [egui::Key; 14] = [
+    egui::Key::ArrowLeft,  // OCT−
+    egui::Key::ArrowRight, // OCT+
+    egui::Key::X,          // FX
+    egui::Key::B,          // SEL
+    egui::Key::V,          // ENV
+    egui::Key::L,          // LFO
+    egui::Key::I,          // EDIT
+    egui::Key::O,          // GLO
+    egui::Key::U,          // HOME
+    egui::Key::Z,          // SAVE
+    egui::Key::P,          // ARP
+    egui::Key::Q,          // SEQ
+    egui::Key::Space,      // PLAY / STOP
+    egui::Key::C,          // REC
+];
+/// The computer key that holds matrix contact `id`, if any.
+fn key_binding(id: usize) -> Option<egui::Key> {
+    match id {
+        0..=13 => Some(BUTTON_KEYS[id]),
+        14..=26 => Some(NOTE_KEYS[id - 14]),
+        _ => None,
+    }
+}
+/// A button's tooltip, ending with its computer key ("PLAY / STOP · hold to
+/// press · Space").
+fn button_hint(id: usize, label: &str) -> String {
+    let label = label.replace('\n', " / ");
+    match key_binding(id) {
+        Some(key) => format!("{label} · hold to press · {}", key.name()),
+        None => format!("{label} · hold to press"),
+    }
+}
 const INK: Color32 = Color32::from_rgb(190, 194, 193);
 const ACCENT: Color32 = Color32::from_rgb(231, 193, 91);
 
@@ -376,13 +415,7 @@ impl Emulator {
             self.pulse_steps[id] = self.steps + 72_000_000;
         }
         let focused = ui.input(|i| i.focused);
-        let binding = match id {
-            0 => Some(egui::Key::ArrowLeft),
-            1 => Some(egui::Key::ArrowRight),
-            12 => Some(egui::Key::Space), // PLAY / STOP
-            14..=26 => Some(NOTE_KEYS[id - 14]),
-            _ => None,
-        };
+        let binding = key_binding(id);
         let keyboard = binding.is_some_and(|key| ui.input(|i| i.key_down(key)));
         if binding.is_some_and(|key| ui.input(|i| i.key_pressed(key))) {
             self.pulse[id] = Instant::now() + Duration::from_millis(100);
@@ -467,10 +500,8 @@ impl Emulator {
         }
         response.on_hover_text(if note {
             format!("Note {} · hold to press", id - 14 + 53)
-        } else if id == 12 {
-            format!("{} · hold to press · Space", label.replace('\n', " / "))
         } else {
-            format!("{label} · hold to press")
+            button_hint(id, label)
         });
     }
     /// Pointer movement on drawn knob `index`: whole encoder clicks are queued
@@ -1066,6 +1097,57 @@ mod tests {
             cpu.run(Some(stop), cpu.steps + 200_000, None).unwrap();
             assert_eq!(cpu.bus.lcd.pixels[202 * 240 + 24], 0x313031);
         });
+    }
+    #[test]
+    fn every_button_has_its_own_key_clear_of_the_note_keys() {
+        let keys: Vec<egui::Key> = (0..41).filter_map(key_binding).collect();
+        assert_eq!(keys.len(), 14 + 13, "all buttons and the first 13 notes");
+        let mut unique = keys.clone();
+        unique.sort_by_key(|key| key.name());
+        unique.dedup();
+        assert_eq!(unique.len(), keys.len(), "a key holds two contacts");
+        assert_eq!(key_binding(12), Some(egui::Key::Space));
+        assert_eq!(key_binding(9), Some(egui::Key::Z)); // SAVE
+        assert_eq!(
+            button_hint(12, "PLAY\nSTOP"),
+            "PLAY / STOP · hold to press · Space"
+        );
+        assert_eq!(button_hint(9, "SAVE"), "SAVE · hold to press · Z");
+    }
+    #[test]
+    fn a_held_button_key_holds_the_button_through_note_taps() {
+        let mut app = demo();
+        let ctx = egui::Context::default();
+        let key = |key, pressed| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let (save, note) = (9, 21); // SAVE and the G key's note
+        let expire = |app: &mut Emulator| {
+            for id in [save, note] {
+                app.pulse[id] = Instant::now();
+                app.pulse_steps[id] = 0;
+            }
+        };
+        draw(&mut app, &ctx, vec![key(egui::Key::Z, true)], true);
+        assert!(app.pressed[save]);
+        for _ in 0..2 {
+            // Tap the note twice (a "press again" confirmation).
+            draw(&mut app, &ctx, vec![key(egui::Key::G, true)], true);
+            assert!(app.pressed[save] && app.pressed[note]);
+            draw(&mut app, &ctx, vec![key(egui::Key::G, false)], true);
+            expire(&mut app);
+            draw(&mut app, &ctx, vec![], true);
+            assert!(app.pressed[save], "SAVE must stay held while Z is down");
+            assert!(!app.pressed[note], "the note must be let go between taps");
+        }
+        draw(&mut app, &ctx, vec![key(egui::Key::Z, false)], true);
+        expire(&mut app);
+        draw(&mut app, &ctx, vec![], true);
+        assert!(!app.pressed[save], "releasing Z releases SAVE");
     }
     #[test]
     fn pause_and_restart_control_the_actual_cpu() {
