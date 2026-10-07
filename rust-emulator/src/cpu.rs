@@ -153,6 +153,18 @@ struct Repeat {
     register: Option<(usize, u32)>,
 }
 
+/// Each register of `current` that differs from `before`, else the one of
+/// `other`: a branch-free select over whole register files (vectorised),
+/// where a register-by-register `if` mispredicts and spills.
+#[inline(always)]
+fn keep_changed(current: &[u32; 16], before: &[u32; 16], other: &[u32; 16]) -> [u32; 16] {
+    std::array::from_fn(|i| {
+        let changed = (current[i] != before[i]) as u32;
+        let mask = changed.wrapping_neg();
+        (current[i] & mask) | (other[i] & !mask)
+    })
+}
+
 pub struct Cpu {
     decode: DecodeCache,
     blocks: crate::blocks::Cache,
@@ -405,14 +417,8 @@ impl Cpu {
                 // Both slots read the incoming registers. Compiler bundles have
                 // distinct destinations; retain writes from the following slot
                 // where the primary slot did not change that register.
-                for i in 0..16 {
-                    if self.r[i] == before[i] {
-                        self.r[i] = following_registers[i];
-                    }
-                    if self.sr[i] == specials_before[i] {
-                        self.sr[i] = following_specials[i];
-                    }
-                }
+                self.r = keep_changed(&self.r, &before, &following_registers);
+                self.sr = keep_changed(&self.sr, &specials_before, &following_specials);
                 self.pc = continuation;
                 op
             } else {
