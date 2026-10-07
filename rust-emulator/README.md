@@ -20,9 +20,65 @@ mise run rust-foundation
 
 ## Native device window
 
+### The desktop app
+
+Start `fm1-ui` with no firmware (double-click the app) and the window opens
+with the panel idle and a **Load firmware…** button; the same button is always
+in the toolbar. It opens the system's own file dialog, filtered to `.fwsc`,
+`.elf` and `.bin` (any file can still be picked with "All files"). You can also
+drop a firmware file on the window, or pick one from the **Recent** menu.
+
+Loading a firmware reboots into it, like a power cycle: the running firmware's
+flash state is saved first, the CPU and devices are rebuilt from the new
+package, and the new firmware's own flash state (its family, see below) is
+restored. Nothing is lost, so there is no confirmation. The window title and the
+toolbar show which firmware runs. The web editor follows the firmware too.
+
+The last firmware is remembered (`recent` in `fm1-ui.toml`, up to eight) and
+opened again at the next start unless a firmware is named on the command line
+(that wins) or Recent's "Reopen the last firmware at start" is off.
+
+**macOS app.** `scripts/bundle-macos.sh fm1-ui OUTPUT_DIR` makes `FM-1
+Emulator.app` (bundle id `org.fm1-emulator.ui`, the version from `Cargo.toml`,
+Retina, macOS 11 or later, an ad-hoc signature). CI attaches it, zipped, to
+every commit release. The icon is a generated placeholder
+(`macos/icon-placeholder.png`, made by `macos/make-placeholder-icon.py`); put a
+real 1024x1024 `macos/icon.png` there and the script uses it. The app is not
+signed with an Apple developer identity or notarized (TODO), so the first launch
+needs one of: right-click the app and choose Open, or `xattr -dr
+com.apple.quarantine "FM-1 Emulator.app"`.
+
+**Where the app keeps its files.** Run as an installed app, it keeps
+`fm1-ui.toml` and the flash state in the operating system's per-user
+application-data folder (outside any repository), because the folder the
+program sits in can be read-only:
+
+| OS | Folder |
+|---|---|
+| macOS | `~/Library/Application Support/FM-1 Emulator/` |
+| Windows | `%APPDATA%\FM-1 Emulator\` |
+| Linux | `$XDG_DATA_HOME/fm1-emulator/` (default `~/.local/share/fm1-emulator/`) |
+
+`fm1-ui.toml` is there and the flash state is in its `state/` subfolder. This
+"app mode" applies to a macOS `.app` bundle, to any launch with no arguments at
+all (a double-click or a desktop entry on Windows and Linux), and to
+`--app-data`. Everything else keeps the old places: `state/` beside the
+emulator (the crate directory for a build under `target/`) or `--state PATH`,
+which always wins, so `./emulator`, `cargo run` and the sloop `tools/emu.py`
+behave as before.
+
+**Windows and Linux.** The CI artifacts are the plain executable (`emulator.exe`,
+`emulator`) and open with the same picker when started without arguments. On
+Windows the program is built for the GUI subsystem, so a double-click opens no
+console window; started from a terminal it joins that terminal's console, so
+`--help`, messages and the USB serial stdin work as for a console program. On
+Linux the dialog is the XDG desktop portal's (GNOME, KDE and others provide it;
+no GTK is needed to build).
+
 From the project root:
 
 ```sh
+./emulator                   # no firmware: opens with the Load firmware button
 ./emulator build/display/firmware.elf
 ./emulator "$HOME/Downloads/FM-1.fwsc"
 mise run build-display       # optional: rebuild guest with the vendor compiler
@@ -128,8 +184,11 @@ Orange, Mint, Cream and Blue. Pick one in the toolbar, or at start with
 ### Command line and environment
 
 ```sh
-fm1-ui [--cpu-mhz N | --cpu-mhz=N] [--ui DIR] [--theme NAME] [--state PATH] [--fresh] FIRMWARE
+fm1-ui [--cpu-mhz N | --cpu-mhz=N] [--ui DIR] [--theme NAME] [--state PATH] [--fresh] [--app-data] [FIRMWARE]
 ```
+
+Without FIRMWARE the last one opened is used if it still exists, else the
+window waits for **Load firmware…**.
 
 `./emulator` (the launcher) forwards only `--cpu-mhz` and `--ui`; run
 `rust-emulator/target/release/fm1-ui` directly for the others.
@@ -141,6 +200,7 @@ fm1-ui [--cpu-mhz N | --cpu-mhz=N] [--ui DIR] [--theme NAME] [--state PATH] [--f
 | `--theme NAME` | Panel colours: Classic, Black, Lilac, Orange, Mint, Cream, Blue (this run only; also `FM1_THEME`) |
 | `--state PATH` | Flash state file, or a folder when PATH is one or ends in `/` |
 | `--fresh` | Start from the package alone and replace the state |
+| `--app-data` | Keep `fm1-ui.toml` and the state in the per-user application-data folder, as the installed app does (ignored with `--state`) |
 
 Environment variables (those the code reads; the headless tools take their own,
 listed with them below):
@@ -164,8 +224,11 @@ listed with them below):
 ### Window settings kept between runs
 
 `fm1-ui` remembers the MASTER volume, the panel theme picked in the toolbar,
-the LEDs switch and the window size in `fm1-ui.toml`, a few `key = value`
-lines beside the flash state (`state/`, or the `--state` folder). It is
+the LEDs switch, the window size and the recently opened firmware files
+(`recent`, `reopen_last`) in `fm1-ui.toml`, a few `key = value` lines beside
+the flash state (`state/`, or the `--state` folder; in the application-data
+folder for the installed app, see above). Strings are quoted, with `\\` and `\"`
+as the only escapes. It is
 written a second after a change settles and when the window closes; a file
 that cannot be read, or a line with a bad value, falls back to the defaults
 with a message on stderr. Delete the file to start from the defaults. The

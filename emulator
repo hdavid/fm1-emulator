@@ -2,13 +2,15 @@
 # SPDX-License-Identifier: GPL-3.0-only
 set -eu
 usage() {
-    echo 'usage: ./emulator [--cpu-mhz N] [--ui DIR] <firmware.fwsc|application.elf|application.bin>' >&2
+    echo 'usage: ./emulator [--cpu-mhz N] [--ui DIR] [firmware.fwsc|application.elf|application.bin]' >&2
+    echo 'without a firmware the window opens with a Load firmware button' >&2
     echo 'example: ./emulator build/display/firmware.elf' >&2
     exit 2
 }
 cpu_mhz=
 ui=
-while [ "$#" -gt 1 ]; do
+while [ "$#" -gt 0 ]; do
+    case "$1" in --cpu-mhz|--ui) [ "$#" -ge 2 ] || usage ;; *) break ;; esac
     case "$1" in
         --cpu-mhz) cpu_mhz=$2; shift 2 ;;
         --ui)
@@ -21,11 +23,14 @@ while [ "$#" -gt 1 ]; do
         *) usage ;;
     esac
 done
-[ "$#" -eq 1 ] || usage
-case "$1" in
-    /*) firmware=$1 ;;
-    *) firmware=$PWD/$1 ;;
-esac
+[ "$#" -le 1 ] || usage
+firmware=
+if [ "$#" -eq 1 ]; then
+    case "$1" in
+        /*) firmware=$1 ;;
+        *) firmware=$PWD/$1 ;;
+    esac
+fi
 project=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$project"
 mise exec -- cargo build --quiet --locked --release \
@@ -34,13 +39,11 @@ mise exec -- cargo build --quiet --locked --release \
 binary="$project/rust-emulator/target/release/fm1-ui"
 if [ "$(uname -s)" = Darwin ]; then
     # A bundle gives macOS a stable application identity and Retina support.
-    app="$project/rust-emulator/target/release/FM-1 Emulator.app/Contents"
-    mkdir -p "$app/MacOS"
-    cp rust-emulator/macos/Info.plist "$app/Info.plist"
-    if [ ! -f "$app/MacOS/fm1-ui" ] || [ "$binary" -nt "$app/MacOS/fm1-ui" ]; then
-        cp "$binary" "$app/MacOS/fm1-ui.new"
-        mv -f "$app/MacOS/fm1-ui.new" "$app/MacOS/fm1-ui"
+    bundles="$project/rust-emulator/target/release"
+    app="$bundles/FM-1 Emulator.app/Contents"
+    if [ ! -f "$app/MacOS/fm1-ui" ] || [ "$binary" -nt "$app/MacOS/fm1-ui" ] || [ rust-emulator/macos/Info.plist -nt "$app/Info.plist" ]; then
+        rust-emulator/scripts/bundle-macos.sh "$binary" "$bundles" > /dev/null
     fi
     binary="$app/MacOS/fm1-ui"
 fi
-exec "$binary" ${cpu_mhz:+--cpu-mhz "$cpu_mhz"} ${ui:+--ui "$ui"} "$firmware"
+exec "$binary" ${cpu_mhz:+--cpu-mhz "$cpu_mhz"} ${ui:+--ui "$ui"} ${firmware:+"$firmware"}

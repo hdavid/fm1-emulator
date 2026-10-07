@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// The Windows GUI subsystem: double-clicking the program opens the window and
+// no console. The command line still works from a terminal: ui_console joins
+// the parent's console at start, so messages and stdin behave as before.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Rect, Sense, Stroke, StrokeKind};
 use fm1_emu::encoders::knob;
 #[cfg(test)]
 use fm1_emu::{bus::Bus, cpu::Cpu, firmware::Firmware};
 mod host_audio;
+mod ui_app;
+mod ui_console;
 mod ui_leds;
 mod ui_settings;
 mod ui_theme;
@@ -156,8 +162,44 @@ const QUIT_SAVE_WAIT: Duration = Duration::from_secs(5);
 const INK: Color32 = Color32::from_rgb(190, 194, 193);
 const ACCENT: Color32 = Color32::from_rgb(231, 193, 91);
 
+/// The firmware formats the loader reads: `.fwsc` packages, ELF files and raw
+/// application images.
+const FIRMWARE_EXTENSIONS: [&str; 3] = ["fwsc", "elf", "bin"];
+
+/// Whether `path` looks like a firmware file (by its extension).
+fn is_firmware_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            FIRMWARE_EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        })
+}
+
+/// The window title for the running firmware.
+fn window_title(path: Option<&std::path::Path>) -> String {
+    match path.and_then(|path| path.file_name()) {
+        Some(name) => format!("{} - FM-1 Emulator", name.to_string_lossy()),
+        None => "FM-1 Emulator".into(),
+    }
+}
+
 struct Emulator {
-    path: PathBuf,
+    /// The firmware that runs; None until one is loaded.
+    path: Option<PathBuf>,
+    /// `--ui DIR`: web editor files for every firmware, if given.
+    ui_dir: Option<PathBuf>,
+    /// Firmware files opened, the latest first, and whether to reopen the
+    /// latest at start (both kept in the settings).
+    recent: Vec<PathBuf>,
+    reopen_last: bool,
+    /// "Load firmware…" clicked: open the file dialog at the next frame.
+    pick_requested: bool,
+    /// The last thing that went wrong with a firmware file, for the status line.
+    notice: Option<String>,
+    /// The window title last sent to the window system.
+    title: String,
     worker: worker::Worker,
     generation: u64,
     loaded: bool,
@@ -205,9 +247,15 @@ struct Emulator {
     window_size: Option<[u32; 2]>,
 }
 impl Emulator {
-    fn new(path: PathBuf) -> Self {
+    fn new(path: Option<PathBuf>) -> Self {
         let mut app = Self {
+            title: window_title(path.as_deref()),
             path,
+            ui_dir: None,
+            recent: Vec::new(),
+            reopen_last: true,
+            pick_requested: false,
+            notice: None,
             worker: worker::Worker::new(),
             generation: 0,
             loaded: false,
@@ -257,6 +305,8 @@ impl Emulator {
         }
         self.theme = theme.or(saved).unwrap_or(0);
         self.theme_start = self.theme;
+        self.recent = settings.recent.clone();
+        self.reopen_last = settings.reopen_last;
     }
     fn set_master(&mut self, master: u16) {
         self.master = master.min(1023);
@@ -276,6 +326,8 @@ impl Emulator {
             theme,
             leds: self.leds.enabled,
             window,
+            recent: self.recent.clone(),
+            reopen_last: self.reopen_last,
         }
     }
     /// Save the settings once they have settled (no-op without a saver).
@@ -300,7 +352,126 @@ impl Emulator {
     }
     fn reset(&mut self) {
         self.clear();
-        self.worker.restart(self.generation, self.path.clone());
+        if let Some(path) = &self.path {
+            self.worker.restart(self.generation, path.clone());
+        }
+    }
+    /// Boot `path` as a power cycle: the running firmware's flash state is
+    /// saved first (the worker does that when it restarts), the CPU and
+    /// devices are rebuilt from the new package, and that firmware's own flash
+    /// state (its family) is restored. The editor follows the new firmware.
+    fn load_firmware(&mut self, path: PathBuf) {
+        self.notice = None;
+        // Free the editor's port before the next firmware's editor takes it.
+        self.web = web_editor::WebEditor::disabled("No web editor");
+        self.web = web_editor::WebEditor::new(&path, self.ui_dir.as_deref(), fm1_emu::web::ADDRESS);
+        self.worker.web(self.web.hub());
+        match self.web.url() {
+            Some(url) => eprintln!("web editor at {url}"),
+            None => eprintln!("{}", self.web.unavailable().unwrap_or_default()),
+        }
+        ui_settings::remember(&mut self.recent, &path);
+        self.path = Some(path);
+        self.reset();
+    }
+    /// Load a firmware file the user named (dialog, recent list, drop).
+    fn open_firmware(&mut self, path: PathBuf) {
+        if is_firmware_file(&path) {
+            self.load_firmware(path);
+        } else {
+            self.notice = Some(format!(
+                "{} is not a firmware file (.fwsc, .elf or .bin)",
+                path.display()
+            ));
+        }
+    }
+    /// Ask for a firmware file with the system's own dialog (blocks the
+    /// window while it is open; it is modal anyway) and load it.
+    fn pick_firmware(&mut self) {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Load firmware")
+            .add_filter("FM-1 firmware", &FIRMWARE_EXTENSIONS)
+            .add_filter("All files", &["*"]);
+        if let Some(folder) = self
+            .path
+            .as_deref()
+            .or(self.recent.first().map(PathBuf::as_path))
+            .and_then(std::path::Path::parent)
+            .filter(|folder| folder.is_dir())
+        {
+            dialog = dialog.set_directory(folder);
+        }
+        if let Some(path) = dialog.pick_file() {
+            self.open_firmware(path);
+        }
+    }
+    /// The toolbar's firmware controls: the load button and the recent list.
+    fn firmware_controls(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .button("Load firmware…")
+            .on_hover_text("Pick a .fwsc, .elf or .bin file. The emulator reboots into it; the running firmware's flash state is saved first and the new one's is restored. You can also drop a file on the window.")
+            .clicked()
+        {
+            self.pick_requested = true;
+        }
+        let mut chosen = None;
+        ui.menu_button("Recent", |ui| {
+            if self.recent.is_empty() {
+                ui.weak("No firmware opened yet");
+            }
+            for path in &self.recent {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                if ui
+                    .button(name)
+                    .on_hover_text(path.display().to_string())
+                    .clicked()
+                {
+                    chosen = Some(path.clone());
+                    ui.close_menu();
+                }
+            }
+            ui.separator();
+            ui.checkbox(&mut self.reopen_last, "Reopen the last firmware at start")
+                .on_hover_text("Without a firmware on the command line, start with the latest one if it still exists");
+        });
+        if let Some(path) = chosen {
+            self.open_firmware(path);
+        }
+    }
+    /// What the window shows before any firmware is loaded.
+    fn idle_prompt(&mut self, ctx: &egui::Context) {
+        egui::Area::new(egui::Id::new("open_firmware_prompt"))
+            .anchor(Align2::CENTER_CENTER, vec2(0., 0.))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(24.)
+                    .show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.heading("No firmware loaded");
+                            ui.label(
+                                "Load a .fwsc package (or an .elf / .bin image) to start the FM-1.",
+                            );
+                            ui.add_space(8.);
+                            if ui
+                                .add(egui::Button::new(
+                                    egui::RichText::new("Load firmware…").size(18.),
+                                ))
+                                .clicked()
+                            {
+                                self.pick_requested = true;
+                            }
+                            ui.weak("or drop a firmware file on this window");
+                        });
+                    });
+            });
+    }
+    /// Firmware files dropped on the window: the first one is loaded.
+    fn dropped_firmware(&mut self, ctx: &egui::Context) {
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        if let Some(path) = dropped.into_iter().find_map(|file| file.path) {
+            self.open_firmware(path);
+        }
     }
     /// The view of a machine about to start (a new generation).
     fn clear(&mut self) {
@@ -774,15 +945,22 @@ impl eframe::App for Emulator {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("FM-1").size(22.).strong().color(INK));
                     ui.add_space(12.);
-                    ui.label(
-                        egui::RichText::new(
-                            self.path.file_name().unwrap_or_default().to_string_lossy(),
-                        )
-                        .color(Color32::from_gray(150)),
-                    )
-                    .on_hover_text(self.path.display().to_string());
+                    let (name, hover) = match &self.path {
+                        Some(path) => (
+                            path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                            path.display().to_string(),
+                        ),
+                        None => ("no firmware".into(), "Load a firmware to start".into()),
+                    };
+                    ui.label(egui::RichText::new(name).color(Color32::from_gray(150)))
+                        .on_hover_text(hover);
+                    ui.add_space(8.);
+                    self.firmware_controls(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Restart").clicked() {
+                        if ui
+                            .add_enabled(self.path.is_some(), egui::Button::new("Restart"))
+                            .clicked()
+                        {
                             self.reset();
                         }
                         self.flash_menu(ui);
@@ -836,7 +1014,9 @@ impl eframe::App for Emulator {
                         {
                             self.paused = !self.paused;
                         }
-                        let (label, color) = if self.fault.is_some() {
+                        let (label, color) = if self.path.is_none() {
+                            ("No firmware", Color32::from_gray(150))
+                        } else if self.fault.is_some() {
                             ("Stopped", Color32::LIGHT_RED)
                         } else if self.paused {
                             ("Paused", ACCENT)
@@ -848,6 +1028,9 @@ impl eframe::App for Emulator {
                 });
             });
         egui::TopBottomPanel::bottom("status").frame(egui::Frame::new().fill(Color32::from_rgb(22, 25, 27)).inner_margin(16.)).show(ctx, |ui| {
+            if let Some(notice) = &self.notice {
+                ui.colored_label(Color32::LIGHT_RED, notice);
+            }
             if let Some(error) = &self.fault {
                 ui.colored_label(Color32::LIGHT_RED, error);
                 ui.label("This firmware needs additional emulation support. The LCD retains its last guest-written pixels.");
@@ -885,6 +1068,17 @@ impl eframe::App for Emulator {
                 });
             }
         });
+        // File dialogs and drops are handled between frames' widgets, never
+        // inside a menu callback, so the menu has closed.
+        if std::mem::take(&mut self.pick_requested) {
+            self.pick_firmware();
+        }
+        self.dropped_firmware(ctx);
+        let title = window_title(self.path.as_deref());
+        if title != self.title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title = title;
+        }
         // Receive worker snapshots, then send this frame's input below.
         // Losing focus immediately releases every matrix contact.
         if !ctx.input(|i| i.focused) {
@@ -900,6 +1094,9 @@ impl eframe::App for Emulator {
                     .inner_margin(10.),
             )
             .show(ctx, |ui| self.panel(ui));
+        if self.path.is_none() {
+            self.idle_prompt(ctx);
+        }
         self.worker.input(self.pressed);
         self.keep_settings(ctx);
         ctx.request_repaint_after(Duration::from_millis(16));
@@ -908,7 +1105,8 @@ impl eframe::App for Emulator {
 /// The command line.
 #[derive(Debug, PartialEq)]
 struct Args {
-    path: PathBuf,
+    /// The firmware on the command line; None: the saved one, or the picker.
+    path: Option<PathBuf>,
     clock_mhz: Option<u32>,
     /// Web editor files to serve instead of FIRMWARE-ui.zip.
     ui: Option<PathBuf>,
@@ -918,15 +1116,18 @@ struct Args {
     state: Option<PathBuf>,
     /// `--fresh`: start from the package alone and replace the flash state.
     fresh: bool,
+    /// `--app-data`: keep the settings and flash state in the per-user
+    /// application-data folder, as an installed app does.
+    app_data: bool,
 }
 const USAGE: &str =
-    "usage: emulator [--cpu-mhz N] [--ui DIR] [--theme NAME] [--state PATH] [--fresh] <firmware>";
+    "usage: emulator [--cpu-mhz N] [--ui DIR] [--theme NAME] [--state PATH] [--fresh] [--app-data] [firmware]";
 /// The theme called `name`, or an error listing them.
 fn theme_named(name: &str) -> Result<usize, String> {
     ui_theme::find(name)
         .ok_or_else(|| format!("unknown theme {name:?}; themes: {}", ui_theme::names()))
 }
-/// `[--cpu-mhz N] [--ui DIR] [--theme NAME] [--state PATH] [--fresh] FIRMWARE`.
+/// `[--cpu-mhz N] [--ui DIR] [--theme NAME] [--state PATH] [--fresh] [--app-data] [FIRMWARE]`.
 fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Args, String> {
     let mut path = None;
     let mut clock = None;
@@ -934,6 +1135,7 @@ fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Args
     let mut theme = None;
     let mut state = None;
     let mut fresh = false;
+    let mut app_data = false;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         if arg == "--state" {
@@ -942,6 +1144,8 @@ fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Args
             ));
         } else if arg == "--fresh" {
             fresh = true;
+        } else if arg == "--app-data" {
+            app_data = true;
         } else if arg == "--ui" {
             ui = Some(PathBuf::from(args.next().ok_or("--ui needs a directory")?));
         } else if arg == "--theme" {
@@ -964,33 +1168,72 @@ fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Args
         }
     }
     Ok(Args {
-        path: path.ok_or(USAGE)?,
+        path,
         clock_mhz: clock,
         ui,
         theme,
         state,
         fresh,
+        app_data,
     })
 }
 fn main() -> eframe::Result {
+    ui_console::attach_parent();
     let fail = |error: String| -> ! {
         eprintln!("{error}");
         std::process::exit(2);
     };
+    if std::env::args_os().any(|arg| arg == "--help" || arg == "-h") {
+        println!("{USAGE}\nWithout a firmware the window opens with a Load firmware button.");
+        return Ok(());
+    }
+    let bare = std::env::args_os().len() == 1;
     let args = parse_args(std::env::args_os().skip(1)).unwrap_or_else(|error| fail(error));
     let theme = match (args.theme, std::env::var("FM1_THEME")) {
         (Some(theme), _) => Some(theme),
         (None, Ok(name)) => Some(theme_named(&name).unwrap_or_else(|error| fail(error))),
         (None, Err(_)) => None,
     };
-    // The window's settings sit beside the flash state.
-    let settings_path =
-        ui_settings::path_for(args.state.as_deref(), &fm1_emu::flash_state::default_dir());
+    // Where the settings and the flash state go: beside the emulator or at
+    // --state, except for an installed app (see ui_app).
+    let exe = std::env::current_exe().unwrap_or_default();
+    let launch = ui_app::Launch {
+        bare,
+        state_given: args.state.is_some(),
+        forced: args.app_data,
+    };
+    let (settings_path, state) = if ui_app::is_app_mode(&exe, launch) {
+        match ui_app::data_dir(ui_app::Os::HOST, &ui_app::Env::from_process()) {
+            Some(data) => {
+                let places = ui_app::places_in(&data);
+                (places.settings, Some(places.state))
+            }
+            None => {
+                eprintln!(
+                    "no per-user data folder (HOME or APPDATA unset): using the emulator's folder"
+                );
+                (
+                    ui_settings::path_for(None, &fm1_emu::flash_state::default_dir()),
+                    None,
+                )
+            }
+        }
+    } else {
+        (
+            ui_settings::path_for(args.state.as_deref(), &fm1_emu::flash_state::default_dir()),
+            args.state.clone(),
+        )
+    };
     let (settings, problems) =
         ui_settings::load(&settings_path, ui_settings::Settings::new(MASTER_DEFAULT));
     for problem in problems {
         eprintln!("window settings: {problem}");
     }
+    // The command line wins; else the latest firmware, if it is still there.
+    let first_firmware = args
+        .path
+        .clone()
+        .or_else(|| settings.startup_firmware().map(PathBuf::from));
     let [width, height] = settings.window.unwrap_or([1180, 830]);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1004,19 +1247,13 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            let mut app = Emulator::new(args.path.clone());
+            let mut app = Emulator::new(None);
+            app.ui_dir = args.ui.clone();
             app.clock_mhz = args.clock_mhz;
             app.apply_settings(&settings, theme);
             app.window_size = settings.window;
             app.settings = Some(ui_settings::Saver::new(settings_path, settings));
             app.worker.clock(args.clock_mhz.map(|mhz| mhz * 1_000_000));
-            app.web =
-                web_editor::WebEditor::new(&args.path, args.ui.as_deref(), fm1_emu::web::ADDRESS);
-            match app.web.url() {
-                Some(url) => eprintln!("web editor at {url}"),
-                None => eprintln!("{}", app.web.unavailable().unwrap_or_default()),
-            }
-            app.worker.web(app.web.hub());
             match host_audio::HostAudio::open() {
                 Ok(audio) => {
                     app.worker.audio(Some(audio.queue.clone()));
@@ -1028,7 +1265,7 @@ fn main() -> eframe::Result {
             // Ctrl+C and SIGTERM save it before quitting, as closing does.
             app.keeps_flash = true;
             app.worker.keep_flash(worker::StateConfig {
-                path: args.state.clone(),
+                path: state.clone(),
                 fresh: args.fresh,
             });
             let flusher = app.worker.flusher();
@@ -1040,7 +1277,11 @@ fn main() -> eframe::Result {
                     "no Ctrl+C handler ({error}): only closing the window saves the flash state"
                 );
             }
-            app.reset(); // Apply the clock, audio and editor from the first instruction.
+            // Apply the clock, audio and editor from the first instruction.
+            match first_firmware.clone() {
+                Some(path) => app.load_firmware(path),
+                None => app.worker.web(None),
+            }
             app.worker.read_stdin();
             Ok(Box::new(app))
         }),
@@ -1051,10 +1292,10 @@ fn main() -> eframe::Result {
 mod tests {
     use super::*;
     fn demo() -> Emulator {
-        Emulator::new(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../tests/fixtures/display/firmware.elf"),
-        )
+        Emulator::new(Some(fixture()))
+    }
+    fn fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/display/firmware.elf")
     }
     fn draw(app: &mut Emulator, ctx: &egui::Context, events: Vec<egui::Event>, focused: bool) {
         let _ = ctx.run(
@@ -1089,7 +1330,8 @@ mod tests {
         assert!(app.pressed[0]);
         app.paused = true;
         app.refresh(&ctx);
-        let stop = Firmware::load(&app.path).unwrap().symbols["display_frame_done"];
+        let stop =
+            Firmware::load(app.path.as_ref().unwrap()).unwrap().symbols["display_frame_done"];
         app.worker.inspect(move |machine| {
             let cpu = machine.cpu.as_mut().unwrap();
             cpu.run(Some(stop), cpu.steps + 200_000, None).unwrap();
@@ -1329,12 +1571,13 @@ mod tests {
     fn the_command_line_takes_a_firmware_and_an_instruction_clock() {
         let parse = |args: &[&str]| parse_args(args.iter().map(std::ffi::OsString::from));
         let args = |clock_mhz, ui: Option<&str>| Args {
-            path: PathBuf::from("a.fwsc"),
+            path: Some(PathBuf::from("a.fwsc")),
             clock_mhz,
             ui: ui.map(PathBuf::from),
             theme: None,
             state: None,
             fresh: false,
+            app_data: false,
         };
         assert_eq!(parse(&["a.fwsc"]), Ok(args(None, None)));
         assert_eq!(
@@ -1349,7 +1592,9 @@ mod tests {
         assert!(parse(&["--cpu-mhz", "0", "a.fwsc"]).is_err());
         assert_eq!(parse(&["--cpu-mhz=96", "a.fwsc"]), Ok(args(Some(96), None)));
         assert!(parse(&["a.fwsc", "b.fwsc"]).is_err());
-        assert!(parse(&[]).is_err());
+        // No firmware is fine: the window opens with the picker.
+        assert_eq!(parse(&[]).unwrap().path, None);
+        assert!(parse(&["--app-data"]).unwrap().app_data);
         let state = parse(&["--state", "st/", "--fresh", "a.fwsc"]).unwrap();
         assert_eq!(
             (state.state, state.fresh),
@@ -1384,6 +1629,8 @@ mod tests {
             theme: Some("Mint".into()),
             leds: false,
             window: Some([1200, 800]),
+            recent: vec![PathBuf::from("/fw/a.fwsc"), PathBuf::from("/fw/b.fwsc")],
+            reopen_last: false,
         };
         app.apply_settings(&saved, None);
         assert_eq!(
@@ -1458,7 +1705,7 @@ mod tests {
     #[ignore = "requires FM1_STOCK_FWSC; measures GUI worker latency in release mode"]
     fn stock_click_reaches_a_new_guest_frame_through_the_gui_worker() {
         let path = std::env::var_os("FM1_STOCK_FWSC").expect("set FM1_STOCK_FWSC");
-        let mut app = Emulator::new(PathBuf::from(path));
+        let mut app = Emulator::new(Some(PathBuf::from(path)));
         let ctx = egui::Context::default();
         let deadline = Instant::now() + Duration::from_secs(240);
         while app.steps < 3_000_000_000 {
@@ -1503,5 +1750,147 @@ mod tests {
                 break;
             }
         }
+    }
+    #[test]
+    fn without_a_firmware_the_panel_idles_and_offers_to_load_one() {
+        let mut app = Emulator::new(None);
+        assert!(app.path.is_none() && !app.loaded);
+        let ctx = egui::Context::default();
+        let frame = |app: &mut Emulator| {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0., 0.), vec2(1180., 830.))),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| app.panel(ui));
+                    if app.path.is_none() {
+                        app.idle_prompt(ctx);
+                    }
+                },
+            );
+        };
+        for _ in 0..3 {
+            frame(&mut app);
+        }
+        let prompt = egui::Id::new("open_firmware_prompt");
+        assert!(
+            ctx.memory(|memory| memory.area_rect(prompt)).is_some(),
+            "the open-firmware prompt is drawn"
+        );
+        // Restart and the worker are harmless with nothing to run.
+        app.reset();
+        app.refresh(&ctx);
+        assert!(!app.loaded && app.fault.is_none() && app.texture.is_none());
+        assert_eq!(window_title(None), "FM-1 Emulator");
+        // A non-firmware file is refused with a message, not loaded.
+        app.open_firmware(PathBuf::from("/tmp/notes.txt"));
+        assert!(
+            app.path.is_none()
+                && app
+                    .notice
+                    .as_deref()
+                    .is_some_and(|n| n.contains("notes.txt"))
+        );
+    }
+    #[test]
+    fn firmware_files_are_recognised_by_extension() {
+        for name in ["a.fwsc", "b.ELF", "c.bin", "/x y/z.Fwsc"] {
+            assert!(is_firmware_file(std::path::Path::new(name)), "{name}");
+        }
+        for name in ["a.txt", "fwsc", "a.fwsc.zip", ""] {
+            assert!(!is_firmware_file(std::path::Path::new(name)), "{name}");
+        }
+        assert_eq!(
+            window_title(Some(std::path::Path::new("/fw/optimist-0.2.fwsc"))),
+            "optimist-0.2.fwsc - FM-1 Emulator"
+        );
+    }
+    fn nor_transaction(bus: &mut Bus, bytes: &[u8]) {
+        bus.write(0x500c0, 0, 4).unwrap();
+        for &byte in bytes {
+            bus.write(0x11c08, u32::from(byte), 4).unwrap();
+        }
+        bus.write(0x500c0, 1, 4).unwrap();
+    }
+    /// The first byte of the flash at `offset`, once the worker has caught up.
+    fn flash_byte(app: &Emulator, offset: usize) -> u8 {
+        app.worker
+            .inspect(move |machine| machine.cpu.as_ref().unwrap().bus.nor_bytes()[offset])
+    }
+    #[test]
+    fn loading_a_firmware_reboots_into_it_and_keeps_each_ones_flash_state() {
+        let dir = std::env::temp_dir().join(format!("fm1-ui-load-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Two firmware families from the one fixture.
+        let (alpha, beta) = (dir.join("alpha-1.0.elf"), dir.join("beta-1.0.elf"));
+        std::fs::copy(fixture(), &alpha).unwrap();
+        std::fs::copy(fixture(), &beta).unwrap();
+        let state = dir.join("state").join("");
+        let mut app = Emulator::new(None);
+        app.keeps_flash = true;
+        app.worker.keep_flash(worker::StateConfig {
+            path: Some(state.clone()),
+            fresh: false,
+        });
+        let ctx = egui::Context::default();
+        let wait_for = |app: &mut Emulator, what: &str, done: &dyn Fn(&Emulator) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !done(app) {
+                app.refresh(&ctx);
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        // Load A: it boots, and the guest programs a flash byte.
+        app.load_firmware(alpha.clone());
+        assert_eq!(app.path.as_deref(), Some(alpha.as_path()));
+        assert_eq!(
+            window_title(app.path.as_deref()),
+            "alpha-1.0.elf - FM-1 Emulator"
+        );
+        wait_for(&mut app, "A to boot", &|app| app.loaded);
+        let gen_a = app.generation;
+        app.worker.inspect(|machine| {
+            let bus = &mut machine.cpu.as_mut().unwrap().bus;
+            nor_transaction(bus, &[0x06]);
+            nor_transaction(bus, &[0x02, 0x0f, 0x00, 0x00, 0xa5]);
+        });
+        // The guest's program finishes after a few emulated milliseconds.
+        let written = |app: &Emulator| {
+            app.worker
+                .inspect(|m| m.cpu.as_ref().unwrap().bus.nor_writes())
+                > 0
+        };
+        wait_for(&mut app, "A's flash write", &written);
+        assert_eq!(flash_byte(&app, 0x0f0000), 0xa5);
+        // Load B: a power cycle into the other firmware (a new generation).
+        app.load_firmware(beta.clone());
+        assert!(app.generation > gen_a, "the machine was rebuilt");
+        assert!(!app.loaded && app.fault.is_none());
+        wait_for(&mut app, "B to boot", &|app| app.loaded);
+        assert_eq!(app.path.as_deref(), Some(beta.as_path()));
+        assert_eq!(
+            flash_byte(&app, 0x0f0000),
+            0xff,
+            "B has its own, erased flash"
+        );
+        // A's flash state was saved on the way out; B has none yet.
+        assert!(state.join("alpha.nor").is_file(), "A's state is saved");
+        assert!(!state.join("beta.nor").exists());
+        assert_eq!(app.recent, [beta.clone(), alpha.clone()]);
+        // Back to A: its flash comes back.
+        app.load_firmware(alpha.clone());
+        wait_for(&mut app, "A to reboot", &|app| app.loaded);
+        assert_eq!(
+            flash_byte(&app, 0x0f0000),
+            0xa5,
+            "A's flash state is restored"
+        );
+        assert_eq!(app.recent, [alpha, beta]);
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

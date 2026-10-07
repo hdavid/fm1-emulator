@@ -87,27 +87,28 @@ jobs:
           asset="emulator-$EMULATOR_PLATFORM"
           case "$RUNNER_OS" in
             macOS)
-              app="package/FM-1 Emulator.app/Contents"
-              mkdir -p "$app/MacOS"
-              cp rust-emulator/macos/Info.plist "$app/Info.plist"
-              cp "$binary" "$app/MacOS/fm1-ui"
-              codesign --force --sign - "package/FM-1 Emulator.app"
+              # The app: Info.plist, icon and ad-hoc signature (unsigned by Apple).
+              rust-emulator/scripts/bundle-macos.sh "$binary" package
               cat > package/emulator <<'SH'
           #!/bin/sh
           set -eu
-          if [ "$#" -ne 1 ]; then
-              echo 'usage: ./emulator <firmware.fwsc|application.elf|application.bin>' >&2
+          if [ "$#" -gt 1 ]; then
+              echo 'usage: ./emulator [firmware.fwsc|application.elf|application.bin]' >&2
               exit 2
+          fi
+          directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+          if [ "$#" -eq 0 ]; then
+              exec "$directory/FM-1 Emulator.app/Contents/MacOS/fm1-ui"
           fi
           case "$1" in
               /*) firmware=$1 ;;
               *) firmware=$PWD/$1 ;;
           esac
-          directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
           exec "$directory/FM-1 Emulator.app/Contents/MacOS/fm1-ui" "$firmware"
           SH
               chmod +x package/emulator
-              tar -czf "dist/$asset.tar.gz" -C package .
+              # ditto keeps the bundle's signature and permissions intact.
+              ditto -c -k --sequesterRsrc package "dist/$asset.zip"
               ;;
             Windows)
               cp "$binary.exe" package/emulator.exe
@@ -155,13 +156,13 @@ jobs:
             echo "Release $tag already exists."
             exit 0
           fi
-          for asset in emulator-linux-amd64.tar.gz emulator-linux-arm64.tar.gz emulator-macos-arm64.tar.gz emulator-windows-amd64.zip; do
+          for asset in emulator-linux-amd64.tar.gz emulator-linux-arm64.tar.gz emulator-macos-arm64.zip emulator-windows-amd64.zip; do
             test -s "dist/$asset"
           done
           (cd dist && sha256sum emulator-* > SHA256SUMS)
           # The backticks below are literal Markdown in the release notes.
           # shellcheck disable=SC2016
-          printf 'Native emulator builds for commit `%s`.\n\nAll four platforms passed the core/GUI tests and the pinned Felucca 0.9-beta boot and note-rendering test. Firmware is not included.\n\nExtract the archive for your platform and pass a `.fwsc`, `.elf` or `.bin` firmware path to `emulator` (`emulator.exe` on Windows). See the repository README for usage and current limitations.\n' "$GITHUB_SHA" > "$RUNNER_TEMP/release-notes.md"
+          printf 'Native emulator builds for commit `%s`.\n\nAll four platforms passed the core/GUI tests and the pinned Felucca 0.9-beta boot and note-rendering test. Firmware is not included.\n\nExtract the archive for your platform and start the app (`FM-1 Emulator.app` on macOS, `emulator.exe` on Windows, `emulator` on Linux). It opens with a Load firmware button for a `.fwsc`, `.elf` or `.bin` file; a firmware path on the command line still works. The macOS app is not signed by Apple: see the repository README for the first launch. Current limitations are in the README too.\n' "$GITHUB_SHA" > "$RUNNER_TEMP/release-notes.md"
           latest=false
           default_head=$(gh api "repos/$GH_REPO/commits/$DEFAULT_BRANCH" --jq .sha)
           if [ "$GITHUB_SHA" = "$default_head" ]; then

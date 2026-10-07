@@ -20,7 +20,7 @@ meant to disappear as they are reviewed:
 | [#13](https://github.com/simonjohansson/fm1-emulator/pull/13) | Tools and persistence: op-scan, flash kept between runs, diagnostics |
 
 Contents: [What this fork adds](#what-this-fork-adds) |
-[Quick start](#quick-start) | [Keys](#keys) | [TODO](#todo) |
+[Get the app](#get-the-app) | [Quick start](#quick-start) | [Keys](#keys) | [TODO](#todo) |
 [Upstream's README](#upstream-readme-simon-johansson)
 
 Everything below the "Upstream's README" heading is upstream's text, kept as
@@ -74,7 +74,10 @@ Each line was checked against the code and `git log upstream/main..feat/upstream
 - The FM-1's colour editions as panel themes: Classic, Black, Lilac, Orange,
   Mint, Cream, Blue.
 - A computer key for every panel button, note-key tooltips; Space plays and stops.
-- Remembered window settings (`fm1-ui.toml`: MASTER, theme, LEDs, window size).
+- Remembered window settings (`fm1-ui.toml`: MASTER, theme, LEDs, window size, recent firmware).
+- A desktop app: a macOS `.app` bundle, a **Load firmware…** button with the system
+  file dialog on macOS, Windows and Linux, drag and drop, a Recent menu; loading
+  reboots into the new firmware ([Get the app](#get-the-app)).
 - 192 and 312 MHz clock choices; `--cpu-mhz N` or `--cpu-mhz=N`.
 
 ### Persistence
@@ -93,6 +96,35 @@ Each line was checked against the code and `git log upstream/main..feat/upstream
 - `diagnose`, `latency` (input-to-audio and MIDI clock timing), `knob_check`,
   `preset_sweep`, `extract`.
 
+## Get the app
+
+Every commit on this fork's CI publishes native builds on the
+[releases page](https://github.com/hdavid/fm1-emulator/releases) (Firmware is
+not included).
+
+- **macOS (Apple silicon):** download `emulator-macos-arm64.zip`, unzip it and
+  move `FM-1 Emulator.app` to Applications. The app is not signed by Apple
+  (signing and notarization are a TODO), so the first time: right-click it and
+  choose **Open**, then Open again; or run
+  `xattr -dr com.apple.quarantine "FM-1 Emulator.app"` once.
+- **Windows:** unzip `emulator-windows-amd64.zip` and double-click `emulator.exe`
+  (Windows SmartScreen may ask for "More info", then "Run anyway").
+- **Linux:** untar `emulator-linux-amd64.tar.gz` (or `-arm64`) and run `./emulator`.
+  The file dialog needs the XDG desktop portal that most desktops provide.
+
+Open it with no arguments (double-click) and press **Load firmware…** to pick a
+`.fwsc` (or `.elf` / `.bin`) file; drag and drop onto the window works as well,
+and the toolbar's **Recent** menu lists the last eight. Loading a firmware
+reboots the emulator into it like a power cycle: the running firmware's flash
+state is saved first and the new one's is restored. The last firmware opens
+again at the next start unless you give one on the command line.
+
+Settings (`fm1-ui.toml`) and the saved flash state live in the OS's per-user
+application-data folder for the installed app, outside any repository:
+`~/Library/Application Support/FM-1 Emulator/` on macOS, `%APPDATA%\FM-1 Emulator\`
+on Windows, `$XDG_DATA_HOME/fm1-emulator/` (default `~/.local/share/fm1-emulator/`)
+on Linux. Details: [the emulator README](rust-emulator/README.md#the-desktop-app).
+
 ## Quick start
 
 Needs [mise](https://mise.jdx.dev/installing-mise.html) and a native toolchain
@@ -103,10 +135,11 @@ included; `.fwsc`, `.elf` and `.bin` load.
 git clone -b feat/upstream-merge https://github.com/hdavid/fm1-emulator.git
 cd fm1-emulator
 ./emulator /path/to/firmware.fwsc
+./emulator                              # no firmware: use the Load firmware button
 ```
 
 `./emulator` builds `fm1-ui` and opens it; it takes only `--cpu-mhz N` and
-`--ui DIR`. For the other options run the binary it builds:
+`--ui DIR` (and an optional firmware). For the other options run the binary it builds:
 
 ```sh
 rust-emulator/target/release/fm1-ui --theme mint --cpu-mhz 96 /path/to/firmware.fwsc
@@ -117,7 +150,8 @@ rust-emulator/target/release/fm1-ui --fresh /path/to/firmware.fwsc
 (On macOS `./emulator` runs the same binary inside an app bundle under
 `rust-emulator/target/release/`.) Options: `--cpu-mhz N` (instruction clock;
 default is the firmware's own), `--ui DIR` (a firmware's web editor),
-`--theme NAME`, `--state PATH`, `--fresh`.
+`--theme NAME`, `--state PATH`, `--fresh`, `--app-data` (keep the settings and
+state in the per-user application-data folder, as the installed app does).
 
 **Flash state.** Whatever the firmware writes to its flash (projects, presets,
 settings) is saved under `rust-emulator/state/<firmware family>.nor` and laid

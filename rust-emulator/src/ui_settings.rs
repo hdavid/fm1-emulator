@@ -20,6 +20,8 @@ const WINDOW_MIN: [u32; 2] = [800, 600];
 const WINDOW_MAX: u32 = 16_384;
 /// Highest MASTER reading (the ADC is 10-bit).
 const MASTER_MAX: u16 = 1023;
+/// How many opened firmware files are remembered.
+pub(super) const RECENT_MAX: usize = 8;
 
 /// What the window remembers.
 #[derive(Clone, Debug, PartialEq)]
@@ -32,6 +34,10 @@ pub(super) struct Settings {
     pub leds: bool,
     /// The window's inner size in points; None: the default.
     pub window: Option<[u32; 2]>,
+    /// Firmware files opened, the latest first (at most `RECENT_MAX`).
+    pub recent: Vec<PathBuf>,
+    /// Start with the latest firmware when none is named on the command line.
+    pub reopen_last: bool,
 }
 
 impl Settings {
@@ -41,8 +47,26 @@ impl Settings {
             theme: None,
             leds: true,
             window: None,
+            recent: Vec::new(),
+            reopen_last: true,
         }
     }
+    /// The firmware to start with when none is named: the latest that is
+    /// still a file, if the setting allows it.
+    pub fn startup_firmware(&self) -> Option<&Path> {
+        self.reopen_last
+            .then(|| self.recent.first())
+            .flatten()
+            .map(PathBuf::as_path)
+            .filter(|path| path.is_file())
+    }
+}
+
+/// `path` as the latest firmware: first in `recent`, once, the list capped.
+pub(super) fn remember(recent: &mut Vec<PathBuf>, path: &Path) {
+    recent.retain(|known| known != path);
+    recent.insert(0, path.to_path_buf());
+    recent.truncate(RECENT_MAX);
 }
 
 /// The settings file in `state` (the `--state` folder, or the folder of a
@@ -78,6 +102,14 @@ pub(super) fn parse(text: &str, defaults: Settings) -> (Settings, Vec<String>) {
             "theme" => parse_string(value).map(|theme| settings.theme = Some(theme)),
             "leds" => parse_bool(value).map(|leds| settings.leds = leds),
             "window" => parse_window(value).map(|window| settings.window = Some(window)),
+            "reopen_last" => parse_bool(value).map(|reopen| settings.reopen_last = reopen),
+            "recent" => parse_list(value).map(|list| {
+                settings.recent = list
+                    .into_iter()
+                    .take(RECENT_MAX)
+                    .map(PathBuf::from)
+                    .collect()
+            }),
             _ => Some(()),
         };
         if applied.is_none() {
@@ -91,9 +123,48 @@ fn parse_master(value: &str) -> Option<u16> {
     value.parse().ok().filter(|master| *master <= MASTER_MAX)
 }
 
+/// A quoted string; `\\` and `\"` are the only escapes (so Windows paths fit).
 fn parse_string(value: &str) -> Option<String> {
-    let inner = value.strip_prefix('"')?.strip_suffix('"')?;
-    (!inner.contains(['"', '\\'])).then(|| inner.to_string())
+    let (text, rest) = take_string(value)?;
+    rest.trim().is_empty().then_some(text)
+}
+
+/// The quoted string at the start of `value` and what follows it.
+fn take_string(value: &str) -> Option<(String, &str)> {
+    let mut chars = value.strip_prefix('"')?.char_indices();
+    let mut text = String::new();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            '"' => return Some((text, &value[at + 2..])),
+            '\\' => match chars.next()?.1 {
+                escaped @ ('\\' | '"') => text.push(escaped),
+                _ => return None,
+            },
+            c => text.push(c),
+        }
+    }
+    None
+}
+
+/// `["a", "b"]`: quoted strings in brackets.
+fn parse_list(value: &str) -> Option<Vec<String>> {
+    let mut rest = value.strip_prefix('[')?.trim_start();
+    let mut list = Vec::new();
+    while !rest.starts_with(']') {
+        let (text, after) = take_string(rest)?;
+        list.push(text);
+        rest = after.trim_start();
+        rest = match rest.strip_prefix(',') {
+            Some(after) => after.trim_start(),
+            None if rest.starts_with(']') => rest,
+            None => return None,
+        };
+    }
+    rest[1..].trim().is_empty().then_some(list)
+}
+
+fn quote(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn parse_bool(value: &str) -> Option<bool> {
@@ -119,16 +190,22 @@ pub(super) fn format(settings: &Settings) -> String {
         "# fm1-ui window settings, rewritten when they change in the window.\n# Delete this file to start from the defaults.\n",
     );
     text.push_str(&format!("master = {}\n", settings.master));
-    if let Some(theme) = settings
-        .theme
-        .as_ref()
-        .filter(|theme| parse_string(&format!("\"{theme}\"")).is_some())
-    {
-        text.push_str(&format!("theme = \"{theme}\"\n"));
+    if let Some(theme) = &settings.theme {
+        text.push_str(&format!("theme = {}\n", quote(theme)));
     }
     text.push_str(&format!("leds = {}\n", settings.leds));
     if let Some([width, height]) = settings.window {
         text.push_str(&format!("window = [{width}, {height}]\n"));
+    }
+    text.push_str(&format!("reopen_last = {}\n", settings.reopen_last));
+    // A path that is not valid text cannot be written, so it is not kept.
+    let recent: Vec<String> = settings
+        .recent
+        .iter()
+        .filter_map(|path| path.to_str().map(quote))
+        .collect();
+    if !recent.is_empty() {
+        text.push_str(&format!("recent = [{}]\n", recent.join(", ")));
     }
     text
 }
@@ -236,6 +313,11 @@ mod tests {
             theme: Some("Mint".into()),
             leds: false,
             window: Some([1300, 900]),
+            recent: vec![
+                PathBuf::from("/fw/optimist-0.2.fwsc"),
+                PathBuf::from("C:\\Users\\ann\\My \"fw\", too.fwsc"),
+            ],
+            reopen_last: false,
         }
     }
 
@@ -305,13 +387,79 @@ mod tests {
     }
 
     #[test]
-    fn a_theme_name_that_cannot_be_written_is_left_out() {
+    fn quotes_and_backslashes_survive_the_file() {
         let settings = Settings {
-            theme: Some("a\"b".into()),
-            ..Settings::new(1)
+            theme: Some("a\"b\\c".into()),
+            ..sample()
         };
-        assert!(!format(&settings).contains("theme"));
-        assert_eq!(parse(&format(&settings), Settings::new(9)).0.theme, None);
+        assert_eq!(
+            parse(&format(&settings), Settings::new(9)),
+            (settings, vec![])
+        );
+        // Odd strings are refused, not misread.
+        assert_eq!(parse_string(r#""a\nb""#), None);
+        assert_eq!(parse_string(r#""open"#), None);
+        assert_eq!(parse_string(r#""a" x"#), None);
+        assert_eq!(parse_list(r#"["a", "b""#), None);
+        assert_eq!(parse_list(r#"["a" "b"]"#), None);
+        assert_eq!(parse_list("[]"), Some(vec![]));
+        assert_eq!(
+            parse_list(r#"[ "a,b" , "c" ]"#),
+            Some(vec!["a,b".to_string(), "c".to_string()])
+        );
+    }
+
+    #[test]
+    fn the_last_firmware_is_remembered_and_reopened_only_if_it_exists() {
+        let dir = scratch("recent");
+        fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.fwsc"), dir.join("b.fwsc"));
+        fs::write(&a, b"x").unwrap();
+        let mut recent = Vec::new();
+        remember(&mut recent, &a);
+        remember(&mut recent, &b);
+        remember(&mut recent, &a);
+        assert_eq!(
+            recent,
+            [a.clone(), b.clone()],
+            "latest first, no duplicates"
+        );
+        for n in 0..20 {
+            remember(&mut recent, Path::new(&format!("/fw/{n}.fwsc")));
+        }
+        assert_eq!(recent.len(), RECENT_MAX);
+        assert_eq!(recent[0], Path::new("/fw/19.fwsc"));
+        // Saved and read back, in the file.
+        let path = dir.join(FILE_NAME);
+        let settings = Settings {
+            recent: vec![a.clone(), b.clone()],
+            ..Settings::new(512)
+        };
+        save(&path, &settings).unwrap();
+        let (loaded, problems) = load(&path, Settings::new(0));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(loaded, settings);
+        // The default reopens the latest if it is still a file.
+        assert_eq!(loaded.startup_firmware(), Some(a.as_path()));
+        let missing = Settings {
+            recent: vec![b.clone()],
+            ..settings.clone()
+        };
+        assert_eq!(missing.startup_firmware(), None, "b.fwsc does not exist");
+        let off = Settings {
+            reopen_last: false,
+            ..settings
+        };
+        assert_eq!(off.startup_firmware(), None, "the setting is off");
+        assert_eq!(
+            Settings::new(1).startup_firmware(),
+            None,
+            "nothing opened yet"
+        );
+        // An older file without these keys keeps the defaults.
+        let (old, _) = parse("master = 5\n", Settings::new(512));
+        assert!(old.reopen_last && old.recent.is_empty());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
