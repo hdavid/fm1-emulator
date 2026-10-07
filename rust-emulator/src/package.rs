@@ -64,6 +64,31 @@ fn resource(raw: &[u8], key: u16, offset: usize, expected: u16) -> Result<Vec<u8
     Ok(data)
 }
 
+/// Whether a decrypted voice bank looks like DX7 packed voices: the first
+/// 128-byte voice's name (bytes 118-127) is printable ASCII, as FM-1_015's
+/// "PIANO 1   " is. Guards the relocated search below against a chance
+/// 16-bit CRC match.
+fn plausible_voices(data: &[u8]) -> bool {
+    data.get(118..128)
+        .is_none_or(|name| name.iter().all(|byte| (0x20..0x7f).contains(byte)))
+}
+
+/// A USR payload whose ciphertext was made for another package position:
+/// Baud Girl FM-1_093 stores FM-1_015's USR bytes unchanged at 0xae400 (CRC
+/// e3bc verifies only as if at 0x93400). Both packages place resources on
+/// 1 KB boundaries, and the cipher position repeats every 256 KB (it enters
+/// as position / 4, 16 bits), so 256 positions cover every candidate. Only a
+/// payload whose plaintext CRC verifies and whose first voice is plausible
+/// is returned, with the position it verified at.
+fn relocated_resource(raw: &[u8], key: u16, expected: u16) -> Option<(usize, Vec<u8>)> {
+    (0..0x40000).step_by(0x400).find_map(|offset| {
+        resource(raw, key, offset, expected)
+            .ok()
+            .filter(|data| plausible_voices(data))
+            .map(|data| (offset, data))
+    })
+}
+
 #[cfg(test)]
 mod resource_tests {
     use super::*;
@@ -96,7 +121,10 @@ mod resource_tests {
         assert!(resource(&RAW[..64], 0x980f, 0x93400, 0x05e6).is_err());
     }
 
-    fn with_usr(target: u32, capacity: u32, corrupt: bool) -> Vec<u8> {
+    /// A package with a USR resource. `copied`: the payload keeps RAW's
+    /// ciphertext for package position 0x93400 wherever it is stored, as
+    /// Baud Girl FM-1_093 keeps FM-1_015's.
+    fn with_usr(target: u32, capacity: u32, corrupt: bool, copied: bool) -> Vec<u8> {
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../build/display/firmware.fwsc");
         let raw = std::fs::read(path).unwrap();
@@ -132,6 +160,9 @@ mod resource_tests {
         let mut payload = resource(&RAW, 0x980f, 0x93400, 0x05e6).unwrap();
         for (i, block) in payload.chunks_mut(32).enumerate() {
             enc(block, 0x980f ^ (offset / 4 + i * 8) as u16);
+        }
+        if copied {
+            payload = RAW.to_vec();
         }
         if corrupt {
             payload[0] ^= 1;
@@ -172,9 +203,9 @@ mod resource_tests {
 
     #[test]
     fn preset_loading_preserves_the_application_and_flash_key_region() {
-        let raw = with_usr(0xea000, 0x12000, false);
+        let raw = with_usr(0xea000, 0x12000, false, false);
         let (package, image) = Package::decode(&raw).unwrap();
-        let bad = with_usr(0xea000, 0x12000, true);
+        let bad = with_usr(0xea000, 0x12000, true, false);
         let (without_usr, unchanged) = Package::decode(&bad).unwrap();
         assert_eq!(image, unchanged);
         assert_eq!(
@@ -188,9 +219,37 @@ mod resource_tests {
     }
 
     #[test]
+    fn a_usr_copied_from_another_package_position_loads_where_it_verifies() {
+        // Baud Girl FM-1_093 stores FM-1_015's USR ciphertext unchanged at
+        // 0xae400; it verifies only as if at 0x93400.
+        let (package, _) = Package::decode(&with_usr(0xea000, 0x12000, false, true)).unwrap();
+        assert_eq!(
+            &package.flash[0xea000..0xea041],
+            resource(&RAW, 0x980f, 0x93400, 0x05e6).unwrap()
+        );
+        // Nothing verifies a corrupted copy.
+        let mut raw = with_usr(0xea000, 0x12000, false, true);
+        let at = raw.len() - 10;
+        raw[at] ^= 1;
+        let (package, _) = Package::decode(&raw).unwrap();
+        assert_eq!(&package.flash[0xea000..0xea041], &[255; 65]);
+    }
+
+    #[test]
+    fn a_relocated_voice_bank_needs_a_printable_first_voice_name() {
+        let mut bank = vec![0x63u8; 128];
+        bank[118..128].copy_from_slice(b"PIANO 1   ");
+        assert!(plausible_voices(&bank));
+        bank[120] = 0xd7;
+        assert!(!plausible_voices(&bank));
+        // Shorter than one voice: nothing to check.
+        assert!(plausible_voices(&[0xd7; 65]));
+    }
+
+    #[test]
     fn auxiliary_file_cannot_overwrite_code_or_exceed_its_reservation() {
         for (target, capacity) in [(0x4000, 0x12000), (0xea000, 64), (0xea000, u32::MAX)] {
-            assert!(Package::decode(&with_usr(target, capacity, false)).is_err());
+            assert!(Package::decode(&with_usr(target, capacity, false, false)).is_err());
         }
     }
 }
@@ -351,17 +410,29 @@ impl Package {
             if !reserved || target < 0x4000 + u32_at(area_entry, 8)? as usize || end > 0xff000 {
                 return Err("USR does not match a separate reserved flash area".into());
             }
-            match resource(payload, key, offset, expected) {
-                Ok(data) => {
-                    flash.resize(flash.len().max(end), 255);
-                    flash[target..target + data.len()].copy_from_slice(&data);
-                }
-                Err(error) => {
+            let data = match resource(payload, key, offset, expected) {
+                Ok(data) => Some(data),
+                Err(error) => match relocated_resource(payload, key, expected) {
                     // Modified update packages can retain an auxiliary file
-                    // encrypted at its old package offset. Keep application
-                    // boot support, but do not install unverified preset data.
-                    eprintln!("FWSC: {error}; USR preset data was not loaded");
-                }
+                    // encrypted at its old package offset. A device updated
+                    // from the official firmware holds that factory data
+                    // (unverified on hardware): install it once its plaintext
+                    // CRC verifies; never install unverified bytes.
+                    Some((original, data)) => {
+                        eprintln!(
+                            "FWSC: {error} at package offset {offset:#x}; it verifies as if at {original:#x} (modulo 256 KB; copied from another package): installing that factory USR data"
+                        );
+                        Some(data)
+                    }
+                    None => {
+                        eprintln!("FWSC: {error}; USR preset data was not loaded");
+                        None
+                    }
+                },
+            };
+            if let Some(data) = data {
+                flash.resize(flash.len().max(end), 255);
+                flash[target..target + data.len()].copy_from_slice(&data);
             }
         }
         Ok((Self { flash, key, header }, image))
