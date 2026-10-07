@@ -30,6 +30,13 @@ fn fold(hash: u64, value: u32) -> u64 {
     (hash ^ value as u64).wrapping_mul(FNV_PRIME)
 }
 
+/// Host CPU time of this thread; only macOS reports it, elsewhere 0.
+#[cfg(not(target_os = "macos"))]
+fn thread_cpu_seconds() -> f64 {
+    0.0
+}
+
+#[cfg(target_os = "macos")]
 fn thread_cpu_seconds() -> f64 {
     #[repr(C)]
     struct Timespec {
