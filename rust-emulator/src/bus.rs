@@ -168,6 +168,31 @@ impl Bus {
         self.xip_view = view;
     }
 
+    /// The serial NOR's raw contents (1 MiB, as on the chip).
+    pub fn nor_bytes(&self) -> &[u8] {
+        &self.nor.bytes
+    }
+    /// Page programs and sector erases the guest has completed.
+    pub fn nor_writes(&self) -> u64 {
+        self.nor.writes()
+    }
+    /// Offsets of the 4 KiB NOR sectors erased, programmed or restored.
+    pub fn nor_tracked_sectors(&self) -> Vec<usize> {
+        self.nor.tracked_sectors()
+    }
+    /// Lay a saved NOR sector over the flash through the same path an erase
+    /// and program take (raw bytes, encrypted XIP view).
+    pub fn restore_nor_sector(&mut self, offset: usize, data: &[u8]) -> Result<(), String> {
+        self.nor.restore_sector(offset, data)?;
+        self.refresh_xip_view();
+        Ok(())
+    }
+    /// Let a NOR program or erase run for `ticks` (tests without a CPU).
+    #[cfg(test)]
+    pub(crate) fn advance_nor(&mut self, ticks: u32) {
+        self.nor.advance(ticks);
+        self.refresh_xip_view();
+    }
     pub(crate) fn load_flash(&mut self, bytes: &[u8], key: u16) {
         self.nor.load(bytes, key);
         self.refresh_xip_view();

@@ -108,6 +108,36 @@ Orange, Mint, Cream and Blue. Pick one in the toolbar, or at start with
 `--theme NAME` or `FM1_THEME=NAME` (the option wins); the choice is not
 saved between runs.
 
+### Flash kept between runs
+
+Like the device across a power cycle, `fm1-ui` keeps what the firmware wrote
+to its serial flash: projects, autosave, presets, kits and settings saved in
+one session are there at the next start. Every 4 KiB sector the firmware
+erases or programs is saved to a state file for its firmware family, about
+one second after the last flash write (so a crash or kill loses at most that
+second), when the window closes, on Ctrl+C or SIGTERM, and before the Restart
+button (a power cycle).
+
+- The family is the package's file name up to its version:
+  `optimist-0.1-dev-5379036.fwsc` and `optimist-0.2.fwsc` share `optimist`,
+  `felucca-1.0.3.fwsc` is `felucca`, `sloop-2.3.fwsc` is `sloop`. A newer
+  build of a firmware so starts with the older one's data.
+- The state is `state/FAMILY.nor` (a 1 MiB flash image; sectors the firmware
+  never wrote read erased) and `state/FAMILY.index` (the sectors that count),
+  in the emulator's directory (`rust-emulator/` for a binary under
+  `target/`). `--state PATH` uses another file, or a folder when PATH is one
+  or ends in `/`.
+- At start the saved sectors are laid over the freshly loaded package, through
+  the same path a guest erase and program take (raw flash, encrypted XIP view).
+  A saved sector that overlaps the package's boot and application area is
+  skipped and a line says so: new code, old data, like an update.
+- `--fresh` starts from the package alone and replaces the state; the toolbar's
+  Flash menu has **Reset flash state…** (with a confirmation) for the same
+  thing while running. Deleting the two files works too.
+
+Headless tools (`diagnose`, the tests) neither read nor write a state, so
+their results repeat.
+
 Instruction dispatch uses a shared first-word decode table and a bounded cache
 of wide instruction words. A bounded basic-block cache also prepares common
 register, arithmetic, shift, memory and short branch operations, including their

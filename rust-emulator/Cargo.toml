@@ -11,7 +11,7 @@ lto = "thin"
 codegen-units = 1
 
 [features]
-gui = ["dep:eframe", "dep:cpal", "web"]
+gui = ["dep:eframe", "dep:cpal", "dep:ctrlc", "web"]
 # The web editor bridge: a loopback HTTP/WebSocket server (src/web).
 web = ["dep:tungstenite", "dep:zip"]
 
@@ -25,3 +25,4 @@ eframe = { version = "=0.31.1", optional = true, default-features = false, featu
 cpal = { version = "0.15", optional = true }
 tungstenite = { version = "0.30", optional = true, default-features = false, features = ["handshake"] }
 zip = { version = "8.6", optional = true, default-features = false, features = ["deflate-flate2-zlib-rs"] }
+ctrlc = { version = "3", features = ["termination"], optional = true }

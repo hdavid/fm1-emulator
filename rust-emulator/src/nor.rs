@@ -19,6 +19,11 @@ pub struct Nor {
     pending: Option<Pending>,
     /// Counts completed programs and erases (flash contents changed).
     generation: u64,
+    /// Completed programs and erases only (not package loads or restores).
+    writes: u64,
+    /// Per 4 KiB sector: erased or programmed during this run, or restored
+    /// from a saved flash state (`flash_state`).
+    tracked: Vec<bool>,
 }
 
 /// Everything an XIP read depends on besides the address: when it is
@@ -29,6 +34,9 @@ pub(crate) struct XipKey {
     busy: bool,
     generation: u64,
 }
+
+/// Erase unit of the P25Q80H (sector erase, command 0x20).
+pub const SECTOR: usize = 4096;
 
 impl Default for Nor {
     fn default() -> Self {
@@ -44,6 +52,8 @@ impl Default for Nor {
             busy_ticks: 0,
             pending: None,
             generation: 0,
+            writes: 0,
+            tracked: vec![false; 1024 * 1024 / SECTOR],
         }
     }
 }
@@ -57,6 +67,49 @@ impl Nor {
         self.key = key;
         self.generation += 1;
         self.regs[..3].copy_from_slice(&[0x809803b5, 1, 0x8e17]);
+    }
+    /// Completed page programs and sector erases so far.
+    pub fn writes(&self) -> u64 {
+        self.writes
+    }
+    /// Offsets of the sectors erased, programmed or restored this run.
+    pub fn tracked_sectors(&self) -> Vec<usize> {
+        (self.tracked.iter().enumerate())
+            .filter(|(_, &tracked)| tracked)
+            .map(|(index, _)| index * SECTOR)
+            .collect()
+    }
+    /// Lay a saved sector over the flash, as if the firmware had erased and
+    /// programmed it: raw bytes and the encrypted XIP view both follow.
+    /// `offset` must be sector-aligned and `data` one sector long.
+    pub fn restore_sector(&mut self, offset: usize, data: &[u8]) -> Result<(), String> {
+        if !offset.is_multiple_of(SECTOR)
+            || data.len() != SECTOR
+            || offset + SECTOR > self.bytes.len()
+        {
+            return Err(format!(
+                "flash sector {offset:#x} is outside the flash or misaligned"
+            ));
+        }
+        self.bytes[offset..offset + SECTOR].copy_from_slice(data);
+        self.sync_decoded(offset, offset + SECTOR);
+        self.tracked[offset / SECTOR] = true;
+        self.generation += 1;
+        Ok(())
+    }
+    /// Re-encrypt `start..end` of the raw flash into the XIP view, where the
+    /// SFC decrypts on the fly (application area, from 0x4000).
+    fn sync_decoded(&mut self, start: usize, end: usize) {
+        if let Some(decoded) = &mut self.decoded {
+            let start = start.max(0x4000);
+            if start < end {
+                let plain = &mut decoded[start - 0x4000..end - 0x4000];
+                plain.copy_from_slice(&self.bytes[start..end]);
+                for (i, block) in plain.chunks_mut(32).enumerate() {
+                    crate::package::enc(block, self.key ^ ((start - 0x4000) / 4 + i * 8) as u16);
+                }
+            }
+        }
     }
     pub fn packaged(&self) -> bool {
         self.decoded.is_some()
@@ -179,7 +232,7 @@ impl Nor {
             }
             [0x20, a, b, c] if self.write_enabled => {
                 let address = ((*a as usize) << 16) | ((*b as usize) << 8) | *c as usize;
-                self.pending = Some(Pending::Erase(address % self.bytes.len() & !0xfff));
+                self.pending = Some(Pending::Erase((address % self.bytes.len()) & !0xfff));
                 self.busy_ticks = 192_000;
             }
             _ => {}
@@ -216,16 +269,9 @@ impl Nor {
         };
         self.write_enabled = false;
         self.generation += 1;
-        if let Some(decoded) = &mut self.decoded {
-            let start = start.max(0x4000);
-            if start < end {
-                let plain = &mut decoded[start - 0x4000..end - 0x4000];
-                plain.copy_from_slice(&self.bytes[start..end]);
-                for (i, block) in plain.chunks_mut(32).enumerate() {
-                    crate::package::enc(block, self.key ^ ((start - 0x4000) / 4 + i * 8) as u16);
-                }
-            }
-        }
+        self.writes += 1;
+        self.tracked[start / SECTOR..end.div_ceil(SECTOR)].fill(true);
+        self.sync_decoded(start, end);
     }
     pub fn write(&mut self, a: u32, v: u32) -> Option<Result<(), &'static str>> {
         self.read(a)?;
@@ -371,6 +417,61 @@ mod tests {
         );
         nor.write(0x40300, 0).unwrap().unwrap();
         assert_eq!(nor.xip(0x0208d000, 4).unwrap().unwrap(), u32::MAX);
+    }
+
+    #[test]
+    fn erases_and_programs_track_their_sectors_and_count_as_writes() {
+        let mut nor = Nor::default();
+        assert!(nor.tracked_sectors().is_empty());
+        transaction(&mut nor, &[6]);
+        transaction(&mut nor, &[0x20, 9, 0xf1, 0x23]);
+        assert_eq!(nor.writes(), 0, "an erase counts once it completes");
+        nor.advance(192_000);
+        transaction(&mut nor, &[6]);
+        transaction(&mut nor, &[2, 0x0f, 0xe0, 0x10, 0x5a]);
+        nor.advance(48_000);
+        assert_eq!(nor.writes(), 2);
+        assert_eq!(nor.tracked_sectors(), vec![0x9f000, 0xfe000]);
+        // Reads and a write without WEL change nothing.
+        transaction(&mut nor, &[3, 1, 0, 0, 255]);
+        transaction(&mut nor, &[0x20, 1, 0, 0]);
+        nor.advance(192_000);
+        assert_eq!(nor.writes(), 2);
+        assert_eq!(nor.tracked_sectors().len(), 2);
+    }
+
+    #[test]
+    fn a_restored_sector_reads_like_an_erased_and_programmed_one() {
+        // Two flashes from the same package: one erased and programmed by
+        // the guest, one restored from its saved bytes; every view agrees.
+        let mut written = Nor::default();
+        written.load(&vec![0x55; 0x94000], 0x980f);
+        transaction(&mut written, &[6]);
+        transaction(&mut written, &[0x20, 9, 0x10, 0]);
+        written.advance(192_000);
+        let mut program = vec![2, 9, 0x10, 0];
+        program.extend((0..256).map(|i| i as u32));
+        transaction(&mut written, &[6]);
+        transaction(&mut written, &program);
+        written.advance(48_000);
+        let mut restored = Nor::default();
+        restored.load(&vec![0x55; 0x94000], 0x980f);
+        restored
+            .restore_sector(0x91000, &written.bytes[0x91000..0x92000])
+            .unwrap();
+        assert_eq!(restored.bytes, written.bytes);
+        assert_eq!(restored.decoded, written.decoded);
+        assert_eq!(restored.tracked_sectors(), vec![0x91000]);
+        assert_eq!(restored.writes(), 0, "a restore is not guest activity");
+        for address in [0x0208d000, 0x0208d0fc, 0x0208dffc] {
+            assert_eq!(
+                restored.xip(address, 4).unwrap().unwrap(),
+                written.xip(address, 4).unwrap().unwrap()
+            );
+        }
+        assert!(restored.restore_sector(0x91001, &[0; 4096]).is_err());
+        assert!(restored.restore_sector(0x91000, &[0; 16]).is_err());
+        assert!(restored.restore_sector(0x100000, &[0; 4096]).is_err());
     }
 
     #[test]

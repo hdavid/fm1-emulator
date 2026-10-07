@@ -9,6 +9,7 @@ mod crc;
 pub mod devices;
 pub mod encoders;
 pub mod firmware;
+pub mod flash_state;
 mod float;
 pub mod gpio;
 pub mod host_thread;
