@@ -838,17 +838,7 @@ impl Cpu {
     }
 
     pub(crate) fn conditional(&mut self, test: bool, counts: u32) -> Step<u32> {
-        fn skip_length(h: u32) -> u32 {
-            // FF00-FF7F are the six-byte compare-branches (vendor objdump), as
-            // the 32-bit moves and the 32-bit call.
-            if matches!(h & 0xffe0, 0xffc0 | 0xffe0) || h == 0xff80 || h & 0xff80 == 0xff00 {
-                6
-            } else if h >> 13 == 7 {
-                4
-            } else {
-                2
-            }
-        }
+        use crate::decode::skip_length;
         let mut cursor = self.pc + 4;
         let mut then_end = cursor;
         let then_count = (counts >> 14) + 1;
