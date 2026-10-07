@@ -138,6 +138,16 @@ fn button_hint(id: usize, label: &str) -> String {
         None => format!("{label} · hold to press"),
     }
 }
+/// A note key's tooltip, ending with its computer key ("Note 53 · hold to
+/// press · A"). The matrix id is fixed; the octave keys shift notes in the
+/// firmware, so the binding never changes.
+fn note_hint(id: usize) -> String {
+    let note = id - 14 + 53;
+    match key_binding(id) {
+        Some(key) => format!("Note {note} · hold to press · {}", key.name()),
+        None => format!("Note {note} · hold to press"),
+    }
+}
 const INK: Color32 = Color32::from_rgb(190, 194, 193);
 const ACCENT: Color32 = Color32::from_rgb(231, 193, 91);
 
@@ -426,7 +436,7 @@ impl Emulator {
             );
         }
         response.on_hover_text(if note {
-            format!("Note {} · hold to press", id - 14 + 53)
+            note_hint(id)
         } else {
             button_hint(id, label)
         });
@@ -956,6 +966,12 @@ mod tests {
             "PLAY / STOP · hold to press · Space"
         );
         assert_eq!(button_hint(9, "SAVE"), "SAVE · hold to press · Z");
+        for id in 14..=26 {
+            let key = key_binding(id).expect("every note key is bound");
+            let hint = note_hint(id);
+            assert!(hint.ends_with(&format!("· {}", key.name())), "{hint}");
+        }
+        assert_eq!(note_hint(14), "Note 53 · hold to press · A");
     }
     #[test]
     fn a_held_button_key_holds_the_button_through_note_taps() {
