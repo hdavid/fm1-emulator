@@ -50,6 +50,14 @@ clicks/keystrokes are held for at least 100 ms of both host and guest time so a
 slow guest scan can observe and debounce them.
 Losing window focus releases contacts. Pause stops guest execution; Restart
 reloads the selected image and resets CPU, RAM, peripherals, and input state.
+The window remembers the MASTER volume, the theme picked in the toolbar, the
+LEDs switch and its size in `fm1-ui.toml` in the emulator's directory
+(`rust-emulator/` for a binary under `target/`; git-ignored), a few
+`key = value` lines written a second after a change settles (a drag or a
+resize is written once) and when the window closes. `--theme` and
+`FM1_THEME` win for that run only; the instruction clock is not remembered. A file that cannot be read, or a line with a bad value, falls
+back to the defaults with a message on stderr; delete it to start over. Tests
+and the headless tools never read or write it.
 
 ### Web editor (USB-MIDI over a local WebSocket)
 
