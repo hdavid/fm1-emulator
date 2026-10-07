@@ -1099,9 +1099,10 @@ mod tests {
         });
     }
     #[test]
-    fn every_button_has_its_own_key_clear_of_the_note_keys() {
-        let keys: Vec<egui::Key> = (0..41).filter_map(key_binding).collect();
+    fn every_button_has_its_own_key_clear_of_note_and_knob_keys() {
+        let mut keys: Vec<egui::Key> = (0..41).filter_map(key_binding).collect();
         assert_eq!(keys.len(), 14 + 13, "all buttons and the first 13 notes");
+        keys.extend(KNOB_KEYS.iter().flat_map(|&(down, up)| [down, up]));
         let mut unique = keys.clone();
         unique.sort_by_key(|key| key.name());
         unique.dedup();
