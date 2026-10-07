@@ -20,9 +20,61 @@ mise run rust-foundation
 
 ## Native device window
 
+### The desktop app
+
+Start `fm1-ui` with no firmware (double-click the app) and the window opens
+with the panel idle and a **Load firmware…** button; the same button is always
+in the toolbar. It opens the system's own file dialog, filtered to `.fwsc`,
+`.elf` and `.bin` (any file can still be picked with "All files"). You can also
+drop a firmware file on the window, or pick one from the **Recent** menu.
+
+Loading a firmware reboots into it, like a power cycle: the CPU, RAM and
+peripherals are rebuilt from the new package. The window title and the toolbar
+show which firmware runs.
+
+The last firmware is remembered (`recent` in `fm1-ui.toml`, up to eight) and
+opened again at the next start unless a firmware is named on the command line
+(that wins) or Recent's "Reopen the last firmware at start" is off.
+
+**macOS app.** `scripts/bundle-macos.sh fm1-ui OUTPUT_DIR` makes `FM-1
+Emulator.app` (bundle id `org.fm1-emulator.ui`, the version from `Cargo.toml`,
+Retina, macOS 11 or later, an ad-hoc signature). CI attaches it, zipped, to the
+macOS artifact. The icon is a generated placeholder
+(`macos/icon-placeholder.png`, made by `macos/make-placeholder-icon.py`); put a
+real 1024x1024 `macos/icon.png` there and the script uses it. The app is not
+signed with an Apple developer identity or notarized, so the first launch needs
+one of: right-click the app and choose Open, or `xattr -dr
+com.apple.quarantine "FM-1 Emulator.app"`.
+
+**Where the app keeps its settings.** Run as an installed app, it keeps
+`fm1-ui.toml` in the operating system's per-user application-data folder
+(outside any repository), because the folder the program sits in can be
+read-only:
+
+| OS | Folder |
+|---|---|
+| macOS | `~/Library/Application Support/FM-1 Emulator/` |
+| Windows | `%APPDATA%\FM-1 Emulator\` |
+| Linux | `$XDG_DATA_HOME/fm1-emulator/` (default `~/.local/share/fm1-emulator/`) |
+
+This "app mode" applies to a macOS `.app` bundle outside `target/`, to any
+launch with no arguments at all (a double-click or a desktop entry on Windows
+and Linux), and to `--app-data`. Everything else keeps the old place beside the
+emulator (the crate directory for a build under `target/`), so `./emulator`
+and `cargo run` behave as before.
+
+**Windows and Linux.** The CI artifacts are the plain executable (`emulator.exe`,
+`emulator`) and open with the same picker when started without arguments. On
+Windows the program is built for the GUI subsystem, so a double-click opens no
+console window; started from a terminal it joins that terminal's console, so
+`--help` and messages print as for a console program. On Linux the dialog is
+the XDG desktop portal's (GNOME, KDE and others provide it; no GTK is needed to
+build).
+
 From the project root:
 
 ```sh
+./emulator                   # no firmware: opens with the Load firmware button
 ./emulator build/display/firmware.elf
 ./emulator "$HOME/Downloads/FM-1.fwsc"
 mise run build-display       # optional: rebuild guest with the vendor compiler

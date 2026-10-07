@@ -1,10 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- scripts/bundle-macos.sh replaces @VERSION@ with the version in Cargo.toml. -->
 <plist version="1.0"><dict>
   <key>CFBundleExecutable</key><string>fm1-ui</string>
-  <key>CFBundleIdentifier</key><string>dev.fm1.emulator</string>
+  <key>CFBundleIdentifier</key><string>org.fm1-emulator.ui</string>
   <key>CFBundleName</key><string>FM-1 Emulator</string>
+  <key>CFBundleDisplayName</key><string>FM-1 Emulator</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleShortVersionString</key><string>@VERSION@</string>
+  <key>CFBundleVersion</key><string>@VERSION@</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

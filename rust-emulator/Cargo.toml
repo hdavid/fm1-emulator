@@ -11,7 +11,7 @@ lto = "thin"
 codegen-units = 1
 
 [features]
-gui = ["dep:eframe"]
+gui = ["dep:eframe", "dep:rfd", "dep:windows-sys"]
 
 [[bin]]
 name = "fm1-ui"
@@ -20,3 +20,10 @@ required-features = ["gui"]
 
 [dependencies]
 eframe = { version = "=0.31.1", optional = true, default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+# The native open-file dialog (MIT). Its default features use the XDG desktop
+# portal on Linux (no GTK needed) and the system dialogs on macOS and Windows.
+rfd = { version = "0.17", optional = true }
+
+# Re-attaching the parent console for the GUI binary on Windows (src/ui_console.rs).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", optional = true, features = ["Win32_Foundation", "Win32_System_Console"] }
