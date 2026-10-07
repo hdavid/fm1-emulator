@@ -2,6 +2,7 @@
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Rect, Sense, Stroke, StrokeKind};
 #[cfg(test)]
 use fm1_emu::{bus::Bus, cpu::Cpu, firmware::Firmware};
+mod ui_settings;
 mod worker;
 use std::{
     path::PathBuf,
@@ -46,6 +47,10 @@ struct Emulator {
     pressed: [bool; 41],
     pulse: [Instant; 41],
     pulse_steps: [u64; 41],
+    /// The window's settings kept between runs (None in tests).
+    settings: Option<ui_settings::Saver>,
+    /// The window's inner size (points) as of the last frame.
+    window_size: Option<[u32; 2]>,
 }
 impl Emulator {
     fn new(path: PathBuf) -> Self {
@@ -61,9 +66,29 @@ impl Emulator {
             pressed: [false; 41],
             pulse: [Instant::now(); 41],
             pulse_steps: [0; 41],
+            settings: None,
+            window_size: None,
         };
         app.reset();
         app
+    }
+    /// Save the settings once they have settled (no-op without a saver).
+    fn keep_settings(&mut self, ctx: &egui::Context) {
+        let Some(saver) = self.settings.as_mut() else {
+            return;
+        };
+        let window = ctx.input(|i| {
+            i.viewport()
+                .inner_rect
+                .map(|rect| [rect.width().round() as u32, rect.height().round() as u32])
+        });
+        self.window_size = window.or(self.window_size);
+        let current = ui_settings::Settings {
+            window: self.window_size,
+        };
+        if let Some(Err(error)) = saver.update(&current, Instant::now()) {
+            eprintln!("window settings not saved: {error}");
+        }
     }
     fn reset(&mut self) {
         self.pressed.fill(false);
@@ -380,6 +405,14 @@ impl Canvas {
 }
 
 impl eframe::App for Emulator {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let current = ui_settings::Settings {
+            window: self.window_size,
+        };
+        if let Some(Err(error)) = self.settings.as_mut().map(|saver| saver.flush(&current)) {
+            eprintln!("window settings not saved: {error}");
+        }
+    }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("toolbar")
             .frame(
@@ -447,6 +480,7 @@ impl eframe::App for Emulator {
             )
             .show(ctx, |ui| self.panel(ui));
         self.worker.input(self.pressed);
+        self.keep_settings(ctx);
         ctx.request_repaint_after(Duration::from_millis(16));
     }
 }
@@ -460,9 +494,15 @@ fn main() -> eframe::Result {
         eprintln!("expected one firmware path");
         std::process::exit(2);
     }
+    let settings_path = ui_settings::default_path();
+    let (settings, problems) = ui_settings::load(&settings_path, ui_settings::Settings::default());
+    for problem in problems {
+        eprintln!("window settings: {problem}");
+    }
+    let [width, height] = settings.window.unwrap_or([1180, 830]);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1180., 830.])
+            .with_inner_size([width as f32, height as f32])
             .with_min_inner_size([800., 600.]),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
@@ -472,7 +512,9 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            let app = Emulator::new(PathBuf::from(path));
+            let mut app = Emulator::new(PathBuf::from(path));
+            app.window_size = settings.window;
+            app.settings = Some(ui_settings::Saver::new(settings_path, settings));
             app.worker.read_stdin();
             Ok(Box::new(app))
         }),
