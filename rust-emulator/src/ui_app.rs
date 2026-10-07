@@ -213,7 +213,10 @@ mod tests {
     fn app_mode_files_sit_in_the_data_folder() {
         let places = places_in(Path::new("/data/fm1"));
         assert_eq!(places.settings, Path::new("/data/fm1/fm1-ui.toml"));
-        assert!(places.state.to_string_lossy().ends_with('/'));
+        assert!(places
+            .state
+            .to_string_lossy()
+            .ends_with(std::path::is_separator));
         assert_eq!(places.state, Path::new("/data/fm1/state"));
         // A folder given with its trailing separator is how --state names one
         // that does not exist yet.
