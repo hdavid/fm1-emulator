@@ -48,6 +48,23 @@ contact columns three times, so the pace follows the firmware's own scan rate.
 MASTER is the ADC potentiometer (drag, scroll, or `N M`). Short
 clicks/keystrokes are held for at least 100 ms of both host and guest time so a
 slow guest scan can observe and debounce them.
+
+Every button also has a computer key, held for as long as the key is down, so
+layer chords (SAVE + note, the "press again" confirmations) need no mouse;
+each button's tooltip names its key. The first thirteen notes are
+`A W S E D R F G T H Y J K` (a piano row); the buttons use letters those leave
+free:
+
+| Button | Key | Button | Key | Button | Key |
+|---|---|---|---|---|---|
+| OCT− | `←` | FX | `X` | HOME | `U` |
+| OCT+ | `→` | SEL | `B` | SAVE | `Z` |
+| PLAY / STOP | `Space` | ENV | `V` | ARP | `P` |
+| REC | `C` | LFO | `L` | SEQ | `Q` |
+| | | EDIT | `I` | GLO | `O` |
+
+Modifier keys are not used: egui reports Shift/Ctrl/Alt/Cmd as state rather
+than as keys and does not tell left from right.
 Losing window focus releases contacts. Pause stops guest execution; Restart
 reloads the selected image and resets CPU, RAM, peripherals, and input state.
 The window remembers the MASTER volume, the theme picked in the toolbar, the
