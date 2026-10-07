@@ -4,6 +4,7 @@ use fm1_emu::encoders::knob;
 #[cfg(test)]
 use fm1_emu::{bus::Bus, cpu::Cpu, firmware::Firmware};
 mod host_audio;
+mod ui_leds;
 mod worker;
 use std::{
     path::PathBuf,
@@ -124,6 +125,8 @@ struct Emulator {
     /// Guest audio against real time, sampled about once a second.
     speed: Option<f64>,
     speed_mark: (Instant, u64),
+    /// The panel LEDs as the guest lights them.
+    leds: ui_leds::LedView,
 }
 impl Emulator {
     fn new(path: PathBuf) -> Self {
@@ -148,6 +151,7 @@ impl Emulator {
             audio_error: None,
             speed: None,
             speed_mark: (Instant::now(), 0),
+            leds: ui_leds::LedView::new(),
         };
         app.knob_angle[0] = master_angle(app.master);
         app.reset();
@@ -159,6 +163,7 @@ impl Emulator {
         self.pulse_steps.fill(0);
         self.paused = false;
         self.texture = None;
+        self.leds.reset();
         self.generation += 1;
         self.loaded = false;
         self.steps = 0;
@@ -187,6 +192,9 @@ impl Emulator {
             self.speed_mark = (Instant::now(), snapshot.frames);
         }
         self.fault = snapshot.fault;
+        if let Some(leds) = snapshot.leds {
+            self.leds.receive(leds);
+        }
         let Some(pixels) = snapshot.pixels else {
             return;
         };
@@ -255,6 +263,8 @@ impl Emulator {
             radius,
             Color32::BLACK,
         );
+        self.leds
+            .halo(&canvas.painter, rect, radius, id, canvas.scale);
         canvas.painter.rect(
             rect,
             radius,
@@ -262,6 +272,7 @@ impl Emulator {
             Stroke::new(canvas.scale, Color32::from_gray(86)),
             StrokeKind::Inside,
         );
+        self.leds.tint(&canvas.painter, rect, radius, id);
         let inset = rect.shrink(4. * canvas.scale);
         canvas.painter.rect_stroke(
             inset,
@@ -278,7 +289,7 @@ impl Emulator {
             canvas.painter.rect_filled(
                 Rect::from_center_size(pos2(rect.center().x, y), vec2(6., 31.) * canvas.scale),
                 3.,
-                if pressed { ACCENT } else { INK },
+                self.leds.ink(id, if pressed { ACCENT } else { INK }),
             );
             if !label.is_empty() {
                 canvas.painter.text(
@@ -286,7 +297,7 @@ impl Emulator {
                     Align2::CENTER_CENTER,
                     label,
                     FontId::proportional(11. * canvas.scale),
-                    INK,
+                    self.leds.ink(id, INK),
                 );
             }
         } else {
@@ -295,7 +306,7 @@ impl Emulator {
                 Align2::CENTER_CENTER,
                 label,
                 FontId::proportional(12. * canvas.scale),
-                if pressed { ACCENT } else { INK },
+                self.leds.ink(id, if pressed { ACCENT } else { INK }),
             );
         }
         response.on_hover_text(if note {
@@ -576,6 +587,7 @@ impl eframe::App for Emulator {
                         if self.clock_mhz != before {
                             self.worker.clock(self.clock_mhz.map(|mhz| mhz * 1_000_000));
                         }
+                        self.leds.toggle(ui);
                         if ui
                             .add_enabled(
                                 self.loaded && self.fault.is_none(),

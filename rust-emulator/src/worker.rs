@@ -18,6 +18,8 @@ pub(super) struct Snapshot {
     pub frames: u64,
     pub fault: Option<String>,
     pub pixels: Option<Vec<u32>>,
+    /// Panel LED brightness per key id over the last stretch of guest time.
+    pub leds: Option<[f32; fm1_emu::leds::KEYS]>,
 }
 
 enum Command {
@@ -178,7 +180,14 @@ impl Machine {
             frames: self.cpu.as_ref().map_or(0, |cpu| cpu.bus.audio.frames),
             fault: self.fault.clone(),
             pixels: None,
+            leds: None,
         };
+        if let Some(cpu) = &mut self.cpu {
+            let leds = &mut cpu.bus.devices.gpio.leds;
+            if leds.window() >= super::ui_leds::WINDOW_TICKS {
+                snapshot.leds = Some(fm1_emu::leds::by_key(&leds.take()));
+            }
+        }
         if let Some(cpu) = &self.cpu {
             let visible = cpu.bus.screen_visible();
             let lcd = (cpu.bus.lcd.pixels_written, visible);
@@ -192,6 +201,15 @@ impl Machine {
             }
         }
         let mut pending = mailbox.lock().unwrap();
+        // A status-only update must not drop an unconsumed LED sample.
+        if snapshot.leds.is_none() {
+            if let Some(previous) = pending
+                .as_ref()
+                .filter(|p| p.generation == snapshot.generation)
+            {
+                snapshot.leds = previous.leds;
+            }
+        }
         // A status-only update must not overwrite an unconsumed LCD frame.
         if snapshot.pixels.is_none() {
             if let Some(previous) = pending
