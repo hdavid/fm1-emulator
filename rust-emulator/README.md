@@ -105,8 +105,18 @@ sound still breaks up until the interpreter is faster.
 The drawn panel comes in the emulator's original Classic colours (the
 default) and in colours sampled from the FM-1's editions: Black, Lilac,
 Orange, Mint, Cream and Blue. Pick one in the toolbar, or at start with
-`--theme NAME` or `FM1_THEME=NAME` (the option wins); the choice is not
-saved between runs.
+`--theme NAME` or `FM1_THEME=NAME` (the option wins, for that run only).
+
+### Window settings kept between runs
+
+`fm1-ui` remembers the MASTER volume, the panel theme picked in the toolbar,
+the LEDs switch and the window size in `fm1-ui.toml`, a few `key = value`
+lines beside the flash state (`state/`, or the `--state` folder). It is
+written a second after a change settles and when the window closes; a file
+that cannot be read, or a line with a bad value, falls back to the defaults
+with a message on stderr. Delete the file to start from the defaults. The
+instruction clock is not remembered (it changes what the guest computes), and
+headless tools never read or write the file.
 
 ### Flash kept between runs
 

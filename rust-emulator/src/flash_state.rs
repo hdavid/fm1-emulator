@@ -210,7 +210,7 @@ impl Store {
 
 /// Write `bytes` to a temporary file beside `path`, then rename it over
 /// `path`: a reader sees the old file or the new one, never a part.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(format!(".tmp{}", std::process::id()));
     let temporary = PathBuf::from(temporary);
