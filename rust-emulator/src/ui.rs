@@ -132,6 +132,8 @@ const KNOB_KEYS: [(egui::Key, egui::Key); 8] = [
 const DETENT_PX: f32 = 12.;
 /// Encoder clicks per turn as drawn (the pointer moves 15 degrees a click).
 const DETENT_ANGLE: f32 = std::f32::consts::TAU / 24.;
+/// Rounding slack when a drag's summed angle is turned into whole encoder clicks.
+const DETENT_EPS: f32 = 1e-3;
 /// Instruction clock choices: None follows the firmware's system clock (the
 /// accurate default); a lower rate gives the guest fewer instructions per
 /// second of guest time, so a light firmware can play in real time.
@@ -536,7 +538,10 @@ impl Emulator {
             }
             Some(e) => {
                 self.knob_accum[index] += amount;
-                let detents = (self.knob_accum[index] / DETENT_PX).trunc();
+                // A drag sums many small angle steps: six detents can add up to 5.9999999 and
+                // must still click six times on every platform's float rounding.
+                let steps = self.knob_accum[index] / DETENT_PX;
+                let detents = (steps + DETENT_EPS.copysign(steps)).trunc();
                 if detents != 0. {
                     self.knob_accum[index] -= detents * DETENT_PX;
                     self.worker.turn(e, detents as i32);
@@ -1247,6 +1252,24 @@ mod tests {
             steps
         );
     }
+    #[test]
+    fn a_drag_summing_just_under_whole_detents_still_clicks_them() {
+        // Six detents' worth of small steps can sum to 5.9999999 detents in f32 (it did on
+        // Linux and Windows CI): they must give six clicks, not five.
+        let mut app = demo();
+        app.paused = true;
+        let step = 6. * DETENT_PX / 18.;
+        for _ in 0..18 {
+            app.turn_knob(4, Some(0), step * (1. - 1e-6));
+        }
+        assert!(
+            (app.knob_angle[4] - 6. * DETENT_ANGLE).abs() < 1e-4,
+            "{}",
+            app.knob_angle[4]
+        );
+        assert!(app.knob_accum[4].abs() < 1e-3, "{}", app.knob_accum[4]);
+    }
+
     #[test]
     fn circling_a_knob_clicks_its_encoder_and_master_stops_at_its_ends() {
         let mut app = demo();
