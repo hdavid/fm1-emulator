@@ -246,6 +246,12 @@ pub(crate) fn execute(
             next = pc + 4;
             match cpu.decoded_wide(h, x) {
                 Wide::FloatRegister => {
+                    // A zero divisor of either sign raises the divide-by-zero
+                    // exception when armed: X0X ea3c665 crashed on a float
+                    // divide on a physical FM-1 with EMU_CON bit 2 set.
+                    if x & 15 == 3 && f32::from_bits(cpu.r[c]) == 0.0 && cpu.divide_by_zero(pc)? {
+                        return Ok(Some((pc + 4, "float_register")));
+                    }
                     let value =
                         crate::float::result(x, &cpu.r).map_err(|reason| Fault::Access {
                             pc,
@@ -480,6 +486,9 @@ pub(crate) fn execute(
                     };
                 }
                 Wide::DivideWide => {
+                    if cpu.r[c] == 0 && cpu.divide_by_zero(pc)? {
+                        return Ok(Some((pc + 4, "divide_wide")));
+                    }
                     let dividend = cpu.r[s] as u64 | ((cpu.r[s + 1] as u64) << 32);
                     let d = d & 14;
                     let quotient = if x & 0x1000 == 0 {
@@ -520,6 +529,9 @@ pub(crate) fn execute(
                     op = "shift_wide_immediate";
                 }
                 Wide::Divide => {
+                    if cpu.r[c] == 0 && cpu.divide_by_zero(pc)? {
+                        return Ok(Some((pc + 4, "divide")));
+                    }
                     cpu.r[d] = if x & 1 == 0 {
                         cpu.r[s].checked_div(cpu.r[c])
                     } else {
