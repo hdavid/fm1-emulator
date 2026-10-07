@@ -71,6 +71,12 @@ clocks), so light firmware can play in real time. On an Apple-silicon Mac,
 Felucca, Jangada and SLOOP run at about 80% of real time at 24 MHz, so the
 sound still breaks up until the interpreter is faster.
 
+The drawn panel comes in the emulator's original Classic colours (the
+default) and in colours sampled from the FM-1's editions: Black, Lilac,
+Orange, Mint, Cream and Blue. Pick one in the toolbar, or at start with
+`--theme NAME` or `FM1_THEME=NAME` (the option wins); the choice is not
+saved between runs.
+
 Instruction dispatch uses a shared first-word decode table and a bounded cache
 of wide instruction words. A bounded basic-block cache also prepares common
 register, arithmetic, shift, memory and short branch operations, including their
