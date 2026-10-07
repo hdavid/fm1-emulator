@@ -10,6 +10,10 @@ default-run = "fm1-emu"
 lto = "thin"
 codegen-units = 1
 
+[lints.rust]
+# examples/speed.rs is built with --cfg fm1_fork against this fork and without it against upstream.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fm1_fork)'] }
+
 [features]
 gui = ["dep:eframe", "dep:cpal", "dep:ctrlc", "dep:rfd", "dep:windows-sys", "web"]
 # The web editor bridge: a loopback HTTP/WebSocket server (src/web).

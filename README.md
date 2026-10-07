@@ -57,6 +57,8 @@ Each line was checked against the code and `git log upstream/main..feat/upstream
 
 ### Speed
 
+**2.7x to 5.7x faster than upstream** on the firmware upstream can run (official firmware idle 0.047 to 0.27 times real time, Felucca 0.9 idle 0.081 to 0.234; Apple M4 Max, 2026-10-07), and upstream cannot run Felucca 1.0, Melodee, X0X, SLOOP or Optimist at all. Side-by-side table, method and what is still slower than real time: [PERFORMANCE.md](rust-emulator/PERFORMANCE.md).
+
 - Event-scheduled device time and idle skip (a halted core jumps to the next device event).
 - A leaner interpreter loop: boxed faults off the hot path, interrupt check
   skipped while nothing is pending, inlined guest memory accesses, a short
@@ -189,10 +191,10 @@ Done on this branch (were open in upstream's list):
 
 Open:
 
-- [ ] **Real time on a busy song.** Measured by the maintainer on an Apple-silicon
-  Mac, a busy song at 0.6-0.98x real time at host load about 6, so the
-  sound can still break up (S1, S3). Light firmware at 24-96 MHz is faster:
-  see the tables in PERFORMANCE.md.
+- [ ] **Real time on a busy song.** Measured 2026-10-07 on an M4 Max at host
+  load about 10: the busy-song scenario runs at 0.96x real time at 96 MHz and
+  0.75x at Optimist's own 360 MHz clock, so the sound can still break up (S1,
+  S3). Details in PERFORMANCE.md.
 - [ ] **Block cache and JIT are experimental and off by default**
   (`FM1_BLOCK_CACHE=1` in `bench`): each native entry still runs one guest
   instruction, and measured throughput is the same or lower. Next step is batching
