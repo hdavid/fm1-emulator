@@ -4,7 +4,7 @@ The unchanged official `FM-1_015` package boots in the emulator, loads its
 factory **PIANO 1** preset and responds to FX, HOME and note presses. A note
 produces nonzero stereo samples through the firmware's own audio DMA path.
 Compatibility remains **Partial**: this verifies basic operation, not every
-preset, menu, effect or update path. Host audio playback is not implemented.
+preset, menu, effect or update path. (This text predates the window's host audio output; see the README.)
 
 Baud Girl `FM-1_093` also reaches its LCD interface and responds to FX/HOME.
 Its separate factory preset payload fails plaintext integrity validation and is

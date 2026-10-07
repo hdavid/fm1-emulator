@@ -14,7 +14,7 @@ without a guest fault, send the console banner through USB CDC, update the LCD,
 render audio DMA halves and service the watchdog. An additional local ELF test
 presses/releases a note and selects ENV: after 112 million instructions it has
 126 UI frames, 589 guest-rendered audio halves and 127 watchdog feeds. The note
-produces nonzero stereo DMA samples. Host speaker playback is not implemented.
+produces nonzero stereo DMA samples. (This text predates the window's host audio output; see the README.)
 
 This is bounded boot/input validation, not full synth compatibility. Other
 engines and UI paths may encounter more instruction gaps. Flash persistence,

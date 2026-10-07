@@ -115,14 +115,51 @@ worker paces execution by the playback queue, about 70 ms ahead: real time
 when the host keeps up. The instruction clock defaults to the firmware's
 system clock; `--cpu-mhz N` or the toolbar selector issues one instruction per
 N MHz of guest time instead (timers, DMA, USB and the watchdog keep their own
-clocks), so light firmware can play in real time. On an Apple-silicon Mac,
-Felucca, Jangada and SLOOP run at about 80% of real time at 24 MHz, so the
-sound still breaks up until the interpreter is faster.
+clocks), so light firmware can play in real time. The interpreter is not yet fast
+enough for every firmware at its own clock: see [PERFORMANCE.md](PERFORMANCE.md)
+for measured guest-seconds per host-second, and the audio breaks up where that
+is below 1.
 
 The drawn panel comes in the emulator's original Classic colours (the
 default) and in colours sampled from the FM-1's editions: Black, Lilac,
 Orange, Mint, Cream and Blue. Pick one in the toolbar, or at start with
 `--theme NAME` or `FM1_THEME=NAME` (the option wins, for that run only).
+
+### Command line and environment
+
+```sh
+fm1-ui [--cpu-mhz N | --cpu-mhz=N] [--ui DIR] [--theme NAME] [--state PATH] [--fresh] FIRMWARE
+```
+
+`./emulator` (the launcher) forwards only `--cpu-mhz` and `--ui`; run
+`rust-emulator/target/release/fm1-ui` directly for the others.
+
+| Option | Meaning |
+|---|---|
+| `--cpu-mhz N` | One instruction per N MHz of guest time (1..1000); default is the firmware's own system clock. The toolbar also offers 192 and 312 MHz and "Firmware clock". Not remembered between runs. |
+| `--ui DIR` | A folder with the firmware's web editor (`index.html` or `editor.html`); see Web editor above |
+| `--theme NAME` | Panel colours: Classic, Black, Lilac, Orange, Mint, Cream, Blue (this run only; also `FM1_THEME`) |
+| `--state PATH` | Flash state file, or a folder when PATH is one or ends in `/` |
+| `--fresh` | Start from the package alone and replace the state |
+
+Environment variables (those the code reads; the headless tools take their own,
+listed with them below):
+
+| Variable | Read by | Effect |
+|---|---|---|
+| `FM1_THEME` | fm1-ui | Panel theme; `--theme` wins |
+| `FM1_NESTED_IRQ=1` | fm1-ui, tools | Let interrupts nest by priority (off by default; USB audio builds) |
+| `FM1_CPU_MHZ=N` | tools | Instruction clock (a multiple of 24); default is the firmware's |
+| `FM1_IDLE_SKIP=0` | tools | Step halted idle slots one by one instead of skipping to the next device event |
+| `FM1_SPIN_SKIP=0` | tools | Step every instruction of a core busy-waiting on a device |
+| `FM1_BLOCK_CACHE=1` | bench | Execute through the experimental block cache and JIT (off by default) |
+| `FM1_QOS=default` | bench | Do not raise the thread to the GUI worker's scheduling class |
+| `FM1_SCENARIO=FILE` | bench | Play panel steps from FILE first (`examples/scenarios/busy.steps`) |
+| `FM1_HOT=N`, `FM1_HOT_DUMP=FILE`, `FM1_ELF` | play_check | Instruction profile, see Scripted playback |
+| `PLAY_TRACE=N` | play_check | Instructions to print after a guest fault (default 40) |
+
+`diagnose` has further debugging variables (`FM1_WATCHDOG_OFF`, `FM1_MEMWATCH`,
+`FM1_MMIO`, `FM1_PNG`, ...); read its source header for them.
 
 ### Window settings kept between runs
 
@@ -170,7 +207,7 @@ changes a knob, waits past the autosave, restarts from the state and compares
 the screens.
 
 Instruction dispatch uses a shared first-word decode table and a bounded cache
-of wide instruction words. A bounded basic-block cache also prepares common
+of wide instruction words. A bounded basic-block cache (off by default, `FM1_BLOCK_CACHE=1` in `bench`) can also prepare common
 register, arithmetic, shift, memory and short branch operations, including their
 operands. Each core retains its own position in the block. Current instruction
 words are still checked through the bus, so SRAM changes, flash remapping and
@@ -219,8 +256,9 @@ a note from a host note-on and answer their editors' INFO SysEx this way.
 The hardware firmware retains both its serial console and MIDI updater.
 
 P33 accesses model watchdog arming/feeding and stop with an expiry fault if
-feeding ceases. NOR supports JEDEC/status/read transactions used at startup;
-erase/program and persistent flash images are not implemented. CPU write guards
+feeding ceases. NOR supports the JEDEC/status/read transactions used at startup, write enable,
+sector/block erase and page program; the sectors a firmware writes are kept
+between runs (see above). CPU write guards
 reject protected RAM writes; full guard exception dispatch and stack/PC limit
 hardware remain incomplete. Reset requests stop rather than emulate ROM boot.
 Full Felucca boots into its UI and renders note samples through ALNK DMA.
@@ -291,11 +329,12 @@ This ELF/raw application is for emulator tests. It has no updater or recovery
 and must not be installed on the FM-1. It is a historical unit-test fixture;
 use the shared hardware display build for device comparisons.
 
-Timers use a deterministic virtual clock of one 24 MHz oscillator tick per guest
-instruction bundle, not measured CPU cycle timing. TIMER4 supports
+Timers use a deterministic virtual clock: the instruction clock (the firmware's
+system clock by default, see [CLOCK.md](CLOCK.md)) issues one instruction per
+cycle, not measured CPU cycle timing. The foundation firmware's TIMER4 supports
 OSC /1 and TIMER5 supports OSC /4; other clock modes fail explicitly. Interrupt
-delivery currently covers non-nested TIMER5/IRQ63 with global and per-source
-masking. SPL initial state and the interrupt stack handoff are functional
+delivery covers TIMER5/IRQ63 and the other sources the firmwares use, with global and
+per-source masking; nesting by priority is optional (`FM1_NESTED_IRQ=1`) and off by default. SPL initial state and the interrupt stack handoff are functional
 approximations that still need independent physical validation.
 
 The hardware display image runs from its application entry without host
@@ -349,9 +388,9 @@ not a percentage of complete instruction-set or musical-feature coverage.
 | Timers | Guest sees TIMER4 progress; TIMER5 produces a periodic event | Other sources/dividers and measured cycle timing |
 | Interrupts | IRQ63/ALNK11 vectors, masking, SSP handler frame, acknowledgment, `rti`, priority selection | Nested priorities, other IRQs, physical entry-state validation |
 | Controls | Guest scans eleven columns; released/pressed and multiple-key cases agree; UI encoders and MASTER reach the guest | Scheduled events |
-| Flash | Startup JEDEC/status/NOR reads; plain XIP shares physical NOR storage | Erase/program, persistence, XIP busy behavior |
+| Flash | Startup JEDEC/status/NOR reads; plain XIP shares physical NOR storage | XIP busy behavior (erase, program and persistence between runs are done) |
 | LCD | Display guest initializes SPI/DMA, draws RGB565 pixels and live timer/key data | Other controller modes, SPI timing, pixel-exact physical comparison |
-| USB serial | Hardware guest enumerates and sends CDC debug bytes through DMA | Host OUT packets, broader controller/USB behavior |
+| USB serial | Hardware guest enumerates and sends CDC debug bytes through DMA | Broader controller/USB behavior (console input from the terminal reaches the guest; the high-speed controller is not modelled) |
 | USB MIDI | Host note-on renders audio; an editor SysEx request gets its reply (Felucca family) | Timing of host USB frames |
 | Audio/DMA | Unchanged Felucca renders stereo SRAM, alternates ALNK halves, services audio IRQs; note samples are nonzero; the window plays them | Other clocks/formats, codec analog behavior, cycle timing |
 
@@ -359,8 +398,9 @@ Original foundation evidence: seventeen Rust integration tests passed; a native 
 2,371 instructions, services one guest interrupt, and reaches `foundation_done`.
 The guest's last result is `0x0050F00D`. See `build/foundation/verification.txt`.
 
-Current suite: 65 ordinary Rust tests and an opt-in full Felucca test pass.
-See `build/display/verification.txt` for the display milestone and limitations.
+Run the suite with `mise run rust-gui-test`; tests that need firmware are
+`#[ignore]`d and read their package from an environment variable (for example
+`FELUCCA_FWSC`, `FM1_STOCK_FWSC`, `MIDI_FWSC`, `USB_AUDIO_ELF`). See `build/display/verification.txt` for the display milestone and limitations.
 
 ## Scripted playback and profiling
 
@@ -373,12 +413,39 @@ cargo run --release --example play_check -- FIRMWARE.fwsc \
   run:4 hold:18,20,22 level:1 release turn:PRESETS:2 run:1 png:after.png
 ```
 
-Steps: `run:SECONDS` of guest time, `hold:ID,ID` and `release` for matrix
-keys (notes are 14..40), `turn:KNOB:DETENTS`, `level:SECONDS` (RMS and peak
-of the guest output), `wav:SECONDS:PATH` (the exact 24-bit samples),
-`png:PATH`, `words:ADDRESS:N` and `halves:ADDRESS:N`. A guest fault prints
-the last instructions with their registers (`PLAY_TRACE=N`). `FM1_CPU_MHZ=N`
-sets the instruction clock.
+Steps:
+
+| Step | Does |
+|---|---|
+| `run:SECONDS` | Run that much guest time |
+| `hold:ID,ID` | Press matrix keys (added to those held; notes are 14..40) |
+| `release` | Let go of every held key |
+| `release:ID,ID` | Let go of those keys only (an error if one is not held) |
+| `turn:KNOB:DETENTS` | Turn SELECT, ALGORITHM, PRESETS or KNOB1..KNOB4 |
+| `click:KNOB:N` | N settled detents, as a GUI click |
+| `master:VALUE` | Set the MASTER potentiometer, 0..1023 as the ADC reads it |
+| `align` | Wait for the next audio DMA half, so a following hold or release lands in one audio block |
+| `level:SECONDS` | Run and print the RMS and peak of the guest output |
+| `wav:SECONDS:PATH` | Record the exact 24-bit samples |
+| `png:PATH` | Save the LCD |
+| `leds:SECONDS` | Run and print each panel LED's brightness (1 = lit whenever its column is scanned) |
+| `words:ADDRESS:N`, `halves:ADDRESS:N` | Read N words; non-zero words per DMA half |
+| `cores` | Instructions run per core |
+| `hot:on`, `hot:off`, `hot:print`, `peek:SYMBOL:WORDS` | Profile part of a session; read guest variables (below) |
+
+A guest fault prints the last instructions with their registers
+(`PLAY_TRACE=N`). `FM1_CPU_MHZ=N` sets the instruction clock;
+`FM1_NESTED_IRQ=1` and `FM1_IDLE_SKIP=0` as in the table above.
+`play_check [--state PATH [--fresh]] FIRMWARE STEP...` opts in to a flash state.
+
+Other examples, all headless (`cargo run --release --example NAME -- ...`; each
+has its usage in the header of its source file): `knob_check FIRMWARE KNOB
+DETENTS OUT_PREFIX` (does a turned encoder change the screen?), `diagnose`
+(bounded boot report), `latency FWSC MODE` (input-to-audio time for a key,
+USB-MIDI or TRS MIDI note, and MIDI-clock scenarios), `extract` (a package's
+decoded application image), and `bench FIRMWARE LIMIT [batch|hash|gui]`
+(instructions per second, with hashes of state, SRAM, audio and LCD so two
+builds can be compared; see [PERFORMANCE.md](PERFORMANCE.md)).
 
 `FM1_HOT=N` counts every primary-core instruction by PC and reports the top
 N functions, using the sized `STT_FUNC` symbols of `FM1_ELF` (or an `.elf`

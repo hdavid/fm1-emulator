@@ -14,10 +14,11 @@ source, **[I]** inference.
 - The SDK's `sys_clock_table` lists up to 320 MHz, plus a 396 MHz
   "overclocking" entry. Our older notes said "≤320 MHz" from that table. That
   was a guess about the configuration, not a measurement.
-- This fork's emulator does not derive the CPU clock from these registers: its
-  instruction clock is `FM1_CPU_MHZ` / `--cpu MHz` (a multiple of 24 MHz,
-  default 24). The baselines are measured at 24 MHz. Upstream derives it from
-  the registers, which gives 360 MHz by default.
+- On this branch the instruction clock defaults to the firmware's own system
+  clock, derived from these registers as upstream does (360 MHz at the
+  handoff). It can be overridden with `FM1_CPU_MHZ` in the tools and
+  `--cpu-mhz N` in `fm1-ui` (a multiple of 24 MHz). The older fork baselines
+  were measured at a fixed 24 MHz, which is why they differ from default runs.
 
 ## The registers and how they decode
 

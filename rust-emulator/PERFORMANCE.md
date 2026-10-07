@@ -1,6 +1,7 @@
 # Emulator performance TODOs
 
-Implementation is paused here while other work takes priority. Resume with
+Native block batching (below) is paused while other work takes priority; the
+interpreter itself has been sped up since (see "Since then"). Resume with
 native block batching, then use measurements to choose further JIT work.
 
 ## Current checkpoint
@@ -34,6 +35,35 @@ at `FM1_CPU_MHZ=96`, median of three runs, guest seconds per host second:
 
 `bench ... batch` and `bench ... hash` print the same state, SRAM, audio and
 LCD hashes either way.
+
+## Since then: the fork's interpreter and scheduling work
+
+Commits on this branch (see `git log`): event-scheduled devices and idle skip,
+boxed faults (`bffa4f5`), interrupt check skipped while nothing is pending
+(`c0fdbbd`), inlined guest memory accesses (`449319c`), a short per-instruction
+call chain (`ceba3fe`), branch-free bundle merge (`fb54dfa`), spin-loop skip
+(`6a6d075`), the GUI worker at the main thread's scheduling class (`0f356ba`).
+
+`bench FIRMWARE 200000000 batch` at `FM1_CPU_MHZ=96`, guest seconds per host
+second, block cache off. Copied from the maintainer's notes of 2026-10-06
+(their upstream-PR notes, section 10), measured on an
+Apple-silicon Mac under load; not re-run for this documentation pass:
+
+| Firmware | At the block-cache-off commit (`014a4a8`) | After `ceba3fe` |
+| --- | ---: | ---: |
+| Felucca 0.9-beta | 0.500 | 0.83 |
+| SLOOP drum kit build | 1.236 | 2.08 |
+| Official firmware | 0.200 | 0.273 |
+
+Stock firmware 0.27 -> 0.35 after the spin-loop skip. A busy song
+(`examples/scenarios/busy.steps` drives three synth tracks, drums and FX) on a
+Mac at host load about 6 was reported at 0.6-0.98x of real time, so such songs
+still do not play in real time; this is the maintainer's measurement, recorded
+here without a re-run.
+
+Not yet measured: the GUI's audio path (cpal queue, 70 ms pacing, texture
+uploads). `bench ... gui` covers the worker loop (run_steps batches, audio
+drain, LCD copy) without the window or the sound device.
 
 ## Next steps, in order
 
