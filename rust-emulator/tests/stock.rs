@@ -77,7 +77,17 @@ fn official_package_lights_the_button_of_its_page() {
     advance(&mut cpu, 400_000_000);
     let home = by_key(&cpu.bus.devices.gpio.leds.take());
     assert!(home[8] > 0.1, "HOME {}", home[8]);
-    assert!(home[2] == 0., "FX {}", home[2]);
+    // The stock firmware does not leave an idle button dark: it keeps every
+    // button LED but the lit one at a dim level (measured: about 0.2 of the
+    // column time, the same for all of them), so FX is dim, not off.
+    let idle = [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13];
+    for key in idle {
+        assert!(
+            (0.1..0.3).contains(&home[key]),
+            "idle button {key} should sit at the dim level, got {}",
+            home[key]
+        );
+    }
     button(&mut cpu, 6, 1); // FX: its page, its button lit.
     cpu.bus.devices.gpio.leds.take();
     advance(&mut cpu, 100_000_000);
